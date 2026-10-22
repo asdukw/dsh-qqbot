@@ -1,0 +1,286 @@
+"""OneBot 11 WebSocket client for NapCat."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
+from urllib.parse import quote
+
+import websockets
+
+log = logging.getLogger(__name__)
+
+
+class OneBotError(RuntimeError):
+    pass
+
+
+@dataclass
+class OneBotConfig:
+    url: str = "ws://127.0.0.1:3001"
+    token: str = ""
+    self_id: int = 0
+
+
+@dataclass
+class MessageEvent:
+    message_type: str
+    user_id: int
+    message_id: int
+    text: str
+    at_me: bool
+    sender_name: str
+    group_id: int | None = None
+
+
+class OneBotClient:
+    def __init__(
+        self,
+        config: OneBotConfig,
+        on_message: Callable[[MessageEvent], Awaitable[None]],
+    ):
+        self.config = config
+        self.on_message = on_message
+        self._ws: Any = None
+        self._pending: dict[str, asyncio.Future] = {}
+        self._echo = 0
+        self._closed = False
+        self._seen: deque[int] = deque(maxlen=256)
+        self._seen_set: set[int] = set()
+        self._connected = asyncio.Event()
+
+    # ---------------------------------------------------------------- connection
+
+    async def run(self) -> None:
+        backoff = 1.0
+        while not self._closed:
+            try:
+                await self._connect_and_pump()
+                backoff = 1.0
+                if not self._closed:
+                    await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - reconnect on any transport error
+                if self._closed:
+                    break
+                log.warning("OneBot connection lost: %s; reconnecting in %.0fs", exc, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+
+    async def _connect_and_pump(self) -> None:
+        headers = {}
+        if self.config.token:
+            headers["Authorization"] = f"Bearer {self.config.token}"
+        url = self.config.url
+        if self.config.token:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}access_token={quote(self.config.token)}"
+
+        kwargs: dict[str, Any] = {
+            "open_timeout": 15,
+            "ping_interval": 20,
+            "ping_timeout": 20,
+            "close_timeout": 5,
+            "max_size": 8 * 1024 * 1024,
+        }
+        try:
+            ws = await websockets.connect(url, additional_headers=headers, **kwargs)
+        except TypeError:
+            # websockets < 13 used extra_headers
+            ws = await websockets.connect(url, extra_headers=headers, **kwargs)
+
+        self._ws = ws
+        self._connected.set()
+        log.info("OneBot connected to %s", self.config.url)
+        try:
+            async for raw in ws:
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", "replace")
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    log.debug("ignoring non-JSON frame: %.200s", raw)
+                    continue
+                if isinstance(payload, dict) and "echo" in payload:
+                    self._resolve(payload)
+                else:
+                    self._dispatch(payload)
+        finally:
+            self._connected.clear()
+            self._ws = None
+            self._fail_pending("connection closed")
+            log.info(
+                "OneBot disconnected (code=%s reason=%s)",
+                getattr(ws, "close_code", None),
+                getattr(ws, "close_reason", None),
+            )
+
+    def _resolve(self, payload: dict) -> None:
+        echo = str(payload.get("echo"))
+        future = self._pending.pop(echo, None)
+        if future is not None and not future.done():
+            future.set_result(payload)
+
+    def _fail_pending(self, reason: str) -> None:
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(OneBotError(reason))
+                future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+        self._pending.clear()
+
+    async def wait_connected(self, timeout: float = 15.0) -> None:
+        await asyncio.wait_for(self._connected.wait(), timeout)
+
+    # ------------------------------------------------------------------ events
+
+    def _dispatch(self, event: dict) -> None:
+        if event.get("post_type") != "message":
+            return
+        try:
+            message_id = int(event.get("message_id") or 0)
+            if message_id and message_id in self._seen_set:
+                return
+            if message_id:
+                if len(self._seen) == self._seen.maxlen and self._seen:
+                    self._seen_set.discard(self._seen[0])
+                self._seen.append(message_id)
+                self._seen_set.add(message_id)
+
+            user_id = int(event.get("user_id") or 0)
+            if user_id == self.config.self_id:
+                return
+            text, at_me = self._extract_text(event.get("message"))
+            if not text:
+                return
+            raw_sender = event.get("sender")
+            sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
+            sender_name = str(sender.get("card") or sender.get("nickname") or user_id)
+            group_id = int(event["group_id"]) if event.get("group_id") else None
+            message_type = str(event.get("message_type") or ("group" if group_id else "private"))
+
+            message = MessageEvent(
+                message_type=message_type,
+                user_id=user_id,
+                message_id=message_id,
+                text=text,
+                at_me=at_me,
+                sender_name=sender_name,
+                group_id=group_id,
+            )
+        except (TypeError, ValueError) as exc:
+            log.warning("malformed message event: %s", exc)
+            return
+
+        task = asyncio.create_task(self._run_handler(message))
+        task.add_done_callback(self._log_handler_error)
+
+    async def _run_handler(self, message: MessageEvent) -> None:
+        try:
+            await self.on_message(message)
+        except Exception:  # noqa: BLE001 - one bad message must not kill the loop
+            log.exception("message handler failed")
+
+    @staticmethod
+    def _log_handler_error(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass  # already logged in _run_handler
+
+    def _extract_text(self, message: Any) -> tuple[str, bool]:
+        at_me = False
+        if isinstance(message, str):
+            marker = f"[CQ:at,qq={self.config.self_id}]"
+            at_me = marker in message
+            text = message.replace(marker, "")
+            while True:
+                start = text.find("[CQ:")
+                if start < 0:
+                    break
+                end = text.find("]", start)
+                if end < 0:
+                    break
+                text = text[:start] + text[end + 1:]
+            return text.strip(), at_me
+
+        if not isinstance(message, list):
+            return "", False
+
+        parts: list[str] = []
+        for segment in message:
+            if not isinstance(segment, dict):
+                continue
+            kind = segment.get("type")
+            raw_data = segment.get("data")
+            data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+            if kind == "text":
+                parts.append(str(data.get("text", "")))
+            elif kind == "at":
+                qq = str(data.get("qq", ""))
+                if qq == str(self.config.self_id):
+                    at_me = True
+                elif qq and qq != "all":
+                    parts.append(f"@{data.get('name') or qq}")
+            elif kind == "image":
+                parts.append("[图片]")
+            elif kind == "face":
+                parts.append("[表情]")
+            elif kind == "record":
+                parts.append("[语音]")
+            elif kind == "video":
+                parts.append("[视频]")
+            elif kind == "file":
+                parts.append("[文件]")
+        return "".join(parts).strip(), at_me
+
+    # -------------------------------------------------------------------- calls
+
+    async def call(self, action: str, params: dict, timeout: float = 30.0) -> dict:
+        ws = self._ws
+        if ws is None:
+            raise OneBotError("not connected")
+        self._echo += 1
+        echo = str(self._echo)
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[echo] = future
+        try:
+            await ws.send(json.dumps({"action": action, "params": params, "echo": echo}, ensure_ascii=False))
+            response = await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError as exc:
+            raise OneBotError(f"{action} timed out") from exc
+        except websockets.exceptions.WebSocketException as exc:
+            raise OneBotError(f"{action} connection error: {exc}") from exc
+        finally:
+            self._pending.pop(echo, None)
+
+        if response.get("retcode") not in (0, None) or response.get("status") == "failed":
+            raise OneBotError(f"{action} failed: {response}")
+        return response.get("data") or {}
+
+    async def send_private(self, user_id: int, text: str) -> None:
+        await self.call("send_private_msg", {
+            "user_id": user_id,
+            "message": [{"type": "text", "data": {"text": text}}],
+        })
+
+    async def send_group(self, group_id: int, text: str) -> None:
+        await self.call("send_group_msg", {
+            "group_id": group_id,
+            "message": [{"type": "text", "data": {"text": text}}],
+        })
+
+    async def get_login_info(self) -> dict:
+        return await self.call("get_login_info", {})
+
+    async def close(self) -> None:
+        self._closed = True
+        ws = self._ws
+        if ws is not None:
+            await ws.close()

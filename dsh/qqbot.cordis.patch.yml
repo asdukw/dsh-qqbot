@@ -1,0 +1,77 @@
+# qqbot: chat-only profile with file-backed memory. No shell, no PTY.
+
+# ── remove coding-agent surface ─────────────────────────────────
+- id: session-title
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: deepseek-llm-api-extensions
+  disabled: true
+- id: llm-deepseek
+  disabled: true
+- id: pty
+  disabled: true
+- id: terminal-bash
+  disabled: true
+- id: terminal-pwsh
+  disabled: true
+- id: persistent-bash
+  disabled: true
+- id: persistent-pwsh
+  disabled: true
+- id: jobs
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+
+# ── file tools stay, scoped to the memory workspace ─────────────
+- id: tool-fs
+  config:
+    read: true
+    readImage: false
+    write: true
+    edit: true
+    readLimit: 2000
+- id: sandbox-policy
+  config:
+    mode: workspace-write
+    workspaceRoot: /var/lib/qqbot/dsh-workspace
+
+# ── no DeepSeek session-log upload ──────────────────────────────
+- id: session-log-deepseek
+  config:
+    enabled: false
+
+# ── search + observation policy + OpenCode Zen route + profile ──
+- insert:
+    - id: fs-observation-policy
+      name: '@deepseek-ai/dsh-fs-observation-policy'
+    - id: tool-fs-search
+      name: '@deepseek-ai/dsh-tool-fs-search'
+      config:
+        sampleOverCapGlobResults: false
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          opencode:
+            displayName: OpenCode Zen
+            apiKeyEnv: OPENCODE_API_KEY
+            api: openai-completions
+            baseURL: https://opencode.ai/inference/openai/v1
+            models:
+              - id: deepseek-v4.1-flash
+                name: DeepSeek V4.1 Flash
+                contextWindow: 128000
+          # Local test route used by dsh/fake_llm.py; harmless when unused.
+          fake:
+            displayName: Fake (local test)
+            apiKeyEnv: FAKE_KEY
+            api: openai-completions
+            baseURL: http://127.0.0.1:8000/v1
+            models:
+              - id: fake-model
+                name: Fake Model
+                contextWindow: 128000
+    - id: user-profile
+      name: '/opt/qqbot/dsh/plugins/user-profile.mjs'

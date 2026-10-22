@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets and local configuration
+.env
+*.env
+bot.env
+*.db
+*.db-wal
+*.db-shm
+memory.db
+
+# Runtime state
+dsh-home/
+dsh-workspace/
+sessions/
+*.log
+
+# Build / transfer artifacts
+*.tar.gz
+dist/
+build/
+
+# Harness / agent tooling
+.claude/
+.agents/
+skills-lock.json
+
+# Editors
+.idea/
+.vscode/
+.DS_Store

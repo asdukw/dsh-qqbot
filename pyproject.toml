@@ -1,0 +1,24 @@
+[project]
+name = "dsh-qqbot"
+version = "0.1.0"
+description = "A QQ chat bot powered by DeepSeek Harness (DSH) and NapCat"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "asdukw" }]
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["dsh/user-profile.mjs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

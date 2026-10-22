@@ -1,0 +1,44 @@
+[onebot]
+url = "ws://127.0.0.1:3001"
+token = ""            # normally supplied by ONEBOT_TOKEN in /etc/qqbot/bot.env
+self_id = 0              # your bot QQ number
+
+[llm]
+# Presets live in bot/llm.py. Choose one:
+# opencode | deepseek | openai | openrouter | siliconflow | dashscope | moonshot | zhipu | custom
+# LLM_PROVIDER in /etc/qqbot/bot.env overrides this.
+provider = "opencode"
+# Empty = the provider's default model (opencode: deepseek-v4.1-flash, deepseek: deepseek-flash).
+# LLM_MODEL in /etc/qqbot/bot.env overrides this.
+model = ""
+max_tokens = 800
+temperature = 1.0
+timeout = 60.0
+# thinking = "enabled"     # only if the upstream model supports it
+# reasoning_effort = "high"
+# base_url = ""            # only needed for provider = "custom" or an explicit override
+
+[dsh]
+enabled = true
+home = "/var/lib/qqbot/dsh-home"
+workspace = "/var/lib/qqbot/dsh-workspace"
+profile = "qqbot"
+provider = "opencode"
+model = "deepseek-v4.1-flash"
+request_timeout = 120.0
+
+[bot]
+reply_private = true
+reply_group_at = true      # answer only when @-mentioned in groups
+history_turns = 24         # user/assistant pairs kept per conversation
+max_history_chars = 12000
+max_reply_chars = 1200     # longer replies are split into several QQ messages
+max_input_chars = 4000
+lore_max_chars = 4000
+greeting_on_first_chat = false
+notify_errors = true
+error_message = "（我这边网络或模型出了点问题，等一下再试）"
+
+[paths]
+character = "/etc/qqbot/character.json"
+database = "/var/lib/qqbot/memory.db"
