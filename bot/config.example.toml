@@ -4,33 +4,35 @@ token = ""            # normally supplied by ONEBOT_TOKEN in /etc/qqbot/bot.env
 self_id = 0              # your bot QQ number
 
 [llm]
-# Presets live in bot/llm.py. Choose one:
-# opencode | deepseek | openai | openrouter | siliconflow | dashscope | moonshot | zhipu | custom
-# LLM_PROVIDER in /etc/qqbot/bot.env overrides this.
-provider = "opencode"
-# Empty = the provider's default model (opencode: deepseek-v4.1-flash, deepseek: deepseek-flash).
-# LLM_MODEL in /etc/qqbot/bot.env overrides this.
-model = ""
-max_tokens = 800
+# Fallback thin client only (used when [dsh] enabled = false). The model,
+# endpoint, key env, max output tokens and reasoning effort come from the
+# [models] registry; only sampling/transport knobs live here.
 temperature = 1.0
 timeout = 60.0
-# thinking = "enabled"     # only if the upstream model supports it
-# reasoning_effort = "high"
-# base_url = ""            # only needed for provider = "custom" or an explicit override
 
 [dsh]
 enabled = true
 home = "/var/lib/qqbot/dsh-home"
 workspace = "/var/lib/qqbot/dsh-workspace"
 profile = "qqbot"
-provider = "opencode"
-model = "deepseek-v4.1-flash"
-max_tokens = 2048          # per-request output cap; also reserves context
 request_timeout = 120.0
-# Context length is per model in dsh/qqbot.cordis.patch.yml (contextWindow).
-# DSH compacts automatically; thresholdRatio/headroom/retainRatio live there too.
+# Compaction thresholds (thresholdRatio/headroom/retainRatio) live in
+# dsh/qqbot.cordis.patch.yml.
+
+[models]
+# SQLite registry keyed by (provider, model_id) — the single source of model
+# configuration: which model is active, endpoint, key env, context window,
+# max output tokens, reasoning effort (default "low").
+#   main.py --list-models
+#   main.py --use-model opencode-go/deepseek-v4.1-flash
+#   main.py --set-model opencode-go/deepseek-v4.1-flash reasoning_effort=medium
+database = "/var/lib/qqbot/models.db"
+patch = "/var/lib/qqbot/dsh-state/models.patch.json"
 
 [bot]
+# Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;
+# this list is the fallback for local runs.
+# admins = [2834040317]
 reply_private = true
 reply_group_at = true      # answer only when @-mentioned in groups
 history_turns = 24         # user/assistant pairs kept per conversation
@@ -41,6 +43,24 @@ lore_max_chars = 4000
 greeting_on_first_chat = false
 notify_errors = true
 error_message = "（我这边网络或模型出了点问题，等一下再试）"
+# Group chat: messages that don't @ the bot are buffered per group (memory only)
+# and handed to the model together with the next @, so it can follow the topic.
+group_context_messages = 30
+group_context_chars = 3000
+
+# Proactive group replies: join the conversation without being @-mentioned.
+[bot.proactive]
+enabled = false
+groups = []                # empty = all groups
+probability = 0.04         # per eligible message
+cooldown_seconds = 600
+max_per_hour = 4
+max_per_day = 20
+min_context_messages = 2
+keywords = []
+aliases = []
+quiet_hours = [1, 7]       # [start, end) local hours; wraps past midnight
+prompt = "你正在群里和大家聊天。结合上面的最近消息，简短、自然地接一句；不要复述别人的话，不要长篇大论，不要提自己是 AI。"
 
 [paths]
 character = "/etc/qqbot/character.json"

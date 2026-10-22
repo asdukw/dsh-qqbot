@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Rewrite bot.env with the full placeholder template, preserving existing values."""
+"""Rewrite bot.env with the current template, preserving existing values.
+
+bot.env only holds secrets and paths. Model selection and parameters live in
+the SQLite model registry, so the old LLM_PROVIDER / LLM_MODEL / DSH_PROVIDER /
+DSH_MODEL / DSH_MAX_TOKENS lines are dropped on rewrite.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ import sys
 
 PATH = sys.argv[1] if len(sys.argv) > 1 else "/etc/qqbot/bot.env"
 KEY_VARS = (
+    "LLM_API_KEY",
     "OPENCODE_API_KEY",
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
@@ -29,34 +35,30 @@ if os.path.exists(PATH):
             values[key.strip()] = value.strip()
 
 lines = [
-    "# ── LLM provider ─────────────────────────────────────────────",
-    "# opencode | deepseek | openai | openrouter | siliconflow | dashscope | moonshot | zhipu | custom",
-    f"LLM_PROVIDER={values.get('LLM_PROVIDER', 'opencode')}",
-    "# Empty = provider default (opencode: deepseek-v4.1-flash, deepseek: deepseek-flash)",
-    f"LLM_MODEL={values.get('LLM_MODEL', '')}",
-    "# Single key for the selected DSH route and the fallback client:",
-    f"LLM_API_KEY={values.get('LLM_API_KEY', '')}",
-    "# Optional provider-specific keys (used when LLM_API_KEY is empty):",
+    "# ── Model API keys ───────────────────────────────────────────",
+    "# Each registry row names the env var its key comes from (api_key_env).",
+    "# The seeded OpenCode rows use OPENCODE_API_KEY.",
 ]
 for name in KEY_VARS:
     lines.append(f"{name}={values.get(name, '')}")
 lines += [
-    "# For a custom OpenAI-compatible endpoint only:",
-    f"LLM_BASE_URL={values.get('LLM_BASE_URL', '')}",
+    "",
+    "# ── Model registry (SQLite, keyed by provider + model_id) ──────",
+    "# Active model, context window, max output and reasoning effort live here:",
+    "#   main.py --list-models | --use-model p/m | --set-model p/m field=value",
+    f"MODEL_DB={values.get('MODEL_DB', '/var/lib/qqbot/models.db')}",
+    f"MODEL_PATCH={values.get('MODEL_PATCH', '/var/lib/qqbot/dsh-state/models.patch.json')}",
     "",
     "# ── DSH runtime ─────────────────────────────────────────────",
     f"DSH_HOME={values.get('DSH_HOME', '/var/lib/qqbot/dsh-home')}",
     f"DSH_PROFILE={values.get('DSH_PROFILE', 'qqbot')}",
-    f"DSH_PROVIDER={values.get('DSH_PROVIDER', 'opencode')}",
-    f"DSH_MODEL={values.get('DSH_MODEL', 'deepseek-v4.1-flash')}",
-    f"DSH_MAX_TOKENS={values.get('DSH_MAX_TOKENS', '2048')}",
-    "# Optional context-window overrides (defaults: paid 1M, free 200k):",
-    "# DSH_CONTEXT_WINDOW_PAID=1000000",
-    "# DSH_CONTEXT_WINDOW_FREE=200000",
     f"USER_PROFILE_DB={values.get('USER_PROFILE_DB', '/var/lib/qqbot/dsh-state/profile.db')}",
     "",
     "# ── NapCat OneBot ────────────────────────────────────────────",
     f"ONEBOT_TOKEN={values.get('ONEBOT_TOKEN', '')}",
+    "",
+    "# ── Admin access (comma-separated QQ numbers) ─────────────────",
+    f"ADMIN_QQ_IDS={values.get('ADMIN_QQ_IDS', '')}",
     "",
 ]
 

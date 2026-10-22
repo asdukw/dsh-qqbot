@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -28,6 +29,11 @@ class Provider:
 PROVIDERS: dict[str, Provider] = {
     "opencode": Provider(
         "https://opencode.ai/inference/openai/v1",
+        "OPENCODE_API_KEY",
+        "deepseek-v4.1-flash",
+    ),
+    "opencode-go": Provider(
+        "https://opencode.ai/zen/go/v1",
         "OPENCODE_API_KEY",
         "deepseek-v4.1-flash",
     ),
@@ -82,13 +88,16 @@ class LLMClient:
         headers = {"Content-Type": "application/json"}
         if config.api_key:
             headers["Authorization"] = f"Bearer {config.api_key}"
+        if config.provider in ("opencode", "opencode-go"):
+            # OpenCode Go requires a stable session id for routing.
+            headers["x-opencode-session"] = "qqbot-fallback"
         self._client = httpx.AsyncClient(
             base_url=config.base_url.rstrip("/"),
             timeout=httpx.Timeout(config.timeout, connect=10.0),
             headers=headers,
         )
 
-    def _payload(self, messages: list[dict[str, str]]) -> dict:
+    def _payload(self, messages: list[dict[str, Any]]) -> dict:
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
@@ -102,7 +111,7 @@ class LLMClient:
             payload["reasoning_effort"] = self.config.reasoning_effort
         return payload
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(self, messages: list[dict[str, Any]]) -> str:
         payload = self._payload(messages)
         last_error: Exception | None = None
 

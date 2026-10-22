@@ -17,7 +17,7 @@
                               ┌─────────────────────┼─────────────────────┐
                               ▼                     ▼                     ▼
                        llm-pi-ai route       session + compaction    user-profile
-                       (OpenCode Zen)        (JSONL, 自动压缩)        (SQLite)
+                       (OpenCode Go)        (JSONL, 自动压缩)        (SQLite)
 ```
 
 ### adapter（`bot/`）
@@ -39,7 +39,7 @@
 从 DSH 的 `sdk-minimal` 模板派生，保留：
 
 - `sdk-app-startup` / `sdk-jsonrpc-server`
-- `llm-pi-ai`（OpenCode Zen 路由）
+- `llm-pi-ai`（统一模型接入；OpenCode Go 路由）
 - `llm` / `llm-retry` / `agent` / `agent-loop`
 - `session` / `session-projection` / `sessions`（JSONL 持久化）
 - `token-meter` / `compaction-basic`
@@ -72,51 +72,90 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 ## 一条消息的路径
 
 1. NapCat 通过 WS 推送 `message` 事件。
-2. adapter 提取文本、判断是否需要回复、生成 `conversation_id`：
-   - 私聊：`private:<user_id>`
-   - 群聊：`group:<group_id>:<user_id>`
+2. adapter 提取文本、判断是否需要回复：
+   - 群消息没 @ 机器人：放进该群的内存缓冲（`bot/group_context.py`，默认最近 30 条），结束；
+   - 否则生成 `conversation_id`：私聊 `private:<user_id>`，群聊 `group:<group_id>:<user_id>`。
 3. `session_id = conversation_id.replace(":", "-")`。
 4. 如果角色卡 mtime 变化：重新生成系统提示词、写 `memory/lore.md`、重启 DSH runtime（session 保留）。
-5. `asyncio.to_thread(dsh.run, session_id, text)`：
+5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
+6. 群聊时取出并清空该群缓冲，和 @ 的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称: 内容`。
+7. `asyncio.to_thread(dsh.run, session_id, prompt)`：
    - DSH 启动/复用 runtime；
    - 加载或创建 `session_id` 的 JSONL 历史；
-   - 组装 system prompt（含画像变量）；
+   - 组装 system prompt（插件按 `conversations` 查身份，注入用户画像和群画像）；
    - 跑 agent loop；
-   - 如果模型调用 `profile_*` 或文件工具，执行并把结果回灌；
+   - 如果模型调用画像工具或文件工具，执行并把结果回灌；
    - 返回 `final_response`。
-6. adapter 按 `max_reply_chars` 拆分并发送。
-7. 用户消息和助手回复同时写入本地 SQLite `messages` 表，仅作审计。
+8. adapter 按 `max_reply_chars` 拆分并发送。
+9. 用户消息和助手回复同时写入本地 SQLite `messages` 表，仅作审计。
 
-## 用户画像插件（`dsh/user-profile.mjs`）
+## 身份传递
 
-- 在 `agent/created` 事件里，为每个 agent 注册 **agent-scoped** 的 system prompt 变量和 section：
-  - 变量 `user_profile` 从 SQLite 读当前 `session_id` 的 facts；
-  - section `user-profile`（order 8000）把变量插入系统提示词；
-  - 只影响当前 agent，不会把一个用户的画像泄露给另一个用户。
-- 注册全局工具，但用 `exec.agent.id` 区分 session：
-  - `profile_read`：读一条或全部；
-  - `profile_write`：upsert 一条稳定事实；
-  - `profile_forget`：删除一条。
-- 存储：`/var/lib/qqbot/dsh-state/profile.db`
+DSH SDK 的 `session/prompt` 只接受 `sessionId` 和 `contentBlocks`，没有元数据字段，插件拿到的只有 `agent.id`（即 session id）。因此身份走旁路：adapter 在每轮调用前写 `conversations` 表，插件在渲染 system prompt 和执行工具时按 session id 查询。插件不解析 session id 的格式；查不到身份时画像工具直接报错，system prompt 里画像显示为空。
+
+两边共用同一个 SQLite 文件，WAL 模式加 `busy_timeout`，adapter 写入发生在 DSH 读取之前，没有并发写同一行的情况。
+
+## 画像插件（`dsh/user-profile.mjs`）
+
+- 在 `agent/created` 里为每个 agent 注册 **agent-scoped** 的变量 `user_profile`、`group_profile` 和 section `user-profile`（order 8000），只影响当前 agent。
+- 用户画像 `user_facts`，主键 `(user_id, key)`，**按 QQ 号**，私聊和群聊共用：
+  - `visibility`：私聊写入默认 `private`，可显式设为 `public`；群聊写入一律 `public`；
+  - 群聊里只读、只注入、只删 `public` 事实，且不能用公开值覆盖同 key 的私密事实；
+  - 私聊注入时私密事实带「（私密）」标记，提醒模型别带到别处。
+- 群画像 `group_facts`，主键 `(group_id, key)`，**按群号**：主题、氛围、常聊话题、梗和黑话、群规、约定；只在该群注入，`group_profile_*` 工具在私聊中拒绝执行。
+- 迁移：v1 的 `facts`（按 session 存）在启动时按 `conversations` 映射到 `user_facts`——私聊来源记为 `private`，群聊来源记为 `public`；全部映射完后删除旧表，映射不了的行保留不动。
 
 ```sql
-CREATE TABLE facts (
-  session_id TEXT NOT NULL,
+CREATE TABLE conversations (
+  session_id  TEXT PRIMARY KEY,
+  scope       TEXT NOT NULL CHECK (scope IN ('private', 'group')),
+  user_id     TEXT NOT NULL,
+  group_id    TEXT,
+  sender_name TEXT NOT NULL DEFAULT '',
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE user_facts (
+  user_id    TEXT NOT NULL,
   key        TEXT NOT NULL,
   value      TEXT NOT NULL,
-  confidence REAL NOT NULL DEFAULT 1.0,
+  visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
   source     TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (session_id, key)
+  PRIMARY KEY (user_id, key)
+);
+CREATE TABLE group_facts (
+  group_id   TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  value      TEXT NOT NULL,
+  source     TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (group_id, key)
 );
 ```
 
-画像只保存用户明确说出的稳定事实。事件、约定和重要片段走文件记忆（`memory/notes/`），由模型用 `write` / `edit` / `glob` / `grep` 维护。
+画像只保存明确说出的稳定事实。事件、约定和重要片段走文件记忆（`memory/notes/`），由模型用 `write` / `edit` / `glob` / `grep` 维护。
+
+## 模型注册表（`bot/models.py`）
+
+模型配置的唯一来源。代码和环境变量里都不再有模型 id、上下文长度、输出上限或推理强度。
+
+- SQLite `/var/lib/qqbot/models.db`，表 `models`，主键 `(provider, model_id)`；字段：`display_name`、`api`、`base_url`、`api_key_env`、`context_window`、`max_output_tokens`、`reasoning_effort`（默认 `low`）、`capabilities`（JSON，含 `reasoning_efforts`）、`enabled`、`is_active`。
+- `is_active` 上有部分唯一索引，保证全表最多一行激活；`use()` 在一个事务里切换。
+- 空库时写入默认行（`opencode-go` 付费 Flash 1M 激活、free 200k、本地 fake）；之后不覆盖用户修改。旧版本库启动时 `_migrate()` 补列、给默认行补上 `reasoning_efforts`，并把旧的 `opencode/*` 默认行迁移到 `opencode-go/*`。
+- 写入校验：新行必须有 `base_url` 和 `context_window`；`reasoning_effort` 必须在 `capabilities.reasoning_efforts` 中；不能禁用激活行。
+- 启动时：
+  1. `load_active_model()` 读取激活行；
+  2. 把所有启用的行按 provider 分组，渲染成 `llm-pi-ai` 的 `providers` 覆盖配置，写到 `/var/lib/qqbot/dsh-state/models.patch.json`；profile 里的 `llm-pi-ai` 只挂载 adapter，`providers` 为空。内置 provider（`opencode` / `opencode-go`）只覆盖 `apiKeyEnv`、`baseURL` 和模型参数，**不写 `api`**——否则会替换掉 DSH 内置的 adapter 包装，丢掉 `x-opencode-session`；自定义 provider 仍写完整定义；
+  3. `make_dsh_client()` 用激活行的 `provider` / `model_id` / `max_output_tokens` / `reasoning_effort` 构造 `DeepSeekHarness`，并通过 `patches=` 传入上面的 patch；
+  4. 回退客户端（`[dsh] enabled = false`）同样从激活行取 `base_url`、key、`max_tokens`、`reasoning_effort`。
+- 同一 provider 下的行必须共享 `api` / `base_url` / `api_key_env`，不一致时渲染报错。
+- 管理命令：`--list-models`、`--use-model p/m`、`--set-model p/m field=value ...`；修改后重启生效。
 
 ## 上下文与压缩
 
-- DSH 的 `llm-pi-ai` route 为每个模型声明 `contextWindow`（付费 Flash 1M，free 200k）。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。
+- 上下文长度来自模型注册表的 `context_window`（付费 Flash 1M，free 200k），经渲染后成为 DSH route 的 `contextWindow`。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。
 - `compaction-basic` 在 step boundary 检查 token 压力，默认 `thresholdRatio = 0.8`；本项目显式设置为：
 
 ```yaml
@@ -128,8 +167,8 @@ auto: true
 
 - 有效阈值 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`；1M 窗口约 800k，200k 窗口约 160k。
 - 超过阈值时，较旧历史被总结成摘要，保留最近约 16% 的上下文；完整 session 仍以 JSONL 持久化。
-- `max_tokens = 2048`（`DSH_MAX_TOKENS` / `[dsh] max_tokens`）限制单次输出，也作为压缩时的输出预留。
-- 上下文长度可以用 `DSH_CONTEXT_WINDOW_PAID` / `DSH_CONTEXT_WINDOW_FREE` 环境变量覆盖；profile 里用 `!!js` 读取，默认 1M / 200k。`DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
+- 激活模型的 `max_output_tokens`（默认 2048）限制单次输出，也作为压缩时的输出预留。
+- `DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
 
 ## 文件记忆
 

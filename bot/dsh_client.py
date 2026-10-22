@@ -34,7 +34,10 @@ class DSHConfig:
     provider: str = "opencode"
     model: str = "deepseek-v4.1-flash"
     max_tokens: int = 2048
+    reasoning_effort: str = ""  # empty = model default
     request_timeout: float = 120.0
+    # Extra Cordis patch files applied at launch (e.g. the model-registry patch).
+    patches: tuple[str, ...] = ()
 
 
 def _turn_error(events: Any) -> str:
@@ -93,6 +96,11 @@ class DSHClient:
             "starting DSH runtime (home=%s profile=%s provider=%s model=%s)",
             self.config.home, self.config.profile, self.config.provider, self.config.model,
         )
+        kwargs: dict[str, Any] = {}
+        if self.config.patches:
+            kwargs["patches"] = tuple(self.config.patches)
+        if self.config.reasoning_effort:
+            kwargs["reasoning_effort"] = self.config.reasoning_effort
         try:
             self._harness = DeepSeekHarness(
                 dsh_home=self.config.home,
@@ -102,6 +110,7 @@ class DSHClient:
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
                 request_timeout_seconds=self.config.request_timeout,
+                **kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the bot
             raise DSHError(f"cannot start DSH runtime: {exc}") from exc

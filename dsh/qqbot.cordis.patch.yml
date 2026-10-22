@@ -50,7 +50,7 @@
   config:
     enabled: false
 
-# ── search + observation policy + OpenCode Zen route + profile ──
+# ── search + observation policy + model routes + profile ────────
 - insert:
     - id: fs-observation-policy
       name: '@deepseek-ai/dsh-fs-observation-policy'
@@ -58,31 +58,11 @@
       name: '@deepseek-ai/dsh-tool-fs-search'
       config:
         sampleOverCapGlobResults: false
+    # Routes are rendered from the SQLite model registry (bot/models.py) into
+    # models.patch.json and applied at launch; this row only mounts the adapter.
     - id: llm-pi-ai
       name: '@deepseek-ai/dsh-llm-pi-ai'
       config:
-        providers:
-          opencode:
-            displayName: OpenCode Zen
-            apiKeyEnv: LLM_API_KEY
-            api: openai-completions
-            baseURL: https://opencode.ai/inference/openai/v1
-            models:
-              - id: deepseek-v4.1-flash
-                name: DeepSeek V4.1 Flash
-                contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW_PAID ?? 1000000)
-              - id: deepseek-v4.1-flash-free
-                name: DeepSeek V4.1 Flash Free
-                contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW_FREE ?? 200000)
-          # Local test route used by dsh/fake_llm.py; harmless when unused.
-          fake:
-            displayName: Fake (local test)
-            apiKeyEnv: FAKE_KEY
-            api: openai-completions
-            baseURL: http://127.0.0.1:8000/v1
-            models:
-              - id: fake-model
-                name: Fake Model
-                contextWindow: 128000
+        providers: {}
     - id: user-profile
       name: '/opt/qqbot/dsh/plugins/user-profile.mjs'

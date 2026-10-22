@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import time
 import tomllib
@@ -16,15 +18,29 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
+
+from admins import parse_admin_ids
 from cards import CardError, CardStore
+from conversations import ConversationStore
 from dsh_client import DSHClient, DSHConfig, DSHError
-from llm import LLMClient, LLMConfig, LLMError, get_provider
+from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
+from llm import LLMClient, LLMConfig, LLMError
+from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from memory import Memory
-from onebot import MessageEvent, OneBotClient, OneBotError
+from commands import CommandRouter
+from onebot import MessageEvent, OneBotError, OneBotWSClient
+from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
 from prompt import build_messages, build_system_prompt
 
 log = logging.getLogger("qqbot")
 TZ = ZoneInfo("Asia/Shanghai")
+
+# Model selection and parameters live in the registry; these env vars are ignored.
+LEGACY_MODEL_ENV = (
+    "LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL",
+    "DSH_PROVIDER", "DSH_MODEL", "DSH_MAX_TOKENS",
+)
 
 
 @dataclass
@@ -46,12 +62,29 @@ class BotSection:
     greeting_on_first_chat: bool = False
     notify_errors: bool = True
     error_message: str = "（我这边网络或模型出了点问题，等一下再试）"
+    # Non-@ group messages kept per group and handed to the model on the next @.
+    group_context_messages: int = 30
+    group_context_chars: int = 3000
+    # Privileged QQ numbers (ADMIN_QQ_IDS, comma/space separated).
+    admin_qq_ids: tuple[int, ...] = ()
+    # Heuristic proactive group replies (see [bot.proactive]).
+    proactive: ProactiveSettings = field(default_factory=ProactiveSettings)
 
 
 @dataclass
 class PathsSection:
     character: str = "/etc/qqbot/character.json"
     database: str = "/var/lib/qqbot/memory.db"
+    # Shared with the DSH user-profile plugin (USER_PROFILE_DB).
+    profile_db: str = "/var/lib/qqbot/dsh-state/profile.db"
+
+
+@dataclass
+class LLMSection:
+    # Fallback thin client only (DSH disabled). Model, endpoint and limits come
+    # from the registry; these are transport/sampling knobs DSH does not expose.
+    temperature: float = 1.0
+    timeout: float = 60.0
 
 
 @dataclass
@@ -60,17 +93,22 @@ class DSHSection:
     home: str = "/var/lib/qqbot/dsh-home"
     workspace: str = "/var/lib/qqbot/dsh-workspace"
     profile: str = "qqbot"
-    provider: str = "opencode"
-    model: str = "deepseek-v4.1-flash"
-    max_tokens: int = 2048
     request_timeout: float = 120.0
+
+
+@dataclass
+class ModelsSection:
+    # SQLite registry keyed by (provider, model_id): the only model configuration.
+    database: str = "/var/lib/qqbot/models.db"
+    patch: str = "/var/lib/qqbot/dsh-state/models.patch.json"
 
 
 @dataclass
 class AppConfig:
     onebot: OneBotSection = field(default_factory=OneBotSection)
-    llm: LLMConfig = field(default_factory=LLMConfig)
+    llm: LLMSection = field(default_factory=LLMSection)
     dsh: DSHSection = field(default_factory=DSHSection)
+    models: ModelsSection = field(default_factory=ModelsSection)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -103,44 +141,10 @@ def load_config(path: str | Path) -> AppConfig:
         table = tomllib.load(fh)
 
     onebot_raw = _section(table, "onebot")
+    llm_raw = _section(table, "llm")
     dsh_raw = _section(table, "dsh")
     bot_raw = _section(table, "bot")
     paths_raw = _section(table, "paths")
-
-    llm_raw = _section(table, "llm")
-    legacy = False
-    if not llm_raw:
-        llm_raw = _section(table, "deepseek")
-        legacy = True
-
-    provider_name = (
-        os.environ.get("LLM_PROVIDER", "").strip()
-        or str(llm_raw.get("provider", "opencode")).strip()
-        or "opencode"
-    )
-    provider = get_provider(provider_name)
-
-    # Environment wins, then an explicit [llm] override, then the provider preset.
-    # Legacy [deepseek] files keep their tuning values but not a stale base_url/model.
-    base_url = (
-        os.environ.get("LLM_BASE_URL", "").strip()
-        or ("" if legacy else str(llm_raw.get("base_url", "")).strip())
-        or provider.base_url
-    )
-    model = (
-        os.environ.get("LLM_MODEL", "").strip()
-        or ("" if legacy else str(llm_raw.get("model", "")).strip())
-        or provider.default_model
-    )
-    api_key = (
-        os.environ.get("LLM_API_KEY", "").strip()
-        or os.environ.get(provider.api_key_env, "").strip()
-        or str(llm_raw.get("api_key", "")).strip()
-    )
-    if not base_url:
-        raise ValueError(f"LLM base_url is empty for provider {provider_name!r}; set LLM_BASE_URL")
-    if not model:
-        raise ValueError(f"LLM model is empty for provider {provider_name!r}; set LLM_MODEL")
 
     token = os.environ.get("ONEBOT_TOKEN", "").strip() or str(onebot_raw.get("token", "")).strip()
 
@@ -155,10 +159,41 @@ def load_config(path: str | Path) -> AppConfig:
         home=os.environ.get("DSH_HOME", "").strip() or str(dsh_raw.get("home", "/var/lib/qqbot/dsh-home")),
         workspace=os.environ.get("DSH_WORKSPACE", "").strip() or str(dsh_raw.get("workspace", "/var/lib/qqbot/dsh-workspace")),
         profile=os.environ.get("DSH_PROFILE", "").strip() or str(dsh_raw.get("profile", "qqbot")),
-        provider=os.environ.get("DSH_PROVIDER", "").strip() or str(dsh_raw.get("provider", "opencode")),
-        model=os.environ.get("DSH_MODEL", "").strip() or str(dsh_raw.get("model", "deepseek-v4.1-flash")),
-        max_tokens=int(os.environ.get("DSH_MAX_TOKENS", "").strip() or dsh_raw.get("max_tokens", 2048)),
         request_timeout=float(dsh_raw.get("request_timeout", 120.0)),
+    )
+
+    admins_raw = os.environ.get("ADMIN_QQ_IDS", "").strip()
+    if admins_raw:
+        admin_qq_ids = parse_admin_ids(admins_raw)
+    else:
+        configured = bot_raw.get("admins", [])
+        admin_qq_ids = tuple(
+            int(value) for value in configured if str(value).strip().isdigit()
+        ) if isinstance(configured, list) else ()
+
+    proactive_raw = _section(bot_raw, "proactive")
+    quiet_raw = proactive_raw.get("quiet_hours", [1, 7])
+    quiet_hours = tuple(int(h) for h in quiet_raw) if isinstance(quiet_raw, list) else (1, 7)
+    if len(quiet_hours) != 2:
+        quiet_hours = (1, 7)
+    proactive = ProactiveSettings(
+        enabled=bool(proactive_raw.get("enabled", False)),
+        groups=tuple(int(g) for g in proactive_raw.get("groups", []) if str(g).isdigit()),
+        probability=min(1.0, max(0.0, float(proactive_raw.get("probability", 0.04)))),
+        cooldown_seconds=int(proactive_raw.get("cooldown_seconds", 600)),
+        max_per_hour=int(proactive_raw.get("max_per_hour", 4)),
+        max_per_day=int(proactive_raw.get("max_per_day", 20)),
+        min_context_messages=int(proactive_raw.get("min_context_messages", 2)),
+        keywords=tuple(str(v) for v in proactive_raw.get("keywords", []) if str(v).strip()),
+        aliases=tuple(str(v) for v in proactive_raw.get("aliases", []) if str(v).strip()),
+        quiet_hours=quiet_hours,
+        prompt=str(proactive_raw.get("prompt") or DEFAULT_PROMPT),
+    )
+
+    models_raw = _section(table, "models")
+    models = ModelsSection(
+        database=os.environ.get("MODEL_DB", "").strip() or str(models_raw.get("database", "/var/lib/qqbot/models.db")),
+        patch=os.environ.get("MODEL_PATCH", "").strip() or str(models_raw.get("patch", "/var/lib/qqbot/dsh-state/models.patch.json")),
     )
 
     return AppConfig(
@@ -167,18 +202,12 @@ def load_config(path: str | Path) -> AppConfig:
             token=token,
             self_id=int(onebot_raw.get("self_id", 0) or 0),
         ),
-        llm=LLMConfig(
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            provider=provider_name,
-            max_tokens=int(llm_raw.get("max_tokens", 800)),
+        llm=LLMSection(
             temperature=float(llm_raw.get("temperature", 1.0)),
             timeout=float(llm_raw.get("timeout", 60.0)),
-            thinking=str(llm_raw.get("thinking", "")),
-            reasoning_effort=str(llm_raw.get("reasoning_effort", "")),
         ),
         dsh=dsh,
+        models=models,
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -190,25 +219,102 @@ def load_config(path: str | Path) -> AppConfig:
             greeting_on_first_chat=bool(bot_raw.get("greeting_on_first_chat", False)),
             notify_errors=bool(bot_raw.get("notify_errors", True)),
             error_message=str(bot_raw.get("error_message", "（我这边网络或模型出了点问题，等一下再试）")),
+            group_context_messages=int(bot_raw.get("group_context_messages", 30)),
+            group_context_chars=int(bot_raw.get("group_context_chars", 3000)),
+            admin_qq_ids=admin_qq_ids,
+            proactive=proactive,
         ),
         paths=PathsSection(
             character=str(paths_raw.get("character", "/etc/qqbot/character.json")),
             database=str(paths_raw.get("database", "/var/lib/qqbot/memory.db")),
+            profile_db=(
+                os.environ.get("USER_PROFILE_DB", "").strip()
+                or str(paths_raw.get("profile_db", "/var/lib/qqbot/dsh-state/profile.db"))
+            ),
         ),
     )
 
 
-def dsh_api_key(config: AppConfig) -> str:
+def warn_legacy_model_env() -> None:
+    stale = [name for name in LEGACY_MODEL_ENV if os.environ.get(name, "").strip()]
+    if stale:
+        log.warning(
+            "ignoring %s: model selection and parameters come from the model registry "
+            "(use --use-model / --set-model)", ", ".join(stale),
+        )
+
+
+def load_active_model(config: AppConfig, write_patch: bool = True) -> ModelRecord:
+    """Return the active registry row and, for DSH, render the route patch."""
+    registry = ModelRegistry(config.models.database)
     try:
-        env_name = get_provider(config.dsh.provider).api_key_env
-    except ValueError:
-        env_name = "LLM_API_KEY"
-    return os.environ.get("LLM_API_KEY", "").strip() or os.environ.get(env_name, "").strip()
+        record = registry.active()
+        if record is None:
+            raise ValueError(
+                f"no active model in {config.models.database}; run --use-model provider/model_id"
+            )
+        if write_patch:
+            registry.write_dsh_patch(config.models.patch)
+    finally:
+        registry.close()
+    return record
+
+
+def model_api_key(record: ModelRecord) -> str:
+    return os.environ.get(record.api_key_env, "").strip()
+
+
+def model_signature(config: AppConfig) -> tuple | None:
+    """Current active route; cheap enough to read once per turn."""
+    registry = ModelRegistry(config.models.database)
+    try:
+        return registry.active_signature()
+    finally:
+        registry.close()
+
+
+def make_dsh_client(config: AppConfig, record: ModelRecord, system_prompt: str = "") -> DSHClient:
+    log.info(
+        "model %s: context=%d max_output=%d effort=%s",
+        record.key, record.context_window, record.max_output_tokens,
+        record.effective_effort or "(model default)",
+    )
+    return DSHClient(
+        DSHConfig(
+            home=config.dsh.home,
+            workspace=config.dsh.workspace,
+            profile=config.dsh.profile,
+            provider=record.provider,
+            model=record.model_id,
+            max_tokens=record.max_output_tokens,
+            reasoning_effort=record.effective_effort,
+            request_timeout=config.dsh.request_timeout,
+            patches=(config.models.patch,),
+        ),
+        system_prompt=system_prompt,
+    )
+
+
+def make_llm_client(config: AppConfig, record: ModelRecord) -> LLMClient:
+    return LLMClient(LLMConfig(
+        api_key=model_api_key(record),
+        base_url=record.base_url,
+        model=record.model_id,
+        provider=record.provider,
+        max_tokens=record.max_output_tokens,
+        temperature=config.llm.temperature,
+        timeout=config.llm.timeout,
+        reasoning_effort=record.effective_effort,
+    ))
 
 
 def build_dsh_system_prompt(card) -> str:
     prompt = build_system_prompt(card.data, card.name, "用户", datetime.now(TZ), [])
-    return prompt + "\n\n[设定资料]\n角色设定资料保存在 memory/lore.md；需要时用 grep/read 查阅。"
+    return (
+        prompt
+        + "\n\n[设定资料]\n角色设定资料保存在 memory/lore.md；需要时用 grep/read 查阅。"
+        + "\n\n[上下文说明]\n每一轮消息开头会给出当前时间、会话和发言者；时间和说话人以那一行为准。"
+    )
 
 
 def write_lore(card, workspace: str) -> None:
@@ -257,22 +363,70 @@ class Bot:
         memory: Memory,
         client: LLMClient,
         dsh: DSHClient | None = None,
+        conversations: ConversationStore | None = None,
     ):
         self.config = config
         self.cards = cards
         self.memory = memory
         self.client = client
         self.dsh = dsh
-        self.onebot = OneBotClient(config.onebot, self.handle)
+        self.conversations = conversations
+        self.group_context = GroupContextBuffer(config.bot.group_context_messages)
+        self.onebot = OneBotWSClient(config.onebot, self.handle)
+        self.commands = CommandRouter(self)
+        self.proactive = ProactivePolicy(config.bot.proactive)
+        self._closed = False
         self._locks: dict[str, asyncio.Lock] = {}
-        self._global = asyncio.Semaphore(3)
+        self._GLOBAL_LIMIT = 3
+        self._global = asyncio.Semaphore(self._GLOBAL_LIMIT)
         self._card_mtime = 0.0
+        self._system_prompt = ""
+        self._model_lock = asyncio.Lock()
+        self._model_sig = model_signature(config)
+
+    def is_admin(self, user_id: int) -> bool:
+        return user_id in self.config.bot.admin_qq_ids
+
+    @property
+    def model_key(self) -> str | None:
+        return self._model_sig[0] if self._model_sig else None
+
+    async def send_text(self, event: MessageEvent, text: str) -> None:
+        await self._send(event, text)
+
+    async def reload_model(self) -> None:
+        await self._maybe_reload_model()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self.onebot.close()
+        if self.dsh is not None:
+            self.dsh.close()
+        if self.conversations is not None:
+            self.conversations.close()
+        await self.client.close()
+        self.memory.close()
 
     async def handle(self, event: MessageEvent) -> None:
+        text = event.text[: self.config.bot.max_input_chars]
+        if not text and not event.images:
+            return
+
+        if self.commands.is_command(text):
+            await self.commands.handle(event, text)
+            return
+
         if event.message_type == "group":
-            if not self.config.bot.reply_group_at or not event.at_me:
+            if event.group_id is None:
                 return
-            conversation_id = f"group:{event.group_id}:{event.user_id}"
+            conversation_id = f"group:{event.group_id}"
+            if not self.config.bot.reply_group_at or not event.at_me:
+                self.group_context.add(event.group_id, event.sender_name, text)
+                if not event.at_me:
+                    await self._maybe_reply_proactively(conversation_id, event, text)
+                return
         elif event.message_type == "private":
             if not self.config.bot.reply_private:
                 return
@@ -280,47 +434,259 @@ class Bot:
         else:
             return
 
-        text = event.text[: self.config.bot.max_input_chars]
-        if not text:
-            return
-
+        await self._maybe_reload_model()
         lock = self._locks.setdefault(conversation_id, asyncio.Lock())
         async with lock, self._global:
             await self._reply(conversation_id, event, text)
 
-    async def _reply(self, conversation_id: str, event: MessageEvent, text: str) -> None:
-        if self.dsh is not None:
-            await self._reply_dsh(conversation_id, event, text)
-        else:
-            await self._reply_llm(conversation_id, event, text)
+    def _context_header(self, event: MessageEvent) -> str:
+        now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+        who = f"{event.sender_name}({event.user_id})"
+        if event.message_type == "group" and event.group_id is not None:
+            return f"[群聊 {event.group_id} | 当前时间 {now} | 发言者 {who}]"
+        return f"[私聊 | 当前时间 {now} | 用户 {who}]"
 
-    async def _reply_dsh(self, conversation_id: str, event: MessageEvent, text: str) -> None:
-        dsh = self.dsh
-        if dsh is None:
-            return
+    def _turn_prompt(self, event: MessageEvent, text: str) -> tuple[str, int]:
+        """Per-chat context: fresh time/identity plus that chat's recent lines."""
+        if event.message_type == "group" and event.group_id is not None:
+            lines = self.group_context.drain(event.group_id)
+            body = format_group_turn(
+                lines, event.sender_name, text, self.config.bot.group_context_chars
+            )
+            return self._context_header(event) + "\n" + body, len(lines)
+        return self._context_header(event) + "\n" + text, 0
+
+    def _refresh_card(self) -> bool:
         try:
             card = self.cards.get()
         except (CardError, OSError) as exc:
             log.error("cannot load character card: %s", exc)
-            await self._send(event, self.config.bot.error_message)
-            return
-
+            return False
         if card.mtime != self._card_mtime:
             try:
                 write_lore(card, self.config.dsh.workspace)
             except OSError as exc:
                 log.error("cannot write lore file: %s", exc)
-            dsh.set_system_prompt(build_dsh_system_prompt(card))
+            self._system_prompt = build_dsh_system_prompt(card)
+            if self.dsh is not None:
+                self.dsh.set_system_prompt(self._system_prompt)
             self._card_mtime = card.mtime
+        return True
+
+    async def _maybe_reply_proactively(
+        self, conversation_id: str, event: MessageEvent, text: str
+    ) -> None:
+        if self.dsh is None or event.group_id is None:
+            return
+        now = time.time()
+        hour = datetime.now(TZ).hour
+        context_count = len(
+            self.group_context.peek(event.group_id, self.config.bot.group_context_messages)
+        )
+        lock = self._locks.setdefault(conversation_id, asyncio.Lock())
+        if not self.proactive.should_reply(
+            event.group_id, text, context_count, now, hour, locked=lock.locked()
+        ):
+            return
+        async with lock, self._global:
+            # Waiting for the lock may have consumed quota or crossed a
+            # cooldown; re-check everything except the random gate.
+            now = time.time()
+            context_count = len(
+                self.group_context.peek(event.group_id, self.config.bot.group_context_messages)
+            )
+            if not self.proactive.should_reply(
+                event.group_id, text, context_count, now, datetime.now(TZ).hour,
+                rng=lambda: 0.0,
+            ):
+                return
+            await self._reply_proactive(conversation_id, event)
+
+    async def force_proactive(self, event: MessageEvent) -> None:
+        """Admin test hook: run a proactive turn regardless of the policy."""
+        if event.group_id is None:
+            await self._send(event, "主动回复只能在群里测试")
+            return
+        if self.dsh is None:
+            await self._send(event, "DSH 未启用，无法测试主动回复")
+            return
+        conversation_id = f"group:{event.group_id}"
+        if not self.group_context.peek(event.group_id):
+            self.group_context.add(event.group_id, event.sender_name, event.text)
+        await self._maybe_reload_model()
+        lock = self._locks.setdefault(conversation_id, asyncio.Lock())
+        async with lock, self._global:
+            await self._reply_proactive(conversation_id, event)
+
+    async def _reply_proactive(self, conversation_id: str, event: MessageEvent) -> None:
+        dsh = self.dsh
+        if dsh is None or event.group_id is None:
+            return
+        if not self._refresh_card():
+            return
 
         session_id = conversation_id.replace(":", "-")
-        await self.memory.add(conversation_id, "user", text)
+        if self.conversations is not None:
+            try:
+                await asyncio.to_thread(
+                    self.conversations.record,
+                    session_id, "group", event.user_id, event.group_id, event.sender_name,
+                )
+            except sqlite3.Error as exc:
+                log.error("cannot record conversation identity: %s", exc)
+
+        lines = self.group_context.peek(event.group_id, self.config.bot.group_context_messages)
+        prompt = self._context_header(event) + "\n" + format_proactive_turn(
+            lines, self.config.bot.proactive.prompt, self.config.bot.group_context_chars
+        )
+        await self.memory.add(conversation_id, "user", f"{event.sender_name}: {event.text}")
         log.info(
-            "replying via DSH: conv=%s session=%s user=%s(%s) chars=%d",
-            conversation_id, session_id, event.sender_name, event.user_id, len(text),
+            "proactive reply: group=%s trigger=%s(%s) context=%d",
+            event.group_id, event.sender_name, event.user_id, len(lines),
         )
         try:
-            reply = await asyncio.to_thread(dsh.run, session_id, text)
+            reply = await asyncio.to_thread(dsh.run, session_id, prompt)
+        except DSHError as exc:
+            log.error("proactive DSH failed: %s", exc)
+            return
+
+        self.proactive.record(event.group_id, time.time())
+        self.group_context.drain(event.group_id)
+        await self.memory.add(conversation_id, "assistant", reply)
+        for chunk in split_text(reply, self.config.bot.max_reply_chars):
+            await self._send(event, chunk)
+            await asyncio.sleep(0.35)
+
+
+    async def _maybe_reload_model(self) -> None:
+        """Pick up --use-model / --set-model changes on the next turn."""
+        try:
+            signature = model_signature(self.config)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            log.warning("cannot read the model registry: %s", exc)
+            return
+        if signature == self._model_sig:
+            return
+        async with self._model_lock:
+            try:
+                signature = model_signature(self.config)
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                log.warning("cannot read the model registry: %s", exc)
+                return
+            if signature == self._model_sig:
+                return
+            await self._swap_model()
+
+    async def _swap_model(self) -> None:
+        # Every turn holds one global slot; taking all of them means no turn is
+        # still using the clients we are about to close.
+        for _ in range(self._GLOBAL_LIMIT):
+            await self._global.acquire()
+        try:
+            try:
+                record = load_active_model(self.config)
+            except (OSError, ValueError) as exc:
+                log.error("cannot reload the model registry: %s", exc)
+                return
+            if not model_api_key(record):
+                log.error("%s is not set; keeping the current model", record.api_key_env)
+                return
+            try:
+                new_client = make_llm_client(self.config, record)
+                new_dsh = make_dsh_client(self.config, record) if self.config.dsh.enabled else None
+            except (OSError, ValueError, LLMError) as exc:
+                log.error("cannot apply model %s: %s", record.key, exc)
+                return
+            if new_dsh is not None:
+                new_dsh.set_system_prompt(self._system_prompt)
+
+            old_client, old_dsh = self.client, self.dsh
+            self.client, self.dsh = new_client, new_dsh
+            self._model_sig = model_signature(self.config)
+            log.info(
+                "model switched to %s: context=%d max_output=%d effort=%s",
+                record.key, record.context_window, record.max_output_tokens,
+                record.effective_effort or "(model default)",
+            )
+            if old_dsh is not None:
+                try:
+                    old_dsh.close()
+                except Exception:  # noqa: BLE001 - the swap already succeeded
+                    log.exception("error closing the previous DSH runtime")
+            try:
+                await old_client.close()
+            except Exception:  # noqa: BLE001
+                log.exception("error closing the previous LLM client")
+        finally:
+            for _ in range(self._GLOBAL_LIMIT):
+                self._global.release()
+
+    async def _reply(self, conversation_id: str, event: MessageEvent, text: str) -> None:
+        if event.images or self.dsh is None:
+            # DSH's content-block protocol needs attachment receipts that the
+            # Python SDK does not expose; the thin client speaks image_url.
+            await self._reply_llm(conversation_id, event, text)
+        else:
+            await self._reply_dsh(conversation_id, event, text)
+
+    async def _image_urls(self, event: MessageEvent) -> list[str]:
+        """Turn OneBot image URLs into data URIs the model API can read."""
+        urls: list[str] = []
+        for raw in event.images[:4]:
+            if raw.startswith("data:"):
+                urls.append(raw)
+                continue
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(20.0, connect=10.0), follow_redirects=True
+                ) as client:
+                    response = await client.get(raw)
+                if response.status_code != 200:
+                    log.warning("image download HTTP %s: %.120s", response.status_code, raw)
+                    urls.append(raw)
+                    continue
+                data = response.content
+                if len(data) > 8 * 1024 * 1024:
+                    log.warning("image too large (%d bytes), skipping", len(data))
+                    continue
+                mime = (response.headers.get("content-type") or "image/jpeg")
+                mime = mime.split(";")[0].strip().lower()
+                if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+                    mime = "image/jpeg"
+                urls.append(f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}")
+            except httpx.HTTPError as exc:
+                log.warning("image download failed: %s", exc)
+                urls.append(raw)
+        return urls
+
+    async def _reply_dsh(self, conversation_id: str, event: MessageEvent, text: str) -> None:
+        dsh = self.dsh
+        if dsh is None:
+            return
+        if not self._refresh_card():
+            await self._send(event, self.config.bot.error_message)
+            return
+
+        session_id = conversation_id.replace(":", "-")
+        if self.conversations is not None:
+            # Explicit identity for the profile plugin; written before the turn starts.
+            try:
+                await asyncio.to_thread(
+                    self.conversations.record,
+                    session_id, event.message_type, event.user_id, event.group_id, event.sender_name,
+                )
+            except sqlite3.Error as exc:
+                log.error("cannot record conversation identity: %s", exc)
+
+        prompt, context_lines = self._turn_prompt(event, text)
+
+        await self.memory.add(conversation_id, "user", text)
+        log.info(
+            "replying via DSH: conv=%s session=%s user=%s(%s) chars=%d group_context=%d",
+            conversation_id, session_id, event.sender_name, event.user_id, len(text), context_lines,
+        )
+        try:
+            reply = await asyncio.to_thread(dsh.run, session_id, prompt)
         except DSHError as exc:
             log.error("DSH failed: %s", exc)
             if self.config.bot.notify_errors:
@@ -355,10 +721,11 @@ class Bot:
             max_chars=self.config.bot.lore_max_chars,
         )
         now = datetime.now(TZ)
+        turn_text, _ = self._turn_prompt(event, text)
         messages = build_messages(
             data=data,
             history=history,
-            user_text=text,
+            user_text=turn_text,
             char_name=card.name,
             user_name=event.sender_name,
             now=now,
@@ -370,6 +737,22 @@ class Bot:
             "replying: conv=%s user=%s(%s) chars=%d history=%d lore=%d",
             conversation_id, event.sender_name, event.user_id, len(text), len(history), len(lore),
         )
+
+        images = await self._image_urls(event)
+        if images:
+            for message in reversed(messages):
+                if message.get("role") == "user":
+                    text_part = str(message.get("content") or "")
+                    message["content"] = [
+                        {"type": "text", "text": text_part},
+                        *(
+                            {"type": "image_url", "image_url": {"url": url}}
+                            for url in images
+                        ),
+                    ]
+                    break
+            log.info("attached %d image(s) to conv=%s", len(images), conversation_id)
+
         try:
             reply = await self.client.chat(messages)
         except LLMError as exc:
@@ -396,17 +779,21 @@ class Bot:
 
 
 async def check_llm(config: AppConfig) -> int:
-    if not config.llm.api_key:
-        print("error: API key for the selected provider is not set", file=sys.stderr)
+    try:
+        record = load_active_model(config, write_patch=False)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-    client = LLMClient(config.llm)
+    if not model_api_key(record):
+        print(f"error: {record.api_key_env} is not set (needed by {record.key})", file=sys.stderr)
+        return 2
+    client = make_llm_client(config, record)
     try:
         reply = await client.chat([
             {"role": "system", "content": "你是一个测试助手。"},
             {"role": "user", "content": "用一句话确认你能正常工作。"},
         ])
-        print(f"provider: {config.llm.provider}")
-        print(f"model: {config.llm.model}")
+        print(f"model: {record.key}")
         print(f"reply: {reply}")
         return 0
     except LLMError as exc:
@@ -417,30 +804,19 @@ async def check_llm(config: AppConfig) -> int:
 
 
 async def check_dsh(config: AppConfig) -> int:
-    key = dsh_api_key(config)
-    if not key:
-        print(
-            f"error: API key for DSH provider {config.dsh.provider!r} is not set",
-            file=sys.stderr,
-        )
+    try:
+        record = load_active_model(config)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-    client = DSHClient(
-        DSHConfig(
-            home=config.dsh.home,
-            workspace=config.dsh.workspace,
-            profile=config.dsh.profile,
-            provider=config.dsh.provider,
-            model=config.dsh.model,
-            max_tokens=config.dsh.max_tokens,
-            request_timeout=config.dsh.request_timeout,
-        ),
-        system_prompt="你是一个测试助手。",
-    )
+    if not model_api_key(record):
+        print(f"error: {record.api_key_env} is not set (needed by {record.key})", file=sys.stderr)
+        return 2
+    client = make_dsh_client(config, record, system_prompt="你是一个测试助手。")
     try:
         session_id = f"selftest-{int(time.time())}"
         reply = await asyncio.to_thread(client.run, session_id, "用一句话确认你能正常工作。")
-        print(f"provider: {config.dsh.provider}")
-        print(f"model: {config.dsh.model}")
+        print(f"model: {record.key} (effort={record.effective_effort or 'default'})")
         print(f"reply: {reply}")
         return 0
     except DSHError as exc:
@@ -451,7 +827,7 @@ async def check_dsh(config: AppConfig) -> int:
 
 
 async def check_onebot(config: AppConfig) -> int:
-    onebot = OneBotClient(config.onebot, _ignore_message)
+    onebot = OneBotWSClient(config.onebot, _ignore_message)
     task = asyncio.create_task(onebot.run())
     try:
         await onebot.wait_connected(15)
@@ -475,17 +851,19 @@ async def _ignore_message(_event: MessageEvent) -> None:
     return None
 
 
-async def run(config: AppConfig) -> int:
-    if config.dsh.enabled:
-        if not dsh_api_key(config):
-            log.error(
-                "API key for DSH provider %r is not set (put it in /etc/qqbot/bot.env)",
-                config.dsh.provider,
-            )
-            return 2
-    elif not config.llm.api_key:
-        log.error("API key for provider %r is not set (put it in /etc/qqbot/bot.env)", config.llm.provider)
-        return 2
+def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
+    """Build the adapter and its stores, or log why that failed."""
+    try:
+        record = load_active_model(config, write_patch=config.dsh.enabled)
+    except (OSError, ValueError) as exc:
+        log.error("cannot load model registry: %s", exc)
+        return None
+    if not model_api_key(record):
+        log.error(
+            "%s is not set (needed by %s; put it in /etc/qqbot/bot.env)",
+            record.api_key_env, record.key,
+        )
+        return None
     if not config.onebot.self_id:
         log.warning("onebot.self_id is 0; set it in config.toml")
 
@@ -495,23 +873,23 @@ async def run(config: AppConfig) -> int:
         log.info("character card loaded: %s (%s)", card.name, card.path)
     except (CardError, OSError) as exc:
         log.error("cannot load character card: %s", exc)
-        return 2
+        return None
 
     memory = Memory(config.paths.database)
-    client = LLMClient(config.llm)
-    dsh_client = None
-    if config.dsh.enabled:
-        dsh_client = DSHClient(
-            DSHConfig(
-                home=config.dsh.home,
-                workspace=config.dsh.workspace,
-                profile=config.dsh.profile,
-                provider=config.dsh.provider,
-                model=config.dsh.model,
-                max_tokens=config.dsh.max_tokens,
-                request_timeout=config.dsh.request_timeout,
-            )
-        )
+    client = make_llm_client(config, record)
+    dsh_client = make_dsh_client(config, record) if config.dsh.enabled else None
+    conversations = ConversationStore(config.paths.profile_db) if dsh_client is not None else None
+    bot = Bot(config, cards, memory, client, dsh_client, conversations)
+    log.info("model %s via %s", record.key, "DSH" if dsh_client is not None else "fallback client")
+    log.info("admins: %s", ", ".join(str(i) for i in config.bot.admin_qq_ids) or "(none)")
+    return bot, record
+
+
+async def run_ws(config: AppConfig) -> int:
+    built = build_bot(config)
+    if built is None:
+        return 2
+    bot, record = built
 
     stop = asyncio.Event()
 
@@ -525,26 +903,18 @@ async def run(config: AppConfig) -> int:
         except NotImplementedError:
             pass
 
-    bot = Bot(config, cards, memory, client, dsh_client)
     runner = asyncio.create_task(bot.onebot.run())
-    if dsh_client is not None:
-        log.info("bot started (DSH provider=%s model=%s)", config.dsh.provider, config.dsh.model)
-    else:
-        log.info("bot started (provider=%s model=%s)", config.llm.provider, config.llm.model)
+    log.info("bot started (%s via WebSocket)", record.key)
     try:
         await stop.wait()
     finally:
         log.info("stopping")
-        await bot.onebot.close()
+        await bot.close()
         runner.cancel()
         try:
             await runner
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
-        if dsh_client is not None:
-            dsh_client.close()
-        await client.close()
-        memory.close()
     return 0
 
 
@@ -558,6 +928,42 @@ def setup_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+def print_models(registry: ModelRegistry) -> None:
+    for record in registry.list():
+        marker = "*" if record.is_active else " "
+        state = "on " if record.enabled else "off"
+        effort = record.effective_effort or "-"
+        print(
+            f"{marker} {state} {record.key:<40} ctx={record.context_window:>9,} "
+            f"max_out={record.max_output_tokens:>6,} effort={effort:<6} {record.display_name}"
+        )
+
+
+def manage_models(config: AppConfig, args: argparse.Namespace) -> int:
+    registry = ModelRegistry(config.models.database)
+    try:
+        if args.set_model:
+            provider, model_id = parse_key(args.set_model[0])
+            fields: dict[str, str] = {}
+            for item in args.set_model[1:]:
+                name, sep, value = item.partition("=")
+                if not sep:
+                    raise ValueError(f"expected FIELD=VALUE, got {item!r}")
+                fields[name.strip()] = value
+            registry.upsert(provider, model_id, fields)
+        if args.use_model:
+            registry.use(*parse_key(args.use_model))
+        print_models(registry)
+        if args.set_model or args.use_model:
+            print("the running bot picks this up on its next message")
+        return 0
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        registry.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="QQ chat bot (NapCat + LLM)")
     parser.add_argument("--config", default="/etc/qqbot/config.toml")
@@ -565,6 +971,12 @@ def main() -> int:
     parser.add_argument("--check-dsh", action="store_true", help="test the DSH runtime and exit")
     parser.add_argument("--check-onebot", action="store_true", help="test the NapCat connection and exit")
     parser.add_argument("--show-card", action="store_true", help="print the parsed character card and exit")
+    parser.add_argument("--list-models", action="store_true", help="print the model registry and exit")
+    parser.add_argument("--use-model", metavar="PROVIDER/MODEL", help="make a registered model active and exit")
+    parser.add_argument(
+        "--set-model", nargs="+", metavar=("PROVIDER/MODEL", "FIELD=VALUE"),
+        help=f"create or update a model row and exit; fields: {', '.join(EDITABLE)}",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -574,6 +986,7 @@ def main() -> int:
     except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
         print(f"error: cannot load config {args.config}: {exc}", file=sys.stderr)
         return 2
+    warn_legacy_model_env()
 
     if args.show_card:
         try:
@@ -588,13 +1001,16 @@ def main() -> int:
         print(f"lorebook entries: {len(card.lorebook.entries)}")
         return 0
 
+    if args.list_models or args.use_model or args.set_model:
+        return manage_models(config, args)
+
     if args.check_dsh or (args.check and config.dsh.enabled):
         return asyncio.run(check_dsh(config))
     if args.check:
         return asyncio.run(check_llm(config))
     if args.check_onebot:
         return asyncio.run(check_onebot(config))
-    return asyncio.run(run(config))
+    return asyncio.run(run_ws(config))
 
 
 if __name__ == "__main__":
