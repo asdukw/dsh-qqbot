@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import time
 import tomllib
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -19,19 +20,20 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
-
 from admins import parse_admin_ids
-from cards import CardError, CardStore
+from card_fetch import CardFetchError, fetch_card_bytes_sync
+from commands import CommandRouter, strip_message_markers
 from conversations import ConversationStore
 from dsh_client import DSHClient, DSHConfig, DSHError
 from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
 from llm import LLMClient, LLMConfig, LLMError
-from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from memory import Memory
-from commands import CommandRouter
+from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from onebot import MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
 from prompt import build_messages, build_system_prompt
+
+from cards import CardError, CardRecord, CardRegistry, CharacterCard
 
 log = logging.getLogger("qqbot")
 TZ = ZoneInfo("Asia/Shanghai")
@@ -104,11 +106,21 @@ class ModelsSection:
 
 
 @dataclass
+class CardsSection:
+    # SQLite character-card library; the active row is loaded at runtime.
+    database: str = "/var/lib/qqbot/characters.db"
+    # Legacy single-card file: imported when the library is empty. While this
+    # card stays active its mtime is watched, so editing it still hot-reloads.
+    bootstrap: str = "/etc/qqbot/character.json"
+
+
+@dataclass
 class AppConfig:
     onebot: OneBotSection = field(default_factory=OneBotSection)
     llm: LLMSection = field(default_factory=LLMSection)
     dsh: DSHSection = field(default_factory=DSHSection)
     models: ModelsSection = field(default_factory=ModelsSection)
+    cards: CardsSection = field(default_factory=CardsSection)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -187,7 +199,24 @@ def load_config(path: str | Path) -> AppConfig:
         keywords=tuple(str(v) for v in proactive_raw.get("keywords", []) if str(v).strip()),
         aliases=tuple(str(v) for v in proactive_raw.get("aliases", []) if str(v).strip()),
         quiet_hours=quiet_hours,
+        followup_seconds=max(0, int(proactive_raw.get("followup_seconds", 300))),
+        followup_multiplier=max(1.0, float(proactive_raw.get("followup_multiplier", 2.0))),
         prompt=str(proactive_raw.get("prompt") or DEFAULT_PROMPT),
+    )
+
+    cards_raw = _section(table, "cards")
+    cards = CardsSection(
+        database=(
+            os.environ.get("CARD_DB", "").strip()
+            or str(cards_raw.get("database", "/var/lib/qqbot/characters.db"))
+        ),
+        bootstrap=(
+            os.environ.get("CARD_BOOTSTRAP", "").strip()
+            or str(
+                cards_raw.get("bootstrap")
+                or paths_raw.get("character", "/etc/qqbot/character.json")
+            )
+        ),
     )
 
     models_raw = _section(table, "models")
@@ -208,6 +237,7 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         dsh=dsh,
         models=models,
+        cards=cards,
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -328,7 +358,9 @@ def write_lore(card, workspace: str) -> None:
         lines.append(f"## {keys}\n\n{entry.content.strip()}\n")
     if len(lines) == 2:
         lines.append("（这张卡没有世界书条目。）")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n".join(lines), encoding="utf-8")
+    tmp.replace(path)
 
 
 def split_text(text: str, limit: int) -> list[str]:
@@ -359,7 +391,7 @@ class Bot:
     def __init__(
         self,
         config: AppConfig,
-        cards: CardStore,
+        cards: CardRegistry,
         memory: Memory,
         client: LLMClient,
         dsh: DSHClient | None = None,
@@ -379,7 +411,13 @@ class Bot:
         self._locks: dict[str, asyncio.Lock] = {}
         self._GLOBAL_LIMIT = 3
         self._global = asyncio.Semaphore(self._GLOBAL_LIMIT)
-        self._card_mtime = 0.0
+        self._card: CharacterCard | None = None
+        self._card_sig: tuple | None = None
+        self._card_lock = asyncio.Lock()
+        # Recent message ids the bot sent per group, so quote-replies count.
+        self._own_messages: dict[int, deque[int]] = {}
+        # Names from the active card, used to notice "大肥鱼，..." without an @.
+        self._card_names: tuple[str, ...] = ()
         self._system_prompt = ""
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
@@ -408,23 +446,29 @@ class Bot:
             self.conversations.close()
         await self.client.close()
         self.memory.close()
+        self.cards.close()
 
     async def handle(self, event: MessageEvent) -> None:
         text = event.text[: self.config.bot.max_input_chars]
         if not text and not event.images:
             return
 
-        if self.commands.is_command(text):
-            await self.commands.handle(event, text)
+        command_text = strip_message_markers(text)
+        if self.commands.is_command(command_text):
+            await self.commands.handle(event, command_text)
             return
 
         if event.message_type == "group":
             if event.group_id is None:
                 return
             conversation_id = f"group:{event.group_id}"
-            if not self.config.bot.reply_group_at or not event.at_me:
+            # The card (and therefore its names) may have been switched by
+            # /card use or --use-card since the last message.
+            await self.ensure_card()
+            addressed = event.at_me or self._addresses_bot(event, text)
+            if not self.config.bot.reply_group_at or not addressed:
                 self.group_context.add(event.group_id, event.sender_name, text)
-                if not event.at_me:
+                if not addressed:
                     await self._maybe_reply_proactively(conversation_id, event, text)
                 return
         elif event.message_type == "private":
@@ -438,6 +482,28 @@ class Bot:
         lock = self._locks.setdefault(conversation_id, asyncio.Lock())
         async with lock, self._global:
             await self._reply(conversation_id, event, text)
+
+    def _addresses_bot(self, event: MessageEvent, text: str) -> bool:
+        """Name mentions and quote-replies to the bot count as being addressed.
+
+        Only meaningful while group replies are enabled; with reply_group_at
+        off the bot only speaks proactively.
+        """
+        if not self.config.bot.reply_group_at:
+            return False
+        if self.proactive.named(text, self._card_names):
+            return True
+        if event.reply_to is not None and event.group_id is not None:
+            return event.reply_to in self._own_messages.get(event.group_id, ())
+        return False
+
+    def _remember_own_message(self, group_id: int, message_id: int) -> None:
+        if message_id <= 0:
+            return
+        ids = self._own_messages.get(group_id)
+        if ids is None:
+            ids = self._own_messages[group_id] = deque(maxlen=200)
+        ids.append(message_id)
 
     def _context_header(self, event: MessageEvent) -> str:
         now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -456,22 +522,69 @@ class Bot:
             return self._context_header(event) + "\n" + body, len(lines)
         return self._context_header(event) + "\n" + text, 0
 
-    def _refresh_card(self) -> bool:
+    def refresh_card(self, force: bool = False) -> bool:
+        """Load the active card, reloading when /card use or --use-card changed it."""
         try:
-            card = self.cards.get()
-        except (CardError, OSError) as exc:
-            log.error("cannot load character card: %s", exc)
+            if self.cards.sync_bootstrap(self.config.cards.bootstrap):
+                log.info("bootstrap character card changed on disk; re-imported it")
+            signature = self.cards.active_signature()
+        except (CardError, OSError, sqlite3.Error) as exc:
+            log.error("cannot read the character card library: %s", exc)
             return False
-        if card.mtime != self._card_mtime:
-            try:
-                write_lore(card, self.config.dsh.workspace)
-            except OSError as exc:
-                log.error("cannot write lore file: %s", exc)
-            self._system_prompt = build_dsh_system_prompt(card)
-            if self.dsh is not None:
-                self.dsh.set_system_prompt(self._system_prompt)
-            self._card_mtime = card.mtime
+        if signature is None:
+            log.error("no active character card; install one with /card install")
+            return False
+        if not force and signature == self._card_sig and self._card is not None:
+            return True
+        try:
+            record = self.cards.active()
+        except (CardError, OSError, sqlite3.Error) as exc:
+            log.error("cannot load the active character card: %s", exc)
+            return False
+        if record is None:
+            log.error("no active character card; install one with /card install")
+            return False
+        try:
+            card = record.card
+        except CardError as exc:
+            log.error("cannot parse character card #%s: %s", record.id, exc)
+            return False
+        try:
+            write_lore(card, self.config.dsh.workspace)
+        except OSError as exc:
+            log.error("cannot write lore file: %s", exc)
+        self._card = card
+        self._card_sig = signature
+        self._card_names = tuple(
+            dict.fromkeys(
+                name
+                for name in (card.data.get("name"), card.data.get("nickname"))
+                if isinstance(name, str) and name.strip()
+            )
+        )
+        self._system_prompt = build_dsh_system_prompt(card)
+        if self.dsh is not None:
+            self.dsh.set_system_prompt(self._system_prompt)
+        log.info("active character card: #%s %s", record.id, card.name)
         return True
+
+    async def ensure_card(self) -> bool:
+        """Reload the active card when it changed, off the event loop.
+
+        Restarting the DSH runtime waits for any in-flight turn, so it must not
+        run on the loop thread; message handlers call this before replying.
+        """
+        async with self._card_lock:
+            return await asyncio.to_thread(self.refresh_card)
+
+    async def reload_card(self) -> bool:
+        """Force a reload after /card use.
+
+        Runs in a worker thread: restarting the DSH runtime waits for any
+        in-flight turn, and that must not stall the event loop.
+        """
+        async with self._card_lock:
+            return await asyncio.to_thread(self.refresh_card, True)
 
     async def _maybe_reply_proactively(
         self, conversation_id: str, event: MessageEvent, text: str
@@ -522,7 +635,7 @@ class Bot:
         dsh = self.dsh
         if dsh is None or event.group_id is None:
             return
-        if not self._refresh_card():
+        if not await self.ensure_card():
             return
 
         session_id = conversation_id.replace(":", "-")
@@ -597,11 +710,13 @@ class Bot:
             except (OSError, ValueError, LLMError) as exc:
                 log.error("cannot apply model %s: %s", record.key, exc)
                 return
-            if new_dsh is not None:
-                new_dsh.set_system_prompt(self._system_prompt)
-
             old_client, old_dsh = self.client, self.dsh
             self.client, self.dsh = new_client, new_dsh
+            # The persona may have changed while the new runtime was built;
+            # force the next turn to re-apply it to this runtime.
+            self._card_sig = None
+            if new_dsh is not None:
+                new_dsh.set_system_prompt(self._system_prompt)
             self._model_sig = model_signature(self.config)
             log.info(
                 "model switched to %s: context=%d max_output=%d effort=%s",
@@ -663,7 +778,7 @@ class Bot:
         dsh = self.dsh
         if dsh is None:
             return
-        if not self._refresh_card():
+        if not await self.ensure_card():
             await self._send(event, self.config.bot.error_message)
             return
 
@@ -699,12 +814,10 @@ class Bot:
             await asyncio.sleep(0.35)
 
     async def _reply_llm(self, conversation_id: str, event: MessageEvent, text: str) -> None:
-        try:
-            card = self.cards.get()
-        except (CardError, OSError) as exc:
-            log.error("cannot load character card: %s", exc)
+        if not await self.ensure_card() or self._card is None:
             await self._send(event, self.config.bot.error_message)
             return
+        card = self._card
 
         data = card.data
         history = await self.memory.history(conversation_id, self.config.bot.history_turns * 2)
@@ -771,7 +884,9 @@ class Bot:
             return
         try:
             if event.message_type == "group" and event.group_id is not None:
-                await self.onebot.send_group(event.group_id, text)
+                data = await self.onebot.send_group(event.group_id, text)
+                self._remember_own_message(event.group_id, int(data.get("message_id") or 0))
+                self.proactive.note_speaking(event.group_id, time.time())
             else:
                 await self.onebot.send_private(event.user_id, text)
         except (OneBotError, OSError) as exc:
@@ -867,12 +982,21 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
     if not config.onebot.self_id:
         log.warning("onebot.self_id is 0; set it in config.toml")
 
-    cards = CardStore(config.paths.character)
+    cards = CardRegistry(config.cards.database)
     try:
-        card = cards.get()
-        log.info("character card loaded: %s (%s)", card.name, card.path)
-    except (CardError, OSError) as exc:
-        log.error("cannot load character card: %s", exc)
+        active = cards.bootstrap(config.cards.bootstrap)
+        if active is None:
+            raise CardError(
+                "character card library is empty and "
+                f"{config.cards.bootstrap} does not exist; run --install-card <url|path>"
+            )
+        log.info(
+            "character card library loaded: %d card(s), active #%s %s",
+            cards.count(), active.id, active.display_name,
+        )
+    except (CardError, OSError, sqlite3.Error) as exc:
+        log.error("cannot load the character card library: %s", exc)
+        cards.close()
         return None
 
     memory = Memory(config.paths.database)
@@ -880,6 +1004,9 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
     dsh_client = make_dsh_client(config, record) if config.dsh.enabled else None
     conversations = ConversationStore(config.paths.profile_db) if dsh_client is not None else None
     bot = Bot(config, cards, memory, client, dsh_client, conversations)
+    if not bot.refresh_card(force=True):
+        log.error("cannot load the active character card")
+        return None
     log.info("model %s via %s", record.key, "DSH" if dsh_client is not None else "fallback client")
     log.info("admins: %s", ", ".join(str(i) for i in config.bot.admin_qq_ids) or "(none)")
     return bot, record
@@ -939,6 +1066,48 @@ def print_models(registry: ModelRegistry) -> None:
         )
 
 
+def print_cards(records: list[CardRecord]) -> None:
+    if not records:
+        print("(no character cards installed)")
+        return
+    for record in records:
+        marker = "*" if record.is_active else " "
+        tags = f" [{', '.join(record.tags)}]" if record.tags else ""
+        print(f"{marker} #{record.id:<4} {record.display_name}{tags}  source={record.source_kind}")
+
+
+def manage_cards(config: AppConfig, args: argparse.Namespace) -> int:
+    registry = CardRegistry(config.cards.database)
+    try:
+        registry.bootstrap(config.cards.bootstrap)
+        if args.install_card:
+            source = args.install_card
+            if source.startswith(("http://", "https://", "data:")):
+                data = fetch_card_bytes_sync(source)
+                record, created = registry.install_bytes(
+                    data, source=source, source_kind="url", installed_by="cli",
+                )
+            else:
+                record, created = registry.install_path(source, installed_by="cli")
+            state = "installed" if created else "already installed"
+            print(f"{state}: #{record.id} {record.display_name}")
+            registry.ensure_active()
+        if args.use_card:
+            record = registry.resolve(args.use_card)
+            if record is None:
+                raise ValueError(f"no such character card: {args.use_card}")
+            registry.use(record.id)
+        print_cards(registry.search(args.search_cards) if args.search_cards else registry.list())
+        if args.install_card or args.use_card:
+            print("the running bot picks this up on its next message")
+        return 0
+    except (CardError, CardFetchError, OSError, sqlite3.Error, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        registry.close()
+
+
 def manage_models(config: AppConfig, args: argparse.Namespace) -> int:
     registry = ModelRegistry(config.models.database)
     try:
@@ -977,6 +1146,10 @@ def main() -> int:
         "--set-model", nargs="+", metavar=("PROVIDER/MODEL", "FIELD=VALUE"),
         help=f"create or update a model row and exit; fields: {', '.join(EDITABLE)}",
     )
+    parser.add_argument("--list-cards", action="store_true", help="print the character card library and exit")
+    parser.add_argument("--use-card", metavar="ID|NAME", help="make a character card active and exit")
+    parser.add_argument("--install-card", metavar="URL|PATH", help="install a character card and exit")
+    parser.add_argument("--search-cards", metavar="QUERY", help="search the character card library and exit")
     args = parser.parse_args()
 
     setup_logging()
@@ -989,20 +1162,31 @@ def main() -> int:
     warn_legacy_model_env()
 
     if args.show_card:
+        registry = CardRegistry(config.cards.database)
         try:
-            card = CardStore(config.paths.character).get()
-        except (CardError, OSError) as exc:
+            record = registry.bootstrap(config.cards.bootstrap)
+            if record is None:
+                print("error: no character card installed", file=sys.stderr)
+                return 1
+            card = record.card
+            print(f"id: #{record.id}")
+            print(f"name: {card.name}")
+            print(f"source: {record.source_kind} {record.source or '-'}")
+            print(f"imported as: {card.payload.get('_import', {})}")
+            print(f"description chars: {len(card.data['description'])}")
+            print(f"lorebook entries: {len(card.lorebook.entries)}")
+            return 0
+        except (CardError, OSError, sqlite3.Error) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        print(f"path: {card.path}")
-        print(f"imported as: {card.payload['_import']}")
-        print(f"name: {card.name}")
-        print(f"description chars: {len(card.data['description'])}")
-        print(f"lorebook entries: {len(card.lorebook.entries)}")
-        return 0
+        finally:
+            registry.close()
 
     if args.list_models or args.use_model or args.set_model:
         return manage_models(config, args)
+
+    if args.list_cards or args.use_card or args.install_card or args.search_cards:
+        return manage_cards(config, args)
 
     if args.check_dsh or (args.check and config.dsh.enabled):
         return asyncio.run(check_dsh(config))

@@ -7,7 +7,7 @@
 ## 特性
 
 - **QQ 私聊聊天**，群聊默认只回复 @ 消息（`reply_group_at = false` 可关闭）
-- **角色卡**：SillyTavern Character Card V1 / V2 / V3，支持 `.json` 和 `.png`（读取 `ccv3` → `chara` → `iTXt`）
+- **角色卡**：SillyTavern Character Card V1 / V2 / V3，支持 `.json` 和 `.png`（读取 `ccv3` → `chara` → `iTXt`）；SQLite 角色库，`/card search/install/use` 热切换
 - **DSH session**：每个 QQ 会话一份持久化 JSONL 历史，自动上下文压缩
 - **用户画像**：内置 `user-profile` 插件，SQLite 存储，提供 `profile_read` / `profile_write` / `profile_forget`
 - **文件记忆**：模型可使用 `read` / `write` / `edit` / `glob` / `grep`，工作目录限定在 `/var/lib/qqbot/dsh-workspace`
@@ -116,23 +116,43 @@ sudo journalctl -u qqbot -f
 
 - `/model`：列出模型及其序号；
 - `/model <序号|model_id|provider/model>`：切换激活模型，立即热切换，无需重启；
+- `/card` 系列：角色卡库的搜索、安装、切换、删除（见[角色卡](#角色卡)）；
 - `/help`：显示帮助。
 
 命令不会写入对话历史，也不会送进模型。
 
 ## 角色卡
 
-把角色卡放到 `/etc/qqbot/character.json`（或 `.png`），然后重启：
+角色卡统一入库到 SQLite `/var/lib/qqbot/characters.db`，内部一律存为 V3 结构（V1 平铺字段和 V2 的 `chara_card_v2` 都会自动升级）。管理员可以直接在聊天里管理：
+
+| 命令 | 作用 |
+|---|---|
+| `/card` | 列出角色卡，`*` 为当前卡 |
+| `/card search <关键词>` | 搜索名称、昵称、简介、性格、场景、标签、作者；空格分词按 AND 处理 |
+| `/card install <url\|路径>` | 安装 JSON / PNG 卡，支持 `http(s)://`、`file://` 和服务器绝对路径 |
+| `/card install`（附图片） | 把管理员发送的 PNG 卡图片直接安装 |
+| `/card use <id\|名称>` | 切换当前卡，立即生效，DSH session 历史保留 |
+| `/card show <id\|名称>` | 查看来源、标签、作者、简介长度和世界书条目数 |
+| `/card delete <id\|名称>` | 从库中删除（当前卡需先切换） |
+
+命令行等价操作：
 
 ```bash
-sudo systemctl restart qqbot
+M="sudo -u qqbot /opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/main.py"
+
+$M --list-cards
+$M --search-cards 图书
+$M --install-card https://example.com/card.png
+$M --use-card 2
 ```
 
-- 支持 V1 平铺字段、V2 `chara_card_v2`、V3 `chara_card_v3`；
-- PNG 卡会依次查找 `ccv3`、`chara` 的 `tEXt` / `iTXt` 块；
+- 按内容指纹去重：同一张卡重复安装会返回已有记录，不会产生副本；
+- 下载上限 12 MB；只接受 PNG 或 JSON，PNG 依次查找 `ccv3`、`chara` 的 `tEXt` / `iTXt` 块；
 - 卡里的 `description` / `personality` / `scenario` / `mes_example` / `system_prompt` 会渲染成 DSH 的系统提示词；
-- 世界书条目会写到 `memory/lore.md`，模型用 `grep` / `read` 查；
-- 换卡会让 DSH runtime 重启，但 session 历史保留。
+- 世界书条目会原子写入 `memory/lore.md`，模型用 `grep` / `read` 查；
+- 换卡会让 DSH runtime 重启，但 session 历史保留；
+- **升级兼容**：库为空时自动导入 `[cards] bootstrap`（默认 `/etc/qqbot/character.json`）。只要这张卡仍是当前卡，修改文件仍会热加载；切到别的卡后文件不再影响运行中的机器人。
+- 仓库自带一张社区整理的示例卡 [`cards/dafeiyu.json`](cards/dafeiyu.json)（「大肥鱼」，DeepSeek 二创鲸鱼娘）；安装脚本会把它放到 `/opt/qqbot/cards/`，用 `--install-card` 或 `/card install` 入库。
 
 ## 记忆
 
@@ -143,9 +163,19 @@ sudo systemctl restart qqbot
 3. **群画像**：同库的 `group_facts`，**按群号**存，记群主题、氛围、常聊话题、梗和黑话、群规、约定。只在该群里注入。工具：`group_profile_read` / `group_profile_write` / `group_profile_forget`（私聊里不可用）。
 4. **文件记忆**：`/var/lib/qqbot/dsh-workspace/memory/`；`lore.md` 是角色设定，`notes/` 放事件、约定和重要片段。模型可以用 `write` / `edit` / `glob` / `grep` 维护和检索。
 
-### 群聊上下文
+### 群聊上下文与活跃度
 
-群里没 @ 机器人的消息不会触发回复，但会按群留在内存里最近 `group_context_messages`（默认 30）条；被 @ 时，这些消息和 @ 的那句一起交给模型，它就能接上话题。每条只送一次，不写盘，不跨群。
+群里没 @ 机器人的消息会按群留在内存里最近 `group_context_messages`（默认 30）条；被 @ 时，这些消息和 @ 的那句一起交给模型，它就能接上话题。每条只送一次，不写盘，不跨群。
+
+机器人会在这些情况下开口：
+
+- **被 @**：直接回复；
+- **被名字直呼**：消息里出现当前角色卡的 `name` / `nickname`（切卡后自动跟着变），或 `[bot.proactive] aliases` 里的额外名字，也算被叫到，直接回复；
+- **引用回复**：引用了机器人最近发的消息（保留最近 200 条消息 id），也直接回复；
+- **主动接话**：其余消息按 `[bot.proactive]` 判定——`probability`（默认 15%）逐条掷骰，命中后还要满足冷却 `cooldown_seconds`（默认 90s）、小时/天配额（12/60）、最少上下文条数、安静时段；`keywords` 命中时跳过概率直接尝试；
+- **接话窗口**：机器人刚在群里说过话后 `followup_seconds`（默认 300s）内，概率乘以 `followup_multiplier`（默认 2），更容易顺着话题继续聊。
+
+`/proactive status` 可以查看当前概率、冷却、配额和本群用量；`/proactive on|off` 临时开关。
 
 ### 身份如何传给 DSH
 
@@ -158,7 +188,8 @@ DSH SDK 的 prompt 接口只有 session id 和消息内容，没有元数据字�
 | `/etc/qqbot/bot.env` | 密钥和运行开关，`640 root:qqbot` |
 | `/etc/qqbot/config.toml` | OneBot、LLM、DSH、回复策略、路径 |
 | `/var/lib/qqbot/dsh-home/profiles/qqbot/cordis.patch.yml` | DSH profile 的插件选择 |
-| `/etc/qqbot/character.json` | 角色卡 |
+| `/var/lib/qqbot/characters.db` | 角色卡库（SQLite） |
+| `/etc/qqbot/character.json` | 旧版单卡文件，库为空时导入 |
 | `/var/lib/qqbot/dsh-workspace/` | 模型可读写的记忆工作区 |
 
 `bot/config.example.toml` 里有完整字段和注释。群聊默认只回复 @ 消息；不想在群里说话时把 `[bot] reply_group_at` 设为 `false`。
@@ -229,6 +260,7 @@ auto: true
 
 ```
 bot/        adapter：OneBot 客户端、DSH client、角色卡、SQLite、prompt 回退
+cards/      示例角色卡（安装脚本复制到 /opt/qqbot/cards）
 deploy/     NapCat/Docker、systemd、安装脚本、诊断工具
 dsh/        DSH 自定义 profile patch、user-profile 插件、fake LLM 测试服务
 docs/       架构说明

@@ -18,6 +18,10 @@ install -d -o root -g qqbot -m 750 /etc/qqbot
 
 cp -a "$SRC/bot/." /opt/qqbot/bot/
 rm -rf /opt/qqbot/bot/__pycache__
+install -d -o root -g qqbot -m 750 /opt/qqbot/cards
+cp -a "$SRC/cards/." /opt/qqbot/cards/
+chown -R root:qqbot /opt/qqbot/cards
+chmod -R g+r /opt/qqbot/cards
 
 python3 -m venv /opt/qqbot/bot/venv
 /opt/qqbot/bot/venv/bin/pip install -q --upgrade pip -i "$PIP_INDEX"

@@ -26,9 +26,9 @@
 
 - 维护到 NapCat 的 OneBot 11 正向 WebSocket：token 鉴权、重连、心跳、echo 关联；
 - 解析消息段（text / at / image / face / record 等），去重；
-- 决定是否回复：私聊全回，群聊只在被 @ 且 `reply_group_at = true` 时回复；
+- 决定是否回复：私聊全回；群聊在被 @、叫当前角色名（卡片的 `name`/`nickname` 或 `aliases`）或引用机器人消息时回复，其余消息按主动策略参与；
 - 把 QQ 会话映射成稳定的 DSH `session_id`；
-- 角色卡加载、系统提示词构建、世界书落盘；
+- 角色卡库（SQLite）与热切换、系统提示词构建、世界书落盘；
 - 长回复拆分、发送失败日志；
 - 本地 SQLite 消息审计（不是 DSH 的上下文来源）。
 
@@ -73,12 +73,13 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 
 1. NapCat 通过 WS 推送 `message` 事件。
 2. adapter 提取文本、判断是否需要回复：
-   - 群消息没 @ 机器人：放进该群的内存缓冲（`bot/group_context.py`，默认最近 30 条），结束；
-   - 否则生成 `conversation_id`：私聊 `private:<user_id>`，群聊 `group:<group_id>:<user_id>`。
+   - 私聊：生成 `conversation_id = private:<user_id>`；
+   - 群聊被叫到（被 @、消息里出现角色卡的名字、或引用了机器人最近发的消息）：生成 `conversation_id = group:<group_id>`，直接回复；
+   - 其余群消息：放进该群的内存缓冲（`bot/group_context.py`，默认最近 30 条），再交给 `[bot.proactive]` 判定是否主动接话（概率、冷却、小时/天配额、安静时段、关键词、接话窗口）。
 3. `session_id = conversation_id.replace(":", "-")`。
-4. 如果角色卡 mtime 变化：重新生成系统提示词、写 `memory/lore.md`、重启 DSH runtime（session 保留）。
+4. 读取角色卡库的 active signature（`id` / `updated_at` / `fingerprint`）；变化时重新生成系统提示词、原子写 `memory/lore.md`、重启 DSH runtime（session 保留）。`/card use` 会直接触发这次刷新；`[cards] bootstrap` 文件被修改时也会被检测到。
 5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
-6. 群聊时取出并清空该群缓冲，和 @ 的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称: 内容`。
+6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称: 内容`。
 7. `asyncio.to_thread(dsh.run, session_id, prompt)`：
    - DSH 启动/复用 runtime；
    - 加载或创建 `session_id` 的 JSONL 历史；
@@ -152,6 +153,16 @@ CREATE TABLE group_facts (
   4. 回退客户端（`[dsh] enabled = false`）同样从激活行取 `base_url`、key、`max_tokens`、`reasoning_effort`。
 - 同一 provider 下的行必须共享 `api` / `base_url` / `api_key_env`，不一致时渲染报错。
 - 管理命令：`--list-models`、`--use-model p/m`、`--set-model p/m field=value ...`；修改后重启生效。
+
+## 角色卡库（`bot/cards.py`）
+
+- SQLite `/var/lib/qqbot/characters.db`，表 `cards`，主键 `id`；部分唯一索引保证全表最多一行 `is_active = 1`。
+- 入库时统一归一化为 V3 `payload`（JSON），并抽出 `name` / `nickname` / `description` / `personality` / `scenario` / `tags` / `creator` 用于展示和搜索；`fingerprint` 是 payload 的 SHA-256，用于去重。
+- 搜索用 `LIKE` 逐字段匹配（关键词之间 AND、字段之间 OR），不依赖 FTS5 分词器，中文子串可以直接搜；`%` / `_` 会被转义。
+- 安装来源：`url`（`/card install <url>`、`--install-card`）、`image`（管理员发来的 PNG）、`file`（服务器路径）、`bootstrap`（旧版单卡文件）。下载上限 12 MB，只接受 PNG 或 JSON。
+- `active_signature()` 返回 `(id, updated_at, fingerprint)`，每轮消息只查一次；变化时 `Bot.refresh_card()` 重建 system prompt，并调用 `DSHClient.set_system_prompt()` 重启 DSH runtime。命令行的 `--use-card` 由同一机制在下一轮消息被发现。
+- `bootstrap` 兼容：库为空时导入 `[cards] bootstrap`；只要这张卡仍然激活，就按 mtime 重新导入，保留原来「改文件即热加载」的行为。
+- 命令行：`--list-cards`、`--search-cards <query>`、`--install-card <url|path>`、`--use-card <id|name>`、`--show-card`。
 
 ## 上下文与压缩
 

@@ -29,6 +29,17 @@ request_timeout = 120.0
 database = "/var/lib/qqbot/models.db"
 patch = "/var/lib/qqbot/dsh-state/models.patch.json"
 
+[cards]
+# Character card library. Cards are stored as normalised V3 payloads in SQLite;
+# the active card is hot-switched with /card use (no restart, sessions kept).
+#   main.py --list-cards | --search-cards <query>
+#   main.py --install-card <url|path>
+#   main.py --use-card <id|name>
+database = "/var/lib/qqbot/characters.db"
+# Legacy single-card file. Imported when the library is empty; while that card
+# stays active its mtime is watched, so editing the file still hot-reloads.
+bootstrap = "/etc/qqbot/character.json"
+
 [bot]
 # Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;
 # this list is the fallback for local runs.
@@ -52,16 +63,20 @@ group_context_chars = 3000
 [bot.proactive]
 enabled = false
 groups = []                # empty = all groups
-probability = 0.04         # per eligible message
-cooldown_seconds = 600
-max_per_hour = 4
-max_per_day = 20
+probability = 0.15         # per eligible message; lower = quieter
+cooldown_seconds = 90      # minimum gap between proactive replies, per group
+max_per_hour = 12
+max_per_day = 60
 min_context_messages = 2
-keywords = []
-aliases = []
+keywords = []              # interest words: force a proactive attempt (quota still applies)
+aliases = []               # extra names for direct address; the active card's
+                           # name/nickname are always included automatically
 quiet_hours = [1, 7]       # [start, end) local hours; wraps past midnight
+followup_seconds = 300     # keep joining nearby messages this long after speaking
+followup_multiplier = 2.0  # probability multiplier inside that window
 prompt = "你正在群里和大家聊天。结合上面的最近消息，简短、自然地接一句；不要复述别人的话，不要长篇大论，不要提自己是 AI。"
 
 [paths]
+# Deprecated: used as [cards] bootstrap when that key is absent.
 character = "/etc/qqbot/character.json"
 database = "/var/lib/qqbot/memory.db"

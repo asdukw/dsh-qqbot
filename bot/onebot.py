@@ -37,9 +37,12 @@ class MessageEvent:
     sender_name: str
     group_id: int | None = None
     images: tuple[str, ...] = ()
+    # message_id of the message this one quotes, if any (OneBot reply segment).
+    reply_to: int | None = None
 
 
 _CQ_IMAGE_RE = re.compile(r"\[CQ:image,([^\]]*)\]")
+_CQ_REPLY_RE = re.compile(r"\[CQ:reply,([^\]]*)\]")
 _MAX_IMAGES = 4
 
 
@@ -67,7 +70,7 @@ class MessageParser:
             user_id = int(event.get("user_id") or 0)
             if user_id == self.self_id:
                 return None
-            text, at_me, images = self._extract_text(event.get("message"))
+            text, at_me, images, reply_to = self._extract_text(event.get("message"))
             if not text and not images:
                 return None
             raw_sender = event.get("sender")
@@ -85,14 +88,16 @@ class MessageParser:
                 sender_name=sender_name,
                 group_id=group_id,
                 images=tuple(images[:_MAX_IMAGES]),
+                reply_to=reply_to,
             )
         except (TypeError, ValueError) as exc:
             log.warning("malformed message event: %s", exc)
             return None
 
-    def _extract_text(self, message: Any) -> tuple[str, bool, list[str]]:
+    def _extract_text(self, message: Any) -> tuple[str, bool, list[str], int | None]:
         at_me = False
         images: list[str] = []
+        reply_to: int | None = None
         if isinstance(message, str):
             for match in _CQ_IMAGE_RE.finditer(message):
                 params: dict[str, str] = {}
@@ -102,6 +107,12 @@ class MessageParser:
                 url = params.get("url") or params.get("file") or ""
                 if url.startswith(("http://", "https://", "data:")):
                     images.append(url)
+            reply = _CQ_REPLY_RE.search(message)
+            if reply:
+                for item in reply.group(1).split(","):
+                    key, _, value = item.partition("=")
+                    if key.strip() == "id" and value.strip().isdigit():
+                        reply_to = int(value.strip())
             marker = f"[CQ:at,qq={self.self_id}]"
             at_me = marker in message
             text = message.replace(marker, "")
@@ -113,10 +124,10 @@ class MessageParser:
                 if end < 0:
                     break
                 text = text[:start] + text[end + 1:]
-            return text.strip(), at_me, images
+            return text.strip(), at_me, images, reply_to
 
         if not isinstance(message, list):
-            return "", False, []
+            return "", False, [], None
 
         parts: list[str] = []
         for segment in message:
@@ -138,6 +149,10 @@ class MessageParser:
                 if url.startswith(("http://", "https://", "data:")):
                     images.append(url)
                 parts.append("[图片]")
+            elif kind == "reply":
+                value = str(data.get("id") or "")
+                if value.isdigit():
+                    reply_to = int(value)
             elif kind == "face":
                 parts.append("[表情]")
             elif kind == "record":
@@ -146,7 +161,7 @@ class MessageParser:
                 parts.append("[视频]")
             elif kind == "file":
                 parts.append("[文件]")
-        return "".join(parts).strip(), at_me, images
+        return "".join(parts).strip(), at_me, images, reply_to
 
 
 class OneBotWSClient:
@@ -286,14 +301,14 @@ class OneBotWSClient:
             raise OneBotError(f"{action} failed: {response}")
         return response.get("data") or {}
 
-    async def send_private(self, user_id: int, text: str) -> None:
-        await self.call("send_private_msg", {
+    async def send_private(self, user_id: int, text: str) -> dict:
+        return await self.call("send_private_msg", {
             "user_id": user_id,
             "message": [{"type": "text", "data": {"text": text}}],
         })
 
-    async def send_group(self, group_id: int, text: str) -> None:
-        await self.call("send_group_msg", {
+    async def send_group(self, group_id: int, text: str) -> dict:
+        return await self.call("send_group_msg", {
             "group_id": group_id,
             "message": [{"type": "text", "data": {"text": text}}],
         })

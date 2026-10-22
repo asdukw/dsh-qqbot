@@ -45,10 +45,34 @@ class ProactivePolicyTests(unittest.TestCase):
         self.assertFalse(policy.should_reply(1, "hi", 5, 1000, hour=12, rng=lambda: 0.9))
         self.assertTrue(policy.should_reply(1, "hi", 5, 1000, hour=12, rng=lambda: 0.05))
 
-    def test_alias_forces_reply(self) -> None:
-        policy = ProactivePolicy(settings(probability=0.0, aliases=("小助手",)))
-        self.assertTrue(policy.should_reply(1, "小助手在吗", 5, 1000, hour=12))
+    def test_keyword_forces_reply(self) -> None:
+        policy = ProactivePolicy(settings(probability=0.0, keywords=("显卡",)))
+        self.assertTrue(policy.should_reply(1, "这显卡怎么样", 5, 1000, hour=12))
         self.assertFalse(policy.should_reply(1, "在吗", 5, 1000, hour=12))
+
+    def test_alias_is_a_name_address_not_a_random_try(self) -> None:
+        policy = ProactivePolicy(settings(probability=0.0, aliases=("小助手",)))
+        self.assertTrue(policy.named("小助手在吗"))
+        self.assertFalse(policy.named("在吗"))
+        # Names are handled as a direct reply by the bot, not by the policy.
+        self.assertFalse(policy.should_reply(1, "小助手在吗", 5, 1000, hour=12))
+
+    def test_card_names_extend_the_address_aliases(self) -> None:
+        policy = ProactivePolicy(settings(aliases=()))
+        self.assertFalse(policy.named("大肥鱼在吗"))
+        self.assertTrue(policy.named("大肥鱼在吗", ("大肥鱼", "小杜")))
+        self.assertTrue(policy.named("小杜你好", ("大肥鱼", "小杜")))
+        # Single-character names are ignored to avoid false positives.
+        self.assertFalse(policy.named("鱼在吗", ("鱼",)))
+
+    def test_followup_multiplier(self) -> None:
+        policy = ProactivePolicy(settings(
+            probability=0.1, cooldown_seconds=0,
+            followup_seconds=300, followup_multiplier=2.0,
+        ))
+        policy.note_speaking(1, 1000)
+        self.assertTrue(policy.should_reply(1, "hi", 5, 1100, hour=12, rng=lambda: 0.15))
+        self.assertFalse(policy.should_reply(1, "hi", 5, 1400, hour=12, rng=lambda: 0.15))
 
     def test_cooldown_and_hourly_cap(self) -> None:
         policy = ProactivePolicy(settings(cooldown_seconds=600, max_per_hour=2))
