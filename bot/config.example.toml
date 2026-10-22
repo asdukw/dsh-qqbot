@@ -25,7 +25,10 @@ workspace = "/var/lib/qqbot/dsh-workspace"
 profile = "qqbot"
 provider = "opencode"
 model = "deepseek-v4.1-flash"
+max_tokens = 2048          # per-request output cap; also reserves context
 request_timeout = 120.0
+# Context length is per model in dsh/qqbot.cordis.patch.yml (contextWindow).
+# DSH compacts automatically; thresholdRatio/headroom/retainRatio live there too.
 
 [bot]
 reply_private = true

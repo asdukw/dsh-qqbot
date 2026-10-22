@@ -33,6 +33,7 @@ class DSHConfig:
     profile: str = "qqbot"
     provider: str = "opencode"
     model: str = "deepseek-v4.1-flash"
+    max_tokens: int = 2048
     request_timeout: float = 120.0
 
 
@@ -99,6 +100,7 @@ class DSHClient:
                 profile=self.config.profile,
                 provider=self.config.provider,
                 model=self.config.model,
+                max_tokens=self.config.max_tokens,
                 request_timeout_seconds=self.config.request_timeout,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the bot

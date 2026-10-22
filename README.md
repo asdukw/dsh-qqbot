@@ -89,7 +89,7 @@ sudoedit /etc/qqbot/bot.env
 至少填这几项：
 
 ```ini
-OPENCODE_API_KEY=sk-...
+LLM_API_KEY=sk-...
 LLM_PROVIDER=opencode
 LLM_MODEL=
 DSH_PROVIDER=opencode
@@ -99,9 +99,11 @@ DSH_MODEL=deepseek-v4.1-flash
 说明：
 
 - `DSH_PROVIDER` / `DSH_MODEL` 是机器人实际使用的模型路由，默认是 OpenCode Zen 的 `deepseek-v4.1-flash`。
-- `LLM_PROVIDER` / `LLM_MODEL` 是 adapter 自带的薄客户端回退路径；`OPENCODE_API_KEY` 同时供两条路径使用。
+- `LLM_API_KEY` 是 DSH 路由和 adapter 回退路径共用的单个 key；也可以按 provider 填 `OPENCODE_API_KEY` / `DEEPSEEK_API_KEY` 等，`LLM_API_KEY` 优先。
 - 想换 provider：pi-ai 已内置的 route（如 `openai`、`deepseek`）可以直接用；没有内置的中转需要在 `dsh/qqbot.cordis.patch.yml` 的 `llm-pi-ai.providers` 里加一个 custom route，并让 `DSH_MODEL` 与 route 的 models 列表一致。
 - `bot/llm.py` 里的 base URL 预设只用于 adapter 的薄客户端回退路径（`DSH_ENABLED=false` 时）。
+
+> `deepseek-v4.1-flash-free` 只能在 OpenCode 客户端内使用；从机器人直接调用会返回 `403 FreeTierError`。机器人请使用付费的 `deepseek-v4.1-flash`，或换一个 provider。
 
 ### 4. 启动
 
@@ -147,6 +149,24 @@ sudo systemctl restart qqbot
 | `/var/lib/qqbot/dsh-workspace/` | 模型可读写的记忆工作区 |
 
 `bot/config.example.toml` 里有完整字段和注释。群聊默认只回复 @ 消息；不想在群里说话时把 `[bot] reply_group_at` 设为 `false`。
+
+## 上下文与压缩
+
+- **上下文长度**写在 DSH route 的模型条目里（`dsh/qqbot.cordis.patch.yml` 的 `contextWindow`）：付费 Flash 是 128k，free 是 200k。模型不需要在 prompt 里被告知上下文长度；DSH 的 token meter/compaction 直接读这个元数据。
+- `DSH_CONTEXT_WINDOW` 环境变量只用于直连 DeepSeek adapter 的兜底；我们的 `llm-pi-ai` 自定义 route 以模型条目的 `contextWindow` 为准。
+- `compaction-basic` 默认在 80% 压力时自动压缩。本项目显式配置为：
+
+```yaml
+thresholdRatio: 0.8        # 目标 80%
+headroomTokens: 16384      # 额外预留
+retainRatio: 0.16          # 压缩后保留约 16% 的最近上下文
+auto: true
+```
+
+- 实际触发点 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`。配合 `max_tokens = 2048`，200k 窗口下约为 160k（80%）。
+- 压缩会把较旧的历史总结成摘要，保留最近的上下文；完整 session 仍以 JSONL 存在 `/var/lib/qqbot/dsh-home/sessions`。
+- 摘要默认使用同一个 provider/model；需要的话可以在 `compaction-basic` 里用 `summarizationProvider` / `summarizationModel` 单独指定。
+- `DSH_MAX_TOKENS`（或 `[dsh] max_tokens`）是单次输出上限，也会影响压缩时的输出预留。
 
 ## 安全
 

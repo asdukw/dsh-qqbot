@@ -34,20 +34,23 @@ lines = [
     f"LLM_PROVIDER={values.get('LLM_PROVIDER', 'opencode')}",
     "# Empty = provider default (opencode: deepseek-v4.1-flash, deepseek: deepseek-flash)",
     f"LLM_MODEL={values.get('LLM_MODEL', '')}",
-    "# Fill the key that matches LLM_PROVIDER. Only one needs to be set.",
+    "# Single key for the selected DSH route and the fallback client:",
+    f"LLM_API_KEY={values.get('LLM_API_KEY', '')}",
+    "# Optional provider-specific keys (used when LLM_API_KEY is empty):",
 ]
 for name in KEY_VARS:
     lines.append(f"{name}={values.get(name, '')}")
 lines += [
-    "# For a custom OpenAI-compatible endpoint, set all three:",
+    "# For a custom OpenAI-compatible endpoint only:",
     f"LLM_BASE_URL={values.get('LLM_BASE_URL', '')}",
-    f"LLM_API_KEY={values.get('LLM_API_KEY', '')}",
     "",
     "# ── DSH runtime ─────────────────────────────────────────────",
     f"DSH_HOME={values.get('DSH_HOME', '/var/lib/qqbot/dsh-home')}",
     f"DSH_PROFILE={values.get('DSH_PROFILE', 'qqbot')}",
     f"DSH_PROVIDER={values.get('DSH_PROVIDER', 'opencode')}",
     f"DSH_MODEL={values.get('DSH_MODEL', 'deepseek-v4.1-flash')}",
+    f"DSH_MAX_TOKENS={values.get('DSH_MAX_TOKENS', '2048')}",
+    "# Context length is per model in the DSH profile, not an env var.",
     f"USER_PROFILE_DB={values.get('USER_PROFILE_DB', '/var/lib/qqbot/dsh-state/profile.db')}",
     "",
     "# ── NapCat OneBot ────────────────────────────────────────────",

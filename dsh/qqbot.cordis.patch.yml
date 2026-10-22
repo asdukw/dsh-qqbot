@@ -37,6 +37,14 @@
     mode: workspace-write
     workspaceRoot: /var/lib/qqbot/dsh-workspace
 
+# ── context pressure: compact at ~80% of the window ────────────
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.8
+    headroomTokens: 16384
+    retainRatio: 0.16
+    auto: true
+
 # ── no DeepSeek session-log upload ──────────────────────────────
 - id: session-log-deepseek
   config:
@@ -56,13 +64,16 @@
         providers:
           opencode:
             displayName: OpenCode Zen
-            apiKeyEnv: OPENCODE_API_KEY
+            apiKeyEnv: LLM_API_KEY
             api: openai-completions
             baseURL: https://opencode.ai/inference/openai/v1
             models:
               - id: deepseek-v4.1-flash
                 name: DeepSeek V4.1 Flash
                 contextWindow: 128000
+              - id: deepseek-v4.1-flash-free
+                name: DeepSeek V4.1 Flash Free
+                contextWindow: 200000
           # Local test route used by dsh/fake_llm.py; harmless when unused.
           fake:
             displayName: Fake (local test)

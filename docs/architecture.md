@@ -114,6 +114,23 @@ CREATE TABLE facts (
 
 画像只保存用户明确说出的稳定事实。事件、约定和重要片段走文件记忆（`memory/notes/`），由模型用 `write` / `edit` / `glob` / `grep` 维护。
 
+## 上下文与压缩
+
+- DSH 的 `llm-pi-ai` route 为每个模型声明 `contextWindow`（付费 Flash 128k，free 200k）。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。
+- `compaction-basic` 在 step boundary 检查 token 压力，默认 `thresholdRatio = 0.8`；本项目显式设置为：
+
+```yaml
+thresholdRatio: 0.8
+headroomTokens: 16384
+retainRatio: 0.16
+auto: true
+```
+
+- 有效阈值 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`。
+- 超过阈值时，较旧历史被总结成摘要，保留最近约 16% 的上下文；完整 session 仍以 JSONL 持久化。
+- `max_tokens = 2048`（`DSH_MAX_TOKENS` / `[dsh] max_tokens`）限制单次输出，也作为压缩时的输出预留。
+- `DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
+
 ## 文件记忆
 
 - `memory/lore.md`：角色卡世界书，启动/换卡时由 adapter 生成；

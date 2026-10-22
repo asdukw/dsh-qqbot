@@ -76,4 +76,4 @@ systemctl daemon-reload
 systemctl enable qqbot >/dev/null
 
 echo "bot installed."
-echo "next: put OPENCODE_API_KEY into /etc/qqbot/bot.env, then: systemctl start qqbot"
+echo "next: put LLM_API_KEY into /etc/qqbot/bot.env, then: systemctl start qqbot"

@@ -62,6 +62,7 @@ class DSHSection:
     profile: str = "qqbot"
     provider: str = "opencode"
     model: str = "deepseek-v4.1-flash"
+    max_tokens: int = 2048
     request_timeout: float = 120.0
 
 
@@ -156,6 +157,7 @@ def load_config(path: str | Path) -> AppConfig:
         profile=os.environ.get("DSH_PROFILE", "").strip() or str(dsh_raw.get("profile", "qqbot")),
         provider=os.environ.get("DSH_PROVIDER", "").strip() or str(dsh_raw.get("provider", "opencode")),
         model=os.environ.get("DSH_MODEL", "").strip() or str(dsh_raw.get("model", "deepseek-v4.1-flash")),
+        max_tokens=int(os.environ.get("DSH_MAX_TOKENS", "").strip() or dsh_raw.get("max_tokens", 2048)),
         request_timeout=float(dsh_raw.get("request_timeout", 120.0)),
     )
 
@@ -201,7 +203,7 @@ def dsh_api_key(config: AppConfig) -> str:
         env_name = get_provider(config.dsh.provider).api_key_env
     except ValueError:
         env_name = "LLM_API_KEY"
-    return os.environ.get(env_name, "").strip() or os.environ.get("LLM_API_KEY", "").strip()
+    return os.environ.get("LLM_API_KEY", "").strip() or os.environ.get(env_name, "").strip()
 
 
 def build_dsh_system_prompt(card) -> str:
@@ -429,6 +431,7 @@ async def check_dsh(config: AppConfig) -> int:
             profile=config.dsh.profile,
             provider=config.dsh.provider,
             model=config.dsh.model,
+            max_tokens=config.dsh.max_tokens,
             request_timeout=config.dsh.request_timeout,
         ),
         system_prompt="你是一个测试助手。",
@@ -505,6 +508,7 @@ async def run(config: AppConfig) -> int:
                 profile=config.dsh.profile,
                 provider=config.dsh.provider,
                 model=config.dsh.model,
+                max_tokens=config.dsh.max_tokens,
                 request_timeout=config.dsh.request_timeout,
             )
         )
