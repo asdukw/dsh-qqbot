@@ -152,8 +152,9 @@ sudo systemctl restart qqbot
 
 ## 上下文与压缩
 
-- **上下文长度**写在 DSH route 的模型条目里（`dsh/qqbot.cordis.patch.yml` 的 `contextWindow`）：付费 Flash 是 128k，free 是 200k。模型不需要在 prompt 里被告知上下文长度；DSH 的 token meter/compaction 直接读这个元数据。
+- **上下文长度**写在 DSH route 的模型条目里（`dsh/qqbot.cordis.patch.yml` 的 `contextWindow`）：付费 Flash 是 1M，free 是 200k。这不是 Python 代码里的常量，而是 profile 配置；OpenCode 的 `/models` 不返回 context length，所以自定义 route 必须显式声明。模型不需要在 prompt 里被告知上下文长度；DSH 的 token meter/compaction 直接读这个元数据。
 - `DSH_CONTEXT_WINDOW` 环境变量只用于直连 DeepSeek adapter 的兜底；我们的 `llm-pi-ai` 自定义 route 以模型条目的 `contextWindow` 为准。
+- 这两个数字可以用 `DSH_CONTEXT_WINDOW_PAID` / `DSH_CONTEXT_WINDOW_FREE` 在 `bot.env` 里覆盖；profile 用 `!!js` 读取，默认 1M / 200k。
 - `compaction-basic` 默认在 80% 压力时自动压缩。本项目显式配置为：
 
 ```yaml
@@ -163,7 +164,7 @@ retainRatio: 0.16          # 压缩后保留约 16% 的最近上下文
 auto: true
 ```
 
-- 实际触发点 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`。配合 `max_tokens = 2048`，200k 窗口下约为 160k（80%）。
+- 实际触发点 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`。配合 `max_tokens = 2048`，1M 窗口下约为 800k，200k 窗口下约为 160k，都是 80%。
 - 压缩会把较旧的历史总结成摘要，保留最近的上下文；完整 session 仍以 JSONL 存在 `/var/lib/qqbot/dsh-home/sessions`。
 - 摘要默认使用同一个 provider/model；需要的话可以在 `compaction-basic` 里用 `summarizationProvider` / `summarizationModel` 单独指定。
 - `DSH_MAX_TOKENS`（或 `[dsh] max_tokens`）是单次输出上限，也会影响压缩时的输出预留。

@@ -70,10 +70,10 @@
             models:
               - id: deepseek-v4.1-flash
                 name: DeepSeek V4.1 Flash
-                contextWindow: 128000
+                contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW_PAID ?? 1000000)
               - id: deepseek-v4.1-flash-free
                 name: DeepSeek V4.1 Flash Free
-                contextWindow: 200000
+                contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW_FREE ?? 200000)
           # Local test route used by dsh/fake_llm.py; harmless when unused.
           fake:
             displayName: Fake (local test)

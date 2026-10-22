@@ -116,7 +116,7 @@ CREATE TABLE facts (
 
 ## 上下文与压缩
 
-- DSH 的 `llm-pi-ai` route 为每个模型声明 `contextWindow`（付费 Flash 128k，free 200k）。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。
+- DSH 的 `llm-pi-ai` route 为每个模型声明 `contextWindow`（付费 Flash 1M，free 200k）。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。
 - `compaction-basic` 在 step boundary 检查 token 压力，默认 `thresholdRatio = 0.8`；本项目显式设置为：
 
 ```yaml
@@ -126,10 +126,10 @@ retainRatio: 0.16
 auto: true
 ```
 
-- 有效阈值 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`。
+- 有效阈值 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`；1M 窗口约 800k，200k 窗口约 160k。
 - 超过阈值时，较旧历史被总结成摘要，保留最近约 16% 的上下文；完整 session 仍以 JSONL 持久化。
 - `max_tokens = 2048`（`DSH_MAX_TOKENS` / `[dsh] max_tokens`）限制单次输出，也作为压缩时的输出预留。
-- `DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
+- 上下文长度可以用 `DSH_CONTEXT_WINDOW_PAID` / `DSH_CONTEXT_WINDOW_FREE` 环境变量覆盖；profile 里用 `!!js` 读取，默认 1M / 200k。`DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
 
 ## 文件记忆
 
