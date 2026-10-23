@@ -210,7 +210,7 @@ class VoiceSection:
     rate: str = "+0%"
     # fish (s2.1-pro-free) and stepfun (stepaudio-2.5-tts) read `voice` as
     # their own reference id / voice id.
-    model: str = "stepaudio-2.5-tts"
+    model: str = "stepaudio-3-tts"
     api_key_env: str = "STEPFUN_API_KEY"
     base_url: str = "https://api.stepfun.com"
     instruction: str = ""
@@ -382,7 +382,7 @@ def load_config(path: str | Path) -> AppConfig:
         provider=str(voice_raw.get("provider", "edge")).lower(),
         voice=str(voice_raw.get("voice", "zh-CN-XiaoxiaoNeural")),
         rate=str(voice_raw.get("rate", "+0%")),
-        model=str(voice_raw.get("model", "stepaudio-2.5-tts")),
+        model=str(voice_raw.get("model", "stepaudio-3-tts")),
         api_key_env=str(voice_raw.get("api_key_env", "STEPFUN_API_KEY")),
         base_url=str(voice_raw.get("base_url", "https://api.stepfun.com")),
         instruction=str(voice_raw.get("instruction", "")),

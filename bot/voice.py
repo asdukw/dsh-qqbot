@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_FISH_MODEL = "s2.1-pro-free"
-DEFAULT_STEPFUN_MODEL = "stepaudio-2.5-tts"
+DEFAULT_STEPFUN_MODEL = "stepaudio-3-tts"
 STEPFUN_INSTRUCTION_MODELS = ("stepaudio-2.5-tts", "stepaudio-3-tts")
 MAX_CHARS = 80
 

@@ -83,7 +83,7 @@ rate = "+0%"
 # Provider-specific settings (voice is an edge name / StepFun voice id /
 # Fish reference_id). StepFun voices: ruanmengnvsheng, yuanqishaonv,
 # tianmeinvsheng, lengyanyujie, ...
-model = "stepaudio-2.5-tts"
+model = "stepaudio-3-tts"
 api_key_env = "STEPFUN_API_KEY"
 base_url = "https://api.stepfun.com"
 # Only stepaudio-2.5/3-tts read this; e.g. "傲娇、带点撒娇，语速稍快".
