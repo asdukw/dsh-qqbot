@@ -81,7 +81,7 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 3. `session_id = conversation_id.replace(":", "-")`。
 4. 读取角色卡库的 active signature（`id` / `updated_at` / `fingerprint`）；变化时重新生成系统提示词、原子写 `memory/lore.md`、重启 DSH runtime（session 保留）。`/card use` 会直接触发这次刷新；`[cards] bootstrap` 文件被修改时也会被检测到。
 5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
-6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称: 内容`。
+6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称(QQ号): 内容`；每行都带发言者 QQ 号（群名片相同的人也能区分），消息头的发言者若还有不同的 QQ 昵称会额外注明。
 7. 图片：模型能直接读图，但只有 thin client 支持 `image_url` 内容块。被叫到的消息自带图片时走 `_reply_llm`，并把群里最近 `group_context_images`（默认 2）张图片一起以 data URI 附上；DSH 的 content-block 协议不支持图片，所以主动接话先用一次视觉调用把最近图片转成一两句文字描述，再拼进 prompt。
 8. `asyncio.to_thread(dsh.run, session_id, prompt)`：
    - DSH 启动/复用 runtime；

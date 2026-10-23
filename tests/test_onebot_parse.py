@@ -82,6 +82,14 @@ class MessageParserTests(unittest.TestCase):
         self.assertEqual(parsed.reply_to, 555)
         self.assertFalse(parsed.at_me)
 
+    def test_group_card_and_nickname_are_kept_apart(self) -> None:
+        parsed = self.parser.parse(
+            event("在吗", sender={"card": "群名片", "nickname": "真名"})
+        )
+        assert parsed is not None
+        self.assertEqual(parsed.sender_name, "群名片")
+        self.assertEqual(parsed.sender_nickname, "真名")
+
     def test_plain_message_has_no_reply_target(self) -> None:
         parsed = self.parser.parse(event("随便聊聊"))
         assert parsed is not None

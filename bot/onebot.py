@@ -41,6 +41,9 @@ class MessageEvent:
     reply_to: int | None = None
     # Subset of images QQ marked as stickers (summary "[动画表情]" / sub_type 1).
     stickers: tuple[str, ...] = ()
+    # The sender's QQ nickname; sender_name prefers the group card, so this can
+    # differ and tells the model who is actually behind a joke card.
+    sender_nickname: str = ""
 
 
 _CQ_IMAGE_RE = re.compile(r"\[CQ:image,([^\]]*)\]")
@@ -102,6 +105,7 @@ class MessageParser:
             raw_sender = event.get("sender")
             sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
             sender_name = str(sender.get("card") or sender.get("nickname") or user_id)
+            sender_nickname = str(sender.get("nickname") or "")
             group_id = int(event["group_id"]) if event.get("group_id") else None
             message_type = str(event.get("message_type") or ("group" if group_id else "private"))
 
@@ -116,6 +120,7 @@ class MessageParser:
                 images=tuple(images[:_MAX_IMAGES]),
                 reply_to=reply_to,
                 stickers=tuple(stickers[:_MAX_IMAGES]),
+                sender_nickname=sender_nickname,
             )
         except (TypeError, ValueError) as exc:
             log.warning("malformed message event: %s", exc)

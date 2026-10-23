@@ -13,6 +13,8 @@ class GroupLine:
     # Image URLs from that message, so an @ or a proactive turn can still see
     # the picture after the message itself has scrolled into the context.
     images: tuple[str, ...] = ()
+    # Stable identity for the model; display names change with group cards.
+    user_id: int = 0
 
 
 class GroupContextBuffer:
@@ -29,7 +31,12 @@ class GroupContextBuffer:
         self._buffers: dict[int, deque[GroupLine]] = {}
 
     def add(
-        self, group_id: int, sender: str, text: str, images: tuple[str, ...] = ()
+        self,
+        group_id: int,
+        sender: str,
+        text: str,
+        images: tuple[str, ...] = (),
+        user_id: int = 0,
     ) -> None:
         if self.max_messages == 0 or not text.strip():
             return
@@ -41,6 +48,7 @@ class GroupContextBuffer:
                 sender or "某人",
                 text.strip()[: self.max_line_chars],
                 tuple(images),
+                int(user_id or 0),
             )
         )
 
@@ -70,13 +78,25 @@ class GroupContextBuffer:
         return list(reversed(newest))
 
 
-def format_group_turn(lines: list[GroupLine], sender: str, text: str, max_chars: int) -> str:
+def _speaker(name: str, user_id: int) -> str:
+    """Name plus QQ number, so the model can tell同名 people apart."""
+    name = name or "某人"
+    return f"{name}({user_id})" if user_id else name
+
+
+def format_group_turn(
+    lines: list[GroupLine],
+    sender: str,
+    text: str,
+    max_chars: int,
+    user_id: int = 0,
+) -> str:
     """Render recent group lines plus the @-message as one user turn."""
-    trigger = f"{sender or '某人'}: {text}"
+    trigger = f"{_speaker(sender, user_id)}: {text}"
     kept: list[str] = []
     used = 0
     for line in reversed(lines):  # keep the newest lines within the budget
-        rendered = f"{line.sender}: {line.text}"
+        rendered = f"{_speaker(line.sender, line.user_id)}: {line.text}"
         if used + len(rendered) > max_chars:
             break
         kept.append(rendered)
@@ -92,7 +112,7 @@ def format_proactive_turn(lines: list[GroupLine], instruction: str, max_chars: i
     kept: list[str] = []
     used = 0
     for line in reversed(lines):
-        rendered = f"{line.sender}: {line.text}"
+        rendered = f"{_speaker(line.sender, line.user_id)}: {line.text}"
         if used + len(rendered) > max_chars:
             break
         kept.append(rendered)

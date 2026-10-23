@@ -542,7 +542,11 @@ class Bot:
             addressed = event.at_me or self._addresses_bot(event, text)
             if not self.config.bot.reply_group_at or not addressed:
                 self.group_context.add(
-                    event.group_id, event.sender_name, text, images=event.images
+                    event.group_id,
+                    event.sender_name,
+                    text,
+                    images=event.images,
+                    user_id=event.user_id,
                 )
                 if not addressed:
                     await self._maybe_reply_proactively(conversation_id, event, text)
@@ -752,6 +756,8 @@ class Bot:
     def _context_header(self, event: MessageEvent) -> str:
         now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
         who = f"{event.sender_name}({event.user_id})"
+        if event.sender_nickname and event.sender_nickname != event.sender_name:
+            who += f" 昵称:{event.sender_nickname}"
         if event.message_type == "group" and event.group_id is not None:
             return f"[群聊 {event.group_id} | 当前时间 {now} | 发言者 {who}]"
         return f"[私聊 | 当前时间 {now} | 用户 {who}]"
@@ -761,7 +767,11 @@ class Bot:
         if event.message_type == "group" and event.group_id is not None:
             lines = self.group_context.drain(event.group_id)
             body = format_group_turn(
-                lines, event.sender_name, text, self.config.bot.group_context_chars
+                lines,
+                event.sender_name,
+                text,
+                self.config.bot.group_context_chars,
+                user_id=event.user_id,
             )
             return (
                 self._context_header(event) + "\n" + body + self._sticker_hint(),
@@ -877,7 +887,11 @@ class Bot:
         conversation_id = f"group:{event.group_id}"
         if not self.group_context.peek(event.group_id):
             self.group_context.add(
-                event.group_id, event.sender_name, event.text, images=event.images
+                event.group_id,
+                event.sender_name,
+                event.text,
+                images=event.images,
+                user_id=event.user_id,
             )
         await self._maybe_reload_model()
         lock = self._locks.setdefault(conversation_id, asyncio.Lock())

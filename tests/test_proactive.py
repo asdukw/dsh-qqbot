@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from group_context import GroupLine, format_proactive_turn  # noqa: E402
+from group_context import GroupLine, format_group_turn, format_proactive_turn  # noqa: E402
 from proactive import ProactivePolicy, ProactiveSettings  # noqa: E402
 
 
@@ -97,6 +97,17 @@ class ProactiveFormatTests(unittest.TestCase):
         self.assertIn("a: first", out)
         self.assertIn("b: second", out)
         self.assertTrue(out.endswith("接一句"))
+
+    def test_lines_carry_the_qq_number(self) -> None:
+        lines = [GroupLine("甲", "在吗", user_id=111)]
+        out = format_group_turn(lines, "乙", "看这个", 3000, user_id=222)
+        self.assertIn("甲(111): 在吗", out)
+        self.assertIn("乙(222): 看这个", out)
+
+    def test_proactive_lines_carry_the_qq_number(self) -> None:
+        lines = [GroupLine("甲", "在吗", user_id=111)]
+        out = format_proactive_turn(lines, "接一句", 1000)
+        self.assertIn("甲(111): 在吗", out)
 
     def test_budget_keeps_newest(self) -> None:
         lines = [GroupLine("a", "x" * 50), GroupLine("b", "最新")]
