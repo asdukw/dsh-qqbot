@@ -4,33 +4,70 @@ token = ""            # normally supplied by ONEBOT_TOKEN in /etc/qqbot/bot.env
 self_id = 0              # your bot QQ number
 
 [llm]
-# Presets live in bot/llm.py. Choose one:
-# opencode | deepseek | openai | openrouter | siliconflow | dashscope | moonshot | zhipu | custom
-# LLM_PROVIDER in /etc/qqbot/bot.env overrides this.
-provider = "opencode"
-# Empty = the provider's default model (opencode: deepseek-v4.1-flash, deepseek: deepseek-flash).
-# LLM_MODEL in /etc/qqbot/bot.env overrides this.
-model = ""
-max_tokens = 800
+# Fallback thin client only (used when [dsh] enabled = false). The model,
+# endpoint, key env, max output tokens and reasoning effort come from the
+# [models] registry; only sampling/transport knobs live here.
 temperature = 1.0
 timeout = 60.0
-# thinking = "enabled"     # only if the upstream model supports it
-# reasoning_effort = "high"
-# base_url = ""            # only needed for provider = "custom" or an explicit override
 
 [dsh]
 enabled = true
 home = "/var/lib/qqbot/dsh-home"
 workspace = "/var/lib/qqbot/dsh-workspace"
 profile = "qqbot"
-provider = "opencode"
-model = "deepseek-v4.1-flash"
-max_tokens = 2048          # per-request output cap; also reserves context
 request_timeout = 120.0
-# Context length is per model in dsh/qqbot.cordis.patch.yml (contextWindow).
-# DSH compacts automatically; thresholdRatio/headroom/retainRatio live there too.
+# Compaction thresholds (thresholdRatio/headroom/retainRatio) live in
+# dsh/qqbot.cordis.patch.yml.
+
+[models]
+# SQLite registry keyed by (provider, model_id) — the single source of model
+# configuration: which model is active, endpoint, key env, context window,
+# max output tokens, reasoning effort (default "low").
+#   main.py --list-models
+#   main.py --use-model opencode-go/deepseek-v4.1-flash
+#   main.py --set-model opencode-go/deepseek-v4.1-flash reasoning_effort=medium
+database = "/var/lib/qqbot/models.db"
+patch = "/var/lib/qqbot/dsh-state/models.patch.json"
+
+[cards]
+# Character card library. Cards are stored as normalised V3 payloads in SQLite;
+# the active card is hot-switched with /card use (no restart, sessions kept).
+#   main.py --list-cards | --search-cards <query>
+#   main.py --install-card <url|path>
+#   main.py --use-card <id|name>
+database = "/var/lib/qqbot/characters.db"
+# Legacy single-card file. Imported when the library is empty; while that card
+# stays active its mtime is watched, so editing the file still hot-reloads.
+bootstrap = "/etc/qqbot/character.json"
+
+[stickers]
+# Sticker (表情包) library. Images QQ marks as stickers are collected from
+# group chats only, deduplicated by content, and stored next to SQLite.
+collect = true
+max_per_hour = 20          # per group
+max_bytes = 8388608        # 8 MB per sticker
+max_stored = 500           # oldest/least-used are evicted beyond this
+# The model asks to send one with a trailing "[表情: 语气词]" line; the adapter
+# picks a sticker whose tags/description match and sends it after the text.
+send = true
+send_cooldown_seconds = 60
+max_sends_per_hour = 10    # per chat
+database = "/var/lib/qqbot/stickers.db"
+directory = "/var/lib/qqbot/stickers"
+
+[tasks]
+# Admin-only scheduled messages. Creation is semantic: one thin-client call
+# turns "/task add 每天早上8点提醒大家喝水" into a validated schedule.
+enabled = true
+database = "/var/lib/qqbot/tasks.db"
+check_seconds = 20         # scheduler poll interval
+max_tasks = 50
+max_per_chat = 10
 
 [bot]
+# Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;
+# this list is the fallback for local runs.
+# admins = [2834040317]
 reply_private = true
 reply_group_at = true      # answer only when @-mentioned in groups
 history_turns = 24         # user/assistant pairs kept per conversation
@@ -41,7 +78,32 @@ lore_max_chars = 4000
 greeting_on_first_chat = false
 notify_errors = true
 error_message = "（我这边网络或模型出了点问题，等一下再试）"
+# Group chat: messages that don't @ the bot are buffered per group (memory only)
+# and handed to the model together with the next @, so it can follow the topic.
+group_context_messages = 30
+group_context_chars = 3000
+# Recent group images the model gets to see on the next reply (own message
+# images are always included). 0 disables it; max 4.
+group_context_images = 2
+
+# Proactive group replies: join the conversation without being @-mentioned.
+[bot.proactive]
+enabled = false
+groups = []                # empty = all groups
+probability = 0.15         # per eligible message; lower = quieter
+cooldown_seconds = 90      # minimum gap between proactive replies, per group
+max_per_hour = 12
+max_per_day = 60
+min_context_messages = 2
+keywords = []              # interest words: force a proactive attempt (quota still applies)
+aliases = []               # extra names for direct address; the active card's
+                           # name/nickname are always included automatically
+quiet_hours = [1, 7]       # [start, end) local hours; wraps past midnight
+followup_seconds = 300     # keep joining nearby messages this long after speaking
+followup_multiplier = 2.0  # probability multiplier inside that window
+prompt = "你正在群里和大家聊天。结合上面的最近消息，简短、自然地接一句；不要复述别人的话，不要长篇大论，不要提自己是 AI。"
 
 [paths]
+# Deprecated: used as [cards] bootstrap when that key is absent.
 character = "/etc/qqbot/character.json"
 database = "/var/lib/qqbot/memory.db"

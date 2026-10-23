@@ -18,6 +18,10 @@ install -d -o root -g qqbot -m 750 /etc/qqbot
 
 cp -a "$SRC/bot/." /opt/qqbot/bot/
 rm -rf /opt/qqbot/bot/__pycache__
+install -d -o root -g qqbot -m 750 /opt/qqbot/cards
+cp -a "$SRC/cards/." /opt/qqbot/cards/
+chown -R root:qqbot /opt/qqbot/cards
+chmod -R g+r /opt/qqbot/cards
 
 python3 -m venv /opt/qqbot/bot/venv
 /opt/qqbot/bot/venv/bin/pip install -q --upgrade pip -i "$PIP_INDEX"
@@ -36,6 +40,7 @@ if [ ! -d "$DSH_HOME/profiles/qqbot" ]; then
 fi
 install -m 644 "$SRC/dsh/qqbot.cordis.patch.yml" "$DSH_HOME/profiles/qqbot/cordis.patch.yml"
 install -m 644 "$SRC/dsh/user-profile.mjs" /opt/qqbot/dsh/plugins/user-profile.mjs
+install -m 644 "$SRC/dsh/web-search-keyless.mjs" /opt/qqbot/dsh/plugins/web-search-keyless.mjs
 chown -R qqbot:qqbot "$DSH_HOME" /opt/qqbot/dsh/plugins /var/lib/qqbot/dsh-workspace /var/lib/qqbot/dsh-state
 install -m 755 "$SRC/deploy/napcat/napcat-qr.sh" /usr/local/bin/napcat-qr
 
@@ -71,9 +76,18 @@ python3 "$SRC/deploy/update-bot-env.py" /etc/qqbot/bot.env
 chown root:qqbot /etc/qqbot/bot.env
 chmod 640 /etc/qqbot/bot.env
 
+if [ -d /etc/needrestart ]; then
+    install -d -m 755 /etc/needrestart/conf.d
+    install -m 644 "$SRC/deploy/needrestart-qqbot.conf" /etc/needrestart/conf.d/50-qqbot.conf
+fi
+
 install -m 644 "$SRC/deploy/qqbot.service" /etc/systemd/system/qqbot.service
+install -m 644 "$SRC/deploy/qqbot-alert.service" /etc/systemd/system/qqbot-alert.service
+install -m 644 "$SRC/deploy/qqbot-backup.service" /etc/systemd/system/qqbot-backup.service
+install -m 644 "$SRC/deploy/qqbot-backup.timer" /etc/systemd/system/qqbot-backup.timer
 systemctl daemon-reload
 systemctl enable qqbot >/dev/null
+systemctl enable --now qqbot-backup.timer >/dev/null
 
 echo "bot installed."
-echo "next: put LLM_API_KEY into /etc/qqbot/bot.env, then: systemctl start qqbot"
+echo "next: put OPENCODE_API_KEY into /etc/qqbot/bot.env, then: systemctl start qqbot"

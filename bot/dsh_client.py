@@ -34,7 +34,10 @@ class DSHConfig:
     provider: str = "opencode"
     model: str = "deepseek-v4.1-flash"
     max_tokens: int = 2048
+    reasoning_effort: str = ""  # empty = model default
     request_timeout: float = 120.0
+    # Extra Cordis patch files applied at launch (e.g. the model-registry patch).
+    patches: tuple[str, ...] = ()
 
 
 def _turn_error(events: Any) -> str:
@@ -93,6 +96,11 @@ class DSHClient:
             "starting DSH runtime (home=%s profile=%s provider=%s model=%s)",
             self.config.home, self.config.profile, self.config.provider, self.config.model,
         )
+        kwargs: dict[str, Any] = {}
+        if self.config.patches:
+            kwargs["patches"] = tuple(self.config.patches)
+        if self.config.reasoning_effort:
+            kwargs["reasoning_effort"] = self.config.reasoning_effort
         try:
             self._harness = DeepSeekHarness(
                 dsh_home=self.config.home,
@@ -102,30 +110,54 @@ class DSHClient:
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
                 request_timeout_seconds=self.config.request_timeout,
+                **kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the bot
             raise DSHError(f"cannot start DSH runtime: {exc}") from exc
         return self._harness
 
-    def _run_locked(self, harness: Any, session_id: str, text: str) -> Any:
+    @staticmethod
+    def _content(text: str, images: Any = ()) -> Any:
+        """Build SDK content blocks: text plus ACP-style image blocks.
+
+        DSH accepts `{"type": "image", "data": <base64>, "mimeType": ...}`;
+        the MCP `source` shape instead wants an attachment receipt, which the
+        SDK does not expose. A bare string is cheaper when there are no images.
+        """
+        if not images:
+            return text
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        for uri in images:
+            if not uri.startswith("data:"):
+                log.warning("skipping non-data image URI for a DSH content block")
+                continue
+            header, _, payload = uri.partition(",")
+            mime = header[5:].split(";")[0].strip() or "image/png"
+            blocks.append({"type": "image", "data": payload, "mimeType": mime})
+        return blocks
+
+    def _run_locked(
+        self, harness: Any, session_id: str, text: str, images: Any = ()
+    ) -> Any:
+        content = self._content(text, images)
         if session_id in self._sessions:
-            return harness.run(text, session_id=session_id)
+            return harness.run(content, session_id=session_id)
         try:
-            result = harness.run(text, session_id=session_id)
+            result = harness.run(content, session_id=session_id)
         except Exception as exc:  # noqa: BLE001 - resume an existing session
             if "already exists" not in str(exc).lower():
                 raise
             log.info("resuming existing DSH session %s", session_id)
             session = harness.resume_session(session_id)
-            result = session.run(text)
+            result = session.run(content)
         self._sessions.add(session_id)
         return result
 
-    def run(self, session_id: str, text: str) -> str:
+    def run(self, session_id: str, text: str, images: Any = ()) -> str:
         with self._lock:
             harness = self._ensure_locked()
             try:
-                result = self._run_locked(harness, session_id, text)
+                result = self._run_locked(harness, session_id, text, images)
             except Exception as exc:  # noqa: BLE001 - reset for the next turn
                 log.exception("DSH run failed")
                 self._reset_locked()

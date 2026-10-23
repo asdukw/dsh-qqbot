@@ -2,6 +2,16 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+// User and group profiles for the QQ bot.
+//
+// Identity is explicit: before every turn the adapter writes the session's
+// scope, QQ number and group number into the `conversations` table
+// (bot/conversations.py). This plugin looks that row up by session id; it
+// never parses the session id.
+//
+// Visibility: a user fact learned in private chat stays private by default and
+// is never injected into group chats. Facts learned in a group are public.
+
 const DB_PATH = process.env.USER_PROFILE_DB || '/var/lib/qqbot/dsh-state/profile.db'
 const MAX_PROMPT_FACTS = 40
 const MAX_PROMPT_CHARS = 2400
@@ -15,61 +25,164 @@ function getDb() {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
-    CREATE TABLE IF NOT EXISTS facts (
-      session_id TEXT NOT NULL,
-      key TEXT NOT NULL,
-      value TEXT NOT NULL,
-      confidence REAL NOT NULL DEFAULT 1.0,
-      source TEXT,
+    PRAGMA busy_timeout = 5000;
+    CREATE TABLE IF NOT EXISTS conversations (
+      session_id  TEXT PRIMARY KEY,
+      scope       TEXT NOT NULL CHECK (scope IN ('private', 'group')),
+      user_id     TEXT NOT NULL,
+      group_id    TEXT,
+      sender_name TEXT NOT NULL DEFAULT '',
+      updated_at  INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS user_facts (
+      user_id    TEXT NOT NULL,
+      key        TEXT NOT NULL,
+      value      TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
+      source     TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      PRIMARY KEY (session_id, key)
+      PRIMARY KEY (user_id, key)
     );
-    CREATE INDEX IF NOT EXISTS idx_facts_session ON facts (session_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS group_facts (
+      group_id   TEXT NOT NULL,
+      key        TEXT NOT NULL,
+      value      TEXT NOT NULL,
+      source     TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (group_id, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_facts ON user_facts (user_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_group_facts ON group_facts (group_id, updated_at DESC);
   `)
+  migrateLegacyFacts(db)
   return db
 }
 
-function sessionOf(exec) {
-  return String(exec?.agent?.id ?? 'unknown')
+// Version 1 stored facts per DSH session in `facts`. Move rows whose session
+// identity is known into user_facts once; drop the old table afterwards.
+function migrateLegacyFacts(conn) {
+  const legacy = conn.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'facts'"
+  ).get()
+  if (!legacy) return
+  conn.exec(`
+    INSERT OR IGNORE INTO user_facts (user_id, key, value, visibility, source, created_at, updated_at)
+    SELECT c.user_id, f.key, f.value,
+           CASE c.scope WHEN 'group' THEN 'public' ELSE 'private' END,
+           'migrated', f.created_at, f.updated_at
+    FROM facts f JOIN conversations c ON c.session_id = f.session_id;
+  `)
+  const remaining = conn.prepare(
+    'SELECT COUNT(*) AS n FROM facts WHERE session_id NOT IN (SELECT session_id FROM conversations)'
+  ).get()
+  if (Number(remaining.n) === 0) conn.exec('DROP TABLE facts')
 }
 
-function readFacts(sessionId, key) {
+function contextOf(sessionId) {
+  const row = getDb().prepare(
+    'SELECT scope, user_id, group_id, sender_name FROM conversations WHERE session_id = ?'
+  ).get(String(sessionId ?? ''))
+  if (!row) return null
+  return {
+    scope: row.scope,
+    userId: row.user_id,
+    groupId: row.group_id || null,
+    senderName: row.sender_name || '',
+  }
+}
+
+function requireContext(exec) {
+  const ctx = contextOf(exec?.agent?.id)
+  if (!ctx) throw new Error('unknown conversation: the adapter has not registered this session')
+  return ctx
+}
+
+function requireGroup(exec) {
+  const ctx = requireContext(exec)
+  if (ctx.scope !== 'group' || !ctx.groupId) throw new Error('group profile tools only work in group chats')
+  return ctx
+}
+
+// ── storage ──────────────────────────────────────────────────────
+
+function readUserFacts(userId, { key, publicOnly = false } = {}) {
   const conn = getDb()
+  const visibility = publicOnly ? "AND visibility = 'public'" : ''
   if (key) {
     const row = conn.prepare(
-      'SELECT key, value, updated_at FROM facts WHERE session_id = ? AND key = ?'
-    ).get(sessionId, key)
+      `SELECT key, value, visibility FROM user_facts WHERE user_id = ? AND key = ? ${visibility}`
+    ).get(userId, key)
     return row ? [row] : []
   }
   return conn.prepare(
-    'SELECT key, value, updated_at FROM facts WHERE session_id = ? ORDER BY updated_at DESC LIMIT 200'
-  ).all(sessionId)
+    `SELECT key, value, visibility FROM user_facts WHERE user_id = ? ${visibility} ` +
+    'ORDER BY updated_at DESC LIMIT 200'
+  ).all(userId)
 }
 
-function writeFact(sessionId, key, value) {
+function writeUserFact(userId, key, value, visibility, source) {
   const now = Date.now()
   getDb().prepare(`
-    INSERT INTO facts (session_id, key, value, confidence, source, created_at, updated_at)
-    VALUES (?, ?, ?, 1.0, 'chat', ?, ?)
-    ON CONFLICT(session_id, key) DO UPDATE SET
+    INSERT INTO user_facts (user_id, key, value, visibility, source, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET
       value = excluded.value,
+      visibility = excluded.visibility,
+      source = excluded.source,
       updated_at = excluded.updated_at
-  `).run(sessionId, key, value, now, now)
+  `).run(userId, key, value, visibility, source, now, now)
 }
 
-function forgetFact(sessionId, key) {
+function forgetUserFact(userId, key, { publicOnly = false } = {}) {
+  const visibility = publicOnly ? "AND visibility = 'public'" : ''
   const result = getDb().prepare(
-    'DELETE FROM facts WHERE session_id = ? AND key = ?'
-  ).run(sessionId, key)
+    `DELETE FROM user_facts WHERE user_id = ? AND key = ? ${visibility}`
+  ).run(userId, key)
   return Number(result.changes) > 0
 }
 
-function formatFacts(rows) {
+function readGroupFacts(groupId, key) {
+  const conn = getDb()
+  if (key) {
+    const row = conn.prepare(
+      'SELECT key, value FROM group_facts WHERE group_id = ? AND key = ?'
+    ).get(groupId, key)
+    return row ? [row] : []
+  }
+  return conn.prepare(
+    'SELECT key, value FROM group_facts WHERE group_id = ? ORDER BY updated_at DESC LIMIT 200'
+  ).all(groupId)
+}
+
+function writeGroupFact(groupId, key, value, source) {
+  const now = Date.now()
+  getDb().prepare(`
+    INSERT INTO group_facts (group_id, key, value, source, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(group_id, key) DO UPDATE SET
+      value = excluded.value,
+      source = excluded.source,
+      updated_at = excluded.updated_at
+  `).run(groupId, key, value, source, now, now)
+}
+
+function forgetGroupFact(groupId, key) {
+  const result = getDb().prepare(
+    'DELETE FROM group_facts WHERE group_id = ? AND key = ?'
+  ).run(groupId, key)
+  return Number(result.changes) > 0
+}
+
+// ── rendering ────────────────────────────────────────────────────
+
+function formatFacts(rows, { tagPrivate = false } = {}) {
   const lines = []
   let used = 0
   for (const row of rows.slice(0, MAX_PROMPT_FACTS)) {
-    const line = `- ${row.key}: ${row.value}`
+    const tag = tagPrivate && row.visibility === 'private' ? '（私密）' : ''
+    const line = `- ${row.key}: ${row.value}${tag}`
     if (used + line.length > MAX_PROMPT_CHARS) break
     lines.push(line)
     used += line.length + 1
@@ -77,104 +190,208 @@ function formatFacts(rows) {
   return lines.join('\n')
 }
 
-function renderProfile(sessionId) {
-  const rows = readFacts(sessionId)
-  if (!rows.length) {
-    return '（暂无长期画像。用户分享稳定事实时，调用 profile_write 记录。）'
-  }
-  return formatFacts(rows)
+function renderUserProfile(sessionId) {
+  const ctx = contextOf(sessionId)
+  if (!ctx) return '（暂无）'
+  const rows = readUserFacts(ctx.userId, { publicOnly: ctx.scope === 'group' })
+  const who = ctx.senderName ? `${ctx.senderName}（QQ ${ctx.userId}）` : `QQ ${ctx.userId}`
+  if (!rows.length) return `${who}：暂无长期画像。对方说出稳定事实时，调用 profile_write 记录。`
+  return `${who}：\n${formatFacts(rows, { tagPrivate: ctx.scope === 'private' })}`
+}
+
+function renderGroupProfile(sessionId) {
+  const ctx = contextOf(sessionId)
+  if (!ctx || ctx.scope !== 'group') return '（不在群聊中）'
+  const rows = readGroupFacts(ctx.groupId)
+  if (!rows.length) return `群 ${ctx.groupId}：暂无群画像。`
+  return `群 ${ctx.groupId}：\n${formatFacts(rows)}`
 }
 
 function text(value) {
   return [{ type: 'text', text: String(value) }]
 }
 
-const readTool = {
+function stringOutput() {
+  return { schema: { type: 'string' }, render: (_args, value) => text(value) }
+}
+
+// ── user profile tools ───────────────────────────────────────────
+
+const profileRead = {
   name: 'profile_read',
   description:
-    'Read the current user\'s long-term profile. Omit key to read every remembered fact.',
+    "Read the long-term profile of the person you are talking to. In group chats only " +
+    'their public facts are returned. Omit key to read every fact.',
   parameters: {
     type: 'object',
-    properties: {
-      key: { type: 'string', description: 'Optional fact key, e.g. 称呼 / 所在城市' },
-    },
+    properties: { key: { type: 'string', description: 'Optional fact key, e.g. 称呼 / 所在城市' } },
     additionalProperties: false,
   },
-  output: { schema: { type: 'string' }, render: (_args, value) => text(value) },
+  output: stringOutput(),
   async execute(args, exec) {
-    const sessionId = sessionOf(exec)
+    const ctx = requireContext(exec)
     const key = String(args?.key ?? '').trim()
-    const rows = readFacts(sessionId, key || undefined)
+    const rows = readUserFacts(ctx.userId, { key: key || undefined, publicOnly: ctx.scope === 'group' })
     if (!rows.length) return key ? `没有找到：${key}` : '（暂无长期画像）'
-    return formatFacts(rows)
+    return formatFacts(rows, { tagPrivate: ctx.scope === 'private' })
   },
 }
 
-const writeTool = {
+const profileWrite = {
   name: 'profile_write',
   description:
-    'Create or update one stable fact about the current user: name, nickname, city, school, ' +
-    'work, birthday, preferences, relationships. Use a short stable key such as "称呼".',
+    'Create or update one stable fact about the person you are talking to: name, nickname, ' +
+    'city, school, work, birthday, preferences, relationships. Use a short stable key such as ' +
+    '"称呼". Facts told in private chat are private by default and never shown in groups; set ' +
+    'visibility to "public" only when the person is clearly fine with others knowing.',
   parameters: {
     type: 'object',
     properties: {
       key: { type: 'string', description: 'Short stable key, e.g. 称呼 / 所在城市 / 生日' },
       value: { type: 'string', description: 'The fact to remember' },
+      visibility: {
+        type: 'string',
+        enum: ['private', 'public'],
+        description: 'Private chat defaults to private; group chat is always public',
+      },
     },
     required: ['key', 'value'],
     additionalProperties: false,
   },
-  output: { schema: { type: 'string' }, render: (_args, value) => text(value) },
+  output: stringOutput(),
   async execute(args, exec) {
-    const sessionId = sessionOf(exec)
+    const ctx = requireContext(exec)
     const key = String(args?.key ?? '').trim()
     const value = String(args?.value ?? '').trim()
     if (!key || !value) throw new Error('key and value are required')
-    writeFact(sessionId, key, value)
-    return `已记住：${key} = ${value}`
+    const visibility = ctx.scope === 'group'
+      ? 'public'
+      : (args?.visibility === 'public' ? 'public' : 'private')
+    // In a group, never overwrite a private fact with a public one of the same key.
+    if (ctx.scope === 'group') {
+      const existing = readUserFacts(ctx.userId, { key })
+      if (existing.length && existing[0].visibility === 'private') {
+        return `已有私密记录 ${key}，群聊里不覆盖`
+      }
+    }
+    writeUserFact(ctx.userId, key, value, visibility, ctx.scope === 'group' ? `group:${ctx.groupId}` : 'private')
+    return `已记住（${visibility === 'public' ? '公开' : '私密'}）：${key} = ${value}`
   },
 }
 
-const forgetTool = {
+const profileForget = {
   name: 'profile_forget',
-  description: 'Remove one remembered fact about the current user by key.',
+  description:
+    'Remove one remembered fact about the person you are talking to. In group chats only ' +
+    'public facts can be removed.',
   parameters: {
     type: 'object',
     properties: { key: { type: 'string', description: 'The key to remove' } },
     required: ['key'],
     additionalProperties: false,
   },
-  output: { schema: { type: 'string' }, render: (_args, value) => text(value) },
+  output: stringOutput(),
   async execute(args, exec) {
-    const sessionId = sessionOf(exec)
+    const ctx = requireContext(exec)
     const key = String(args?.key ?? '').trim()
     if (!key) throw new Error('key is required')
-    return forgetFact(sessionId, key) ? `已忘记：${key}` : `没有找到：${key}`
+    const removed = forgetUserFact(ctx.userId, key, { publicOnly: ctx.scope === 'group' })
+    return removed ? `已忘记：${key}` : `没有找到：${key}`
+  },
+}
+
+// ── group profile tools ──────────────────────────────────────────
+
+const groupRead = {
+  name: 'group_profile_read',
+  description:
+    "Read this group's profile: topic, atmosphere, recurring subjects, in-jokes and slang, " +
+    'group rules, shared plans. Omit key to read every fact.',
+  parameters: {
+    type: 'object',
+    properties: { key: { type: 'string', description: 'Optional fact key, e.g. 群主题 / 梗' } },
+    additionalProperties: false,
+  },
+  output: stringOutput(),
+  async execute(args, exec) {
+    const ctx = requireGroup(exec)
+    const key = String(args?.key ?? '').trim()
+    const rows = readGroupFacts(ctx.groupId, key || undefined)
+    if (!rows.length) return key ? `没有找到：${key}` : '（暂无群画像）'
+    return formatFacts(rows)
+  },
+}
+
+const groupWrite = {
+  name: 'group_profile_write',
+  description:
+    'Create or update one stable fact about this group (not about one person): its topic, ' +
+    'atmosphere, recurring subjects, in-jokes or slang and what they mean, rules, shared plans. ' +
+    'Use a short stable key such as "群主题", "梗:xxx", "约定".',
+  parameters: {
+    type: 'object',
+    properties: {
+      key: { type: 'string', description: 'Short stable key' },
+      value: { type: 'string', description: 'The fact to remember' },
+    },
+    required: ['key', 'value'],
+    additionalProperties: false,
+  },
+  output: stringOutput(),
+  async execute(args, exec) {
+    const ctx = requireGroup(exec)
+    const key = String(args?.key ?? '').trim()
+    const value = String(args?.value ?? '').trim()
+    if (!key || !value) throw new Error('key and value are required')
+    writeGroupFact(ctx.groupId, key, value, `user:${ctx.userId}`)
+    return `已记住群信息：${key} = ${value}`
+  },
+}
+
+const groupForget = {
+  name: 'group_profile_forget',
+  description: "Remove one fact from this group's profile by key.",
+  parameters: {
+    type: 'object',
+    properties: { key: { type: 'string', description: 'The key to remove' } },
+    required: ['key'],
+    additionalProperties: false,
+  },
+  output: stringOutput(),
+  async execute(args, exec) {
+    const ctx = requireGroup(exec)
+    const key = String(args?.key ?? '').trim()
+    if (!key) throw new Error('key is required')
+    return forgetGroupFact(ctx.groupId, key) ? `已忘记：${key}` : `没有找到：${key}`
   },
 }
 
 const MEMORY_NOTE =
-  '用户画像存在 SQLite 里，由 profile_read / profile_write / profile_forget 维护。' +
-  '事件、约定和重要片段写到工作目录的 memory/notes/ 下；需要回忆时用 glob/grep/read。' +
-  '用户说出稳定事实时用 profile_write，不要只记在对话里。'
+  '画像存在 SQLite 里：个人用 profile_read / profile_write / profile_forget，' +
+  '群用 group_profile_read / group_profile_write / group_profile_forget。' +
+  '对方说出关于自己的稳定事实时用 profile_write；群的话题、氛围、梗、约定用 group_profile_write。' +
+  '私聊里得知的事默认私密，绝不在群里提起。' +
+  '事件和重要片段写到工作目录的 memory/notes/ 下；需要回忆时用 glob/grep/read。'
 
 export const name = 'user-profile'
 export const inject = ['tools', 'systemPrompt']
 
 export function apply(ctx) {
   getDb()
-  ctx.tools.register(readTool)
-  ctx.tools.register(writeTool)
-  ctx.tools.register(forgetTool)
+  for (const tool of [profileRead, profileWrite, profileForget, groupRead, groupWrite, groupForget]) {
+    ctx.tools.register(tool)
+  }
 
   ctx.on('agent/created', ({ agent }) => {
     const sessionId = String(agent.id)
-    agent.ctx.systemPrompt.variable('user_profile', () => renderProfile(sessionId))
+    agent.ctx.systemPrompt.variable('user_profile', () => renderUserProfile(sessionId))
+    agent.ctx.systemPrompt.variable('group_profile', () => renderGroupProfile(sessionId))
     agent.ctx.systemPrompt.section({
       name: 'user-profile',
       order: 8000,
       text:
-        '关于当前用户的长期记忆（仅在与对话相关时使用，不要生硬复述）：\n{{user_profile}}\n\n' +
+        '当前说话人的长期画像（仅在相关时使用，不要生硬复述）：\n{{user_profile}}\n\n' +
+        '所在群的画像：\n{{group_profile}}\n\n' +
         MEMORY_NOTE,
     })
   })

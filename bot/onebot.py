@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -35,9 +36,177 @@ class MessageEvent:
     at_me: bool
     sender_name: str
     group_id: int | None = None
+    images: tuple[str, ...] = ()
+    # message_id of the message this one quotes, if any (OneBot reply segment).
+    reply_to: int | None = None
+    # Subset of images QQ marked as stickers (summary "[动画表情]" / sub_type 1).
+    stickers: tuple[str, ...] = ()
+    # The sender's QQ nickname; sender_name prefers the group card, so this can
+    # differ and tells the model who is actually behind a joke card.
+    sender_nickname: str = ""
 
 
-class OneBotClient:
+_CQ_IMAGE_RE = re.compile(r"\[CQ:image,([^\]]*)\]")
+
+
+def _is_sticker_segment(data: dict[str, Any]) -> bool:
+    """QQ stickers arrive as image segments marked by summary/sub_type."""
+    if str(data.get("summary") or "").strip() == "[动画表情]":
+        return True
+    try:
+        return int(data.get("sub_type") or data.get("subType") or 0) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+_CQ_REPLY_RE = re.compile(r"\[CQ:reply,([^\]]*)\]")
+_MAX_IMAGES = 4
+
+EMPTY_MENTION = "[空艾特]"
+EMPTY_REPLY = "[空引用]"
+
+
+class MessageParser:
+    """Turn OneBot message events into MessageEvent, with id dedup."""
+
+    def __init__(self, self_id: int):
+        self.self_id = self_id
+        self._seen: deque[int] = deque(maxlen=256)
+        self._seen_set: set[int] = set()
+
+    def parse(self, event: dict) -> MessageEvent | None:
+        if event.get("post_type") != "message":
+            return None
+        try:
+            message_id = int(event.get("message_id") or 0)
+            if message_id and message_id in self._seen_set:
+                return None
+            if message_id:
+                if len(self._seen) == self._seen.maxlen and self._seen:
+                    self._seen_set.discard(self._seen[0])
+                self._seen.append(message_id)
+                self._seen_set.add(message_id)
+
+            user_id = int(event.get("user_id") or 0)
+            if user_id == self.self_id:
+                return None
+            text, at_me, images, reply_to, stickers = self._extract_text(
+                event.get("message")
+            )
+            if not text and not images:
+                # Bare mentions/quotes carry no text of their own; keep them
+                # with an explicit marker so the turn is never a blank line.
+                if at_me:
+                    text = EMPTY_MENTION
+                elif reply_to is not None:
+                    text = EMPTY_REPLY
+                else:
+                    return None
+            raw_sender = event.get("sender")
+            sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
+            sender_name = str(sender.get("card") or sender.get("nickname") or user_id)
+            sender_nickname = str(sender.get("nickname") or "")
+            group_id = int(event["group_id"]) if event.get("group_id") else None
+            message_type = str(event.get("message_type") or ("group" if group_id else "private"))
+
+            return MessageEvent(
+                message_type=message_type,
+                user_id=user_id,
+                message_id=message_id,
+                text=text,
+                at_me=at_me,
+                sender_name=sender_name,
+                group_id=group_id,
+                images=tuple(images[:_MAX_IMAGES]),
+                reply_to=reply_to,
+                stickers=tuple(stickers[:_MAX_IMAGES]),
+                sender_nickname=sender_nickname,
+            )
+        except (TypeError, ValueError) as exc:
+            log.warning("malformed message event: %s", exc)
+            return None
+
+    def _extract_text(
+        self, message: Any
+    ) -> tuple[str, bool, list[str], int | None, list[str]]:
+        at_me = False
+        images: list[str] = []
+        stickers: list[str] = []
+        reply_to: int | None = None
+        if isinstance(message, str):
+            for match in _CQ_IMAGE_RE.finditer(message):
+                params: dict[str, str] = {}
+                for item in match.group(1).split(","):
+                    key, _, value = item.partition("=")
+                    params[key.strip()] = value.strip()
+                url = params.get("url") or params.get("file") or ""
+                if url.startswith(("http://", "https://", "data:")):
+                    images.append(url)
+                    if params.get("sub_type", "").strip() == "1":
+                        stickers.append(url)
+            reply = _CQ_REPLY_RE.search(message)
+            if reply:
+                for item in reply.group(1).split(","):
+                    key, _, value = item.partition("=")
+                    if key.strip() == "id" and value.strip().isdigit():
+                        reply_to = int(value.strip())
+            marker = f"[CQ:at,qq={self.self_id}]"
+            at_me = marker in message
+            text = message.replace(marker, "")
+            while True:
+                start = text.find("[CQ:")
+                if start < 0:
+                    break
+                end = text.find("]", start)
+                if end < 0:
+                    break
+                text = text[:start] + text[end + 1:]
+            return text.strip(), at_me, images, reply_to, stickers
+
+        if not isinstance(message, list):
+            return "", False, [], None, []
+
+        parts: list[str] = []
+        for segment in message:
+            if not isinstance(segment, dict):
+                continue
+            kind = segment.get("type")
+            raw_data = segment.get("data")
+            data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+            if kind == "text":
+                parts.append(str(data.get("text", "")))
+            elif kind == "at":
+                qq = str(data.get("qq", ""))
+                if qq == str(self.self_id):
+                    at_me = True
+                elif qq and qq != "all":
+                    parts.append(f"@{data.get('name') or qq}")
+            elif kind == "image":
+                url = str(data.get("url") or data.get("file") or "")
+                sticker = _is_sticker_segment(data)
+                if url.startswith(("http://", "https://", "data:")):
+                    images.append(url)
+                    if sticker:
+                        stickers.append(url)
+                parts.append("[表情包]" if sticker else "[图片]")
+            elif kind == "reply":
+                value = str(data.get("id") or "")
+                if value.isdigit():
+                    reply_to = int(value)
+            elif kind == "face":
+                parts.append("[表情]")
+            elif kind == "record":
+                parts.append("[语音]")
+            elif kind == "video":
+                parts.append("[视频]")
+            elif kind == "file":
+                parts.append("[文件]")
+        return "".join(parts).strip(), at_me, images, reply_to, stickers
+
+
+class OneBotWSClient:
+    """Legacy OneBot WebSocket client (kept as a fallback transport)."""
+
     def __init__(
         self,
         config: OneBotConfig,
@@ -45,15 +214,12 @@ class OneBotClient:
     ):
         self.config = config
         self.on_message = on_message
+        self._parser = MessageParser(config.self_id)
         self._ws: Any = None
         self._pending: dict[str, asyncio.Future] = {}
         self._echo = 0
         self._closed = False
-        self._seen: deque[int] = deque(maxlen=256)
-        self._seen_set: set[int] = set()
         self._connected = asyncio.Event()
-
-    # ---------------------------------------------------------------- connection
 
     async def run(self) -> None:
         backoff = 1.0
@@ -91,7 +257,6 @@ class OneBotClient:
         try:
             ws = await websockets.connect(url, additional_headers=headers, **kwargs)
         except TypeError:
-            # websockets < 13 used extra_headers
             ws = await websockets.connect(url, extra_headers=headers, **kwargs)
 
         self._ws = ws
@@ -108,8 +273,11 @@ class OneBotClient:
                     continue
                 if isinstance(payload, dict) and "echo" in payload:
                     self._resolve(payload)
-                else:
-                    self._dispatch(payload)
+                elif isinstance(payload, dict):
+                    message = self._parser.parse(payload)
+                    if message is not None:
+                        task = asyncio.create_task(self._run_handler(message))
+                        task.add_done_callback(self._log_handler_error)
         finally:
             self._connected.clear()
             self._ws = None
@@ -136,49 +304,6 @@ class OneBotClient:
     async def wait_connected(self, timeout: float = 15.0) -> None:
         await asyncio.wait_for(self._connected.wait(), timeout)
 
-    # ------------------------------------------------------------------ events
-
-    def _dispatch(self, event: dict) -> None:
-        if event.get("post_type") != "message":
-            return
-        try:
-            message_id = int(event.get("message_id") or 0)
-            if message_id and message_id in self._seen_set:
-                return
-            if message_id:
-                if len(self._seen) == self._seen.maxlen and self._seen:
-                    self._seen_set.discard(self._seen[0])
-                self._seen.append(message_id)
-                self._seen_set.add(message_id)
-
-            user_id = int(event.get("user_id") or 0)
-            if user_id == self.config.self_id:
-                return
-            text, at_me = self._extract_text(event.get("message"))
-            if not text:
-                return
-            raw_sender = event.get("sender")
-            sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
-            sender_name = str(sender.get("card") or sender.get("nickname") or user_id)
-            group_id = int(event["group_id"]) if event.get("group_id") else None
-            message_type = str(event.get("message_type") or ("group" if group_id else "private"))
-
-            message = MessageEvent(
-                message_type=message_type,
-                user_id=user_id,
-                message_id=message_id,
-                text=text,
-                at_me=at_me,
-                sender_name=sender_name,
-                group_id=group_id,
-            )
-        except (TypeError, ValueError) as exc:
-            log.warning("malformed message event: %s", exc)
-            return
-
-        task = asyncio.create_task(self._run_handler(message))
-        task.add_done_callback(self._log_handler_error)
-
     async def _run_handler(self, message: MessageEvent) -> None:
         try:
             await self.on_message(message)
@@ -192,55 +317,11 @@ class OneBotClient:
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001
-            pass  # already logged in _run_handler
+            pass
 
-    def _extract_text(self, message: Any) -> tuple[str, bool]:
-        at_me = False
-        if isinstance(message, str):
-            marker = f"[CQ:at,qq={self.config.self_id}]"
-            at_me = marker in message
-            text = message.replace(marker, "")
-            while True:
-                start = text.find("[CQ:")
-                if start < 0:
-                    break
-                end = text.find("]", start)
-                if end < 0:
-                    break
-                text = text[:start] + text[end + 1:]
-            return text.strip(), at_me
-
-        if not isinstance(message, list):
-            return "", False
-
-        parts: list[str] = []
-        for segment in message:
-            if not isinstance(segment, dict):
-                continue
-            kind = segment.get("type")
-            raw_data = segment.get("data")
-            data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
-            if kind == "text":
-                parts.append(str(data.get("text", "")))
-            elif kind == "at":
-                qq = str(data.get("qq", ""))
-                if qq == str(self.config.self_id):
-                    at_me = True
-                elif qq and qq != "all":
-                    parts.append(f"@{data.get('name') or qq}")
-            elif kind == "image":
-                parts.append("[图片]")
-            elif kind == "face":
-                parts.append("[表情]")
-            elif kind == "record":
-                parts.append("[语音]")
-            elif kind == "video":
-                parts.append("[视频]")
-            elif kind == "file":
-                parts.append("[文件]")
-        return "".join(parts).strip(), at_me
-
-    # -------------------------------------------------------------------- calls
+    @property
+    def connected(self) -> bool:
+        return self._ws is not None
 
     async def call(self, action: str, params: dict, timeout: float = 30.0) -> dict:
         ws = self._ws
@@ -264,17 +345,30 @@ class OneBotClient:
             raise OneBotError(f"{action} failed: {response}")
         return response.get("data") or {}
 
-    async def send_private(self, user_id: int, text: str) -> None:
-        await self.call("send_private_msg", {
+    async def send_private(self, user_id: int, text: str) -> dict:
+        return await self.call("send_private_msg", {
             "user_id": user_id,
             "message": [{"type": "text", "data": {"text": text}}],
         })
 
-    async def send_group(self, group_id: int, text: str) -> None:
-        await self.call("send_group_msg", {
+    async def send_group(self, group_id: int, text: str) -> dict:
+        return await self.call("send_group_msg", {
             "group_id": group_id,
             "message": [{"type": "text", "data": {"text": text}}],
         })
+
+    async def send_private_image(self, user_id: int, file: str, timeout: float = 60.0) -> dict:
+        """Send an image; `file` is a base64:// URI, http(s) URL or host path."""
+        return await self.call("send_private_msg", {
+            "user_id": user_id,
+            "message": [{"type": "image", "data": {"file": file}}],
+        }, timeout=timeout)
+
+    async def send_group_image(self, group_id: int, file: str, timeout: float = 60.0) -> dict:
+        return await self.call("send_group_msg", {
+            "group_id": group_id,
+            "message": [{"type": "image", "data": {"file": file}}],
+        }, timeout=timeout)
 
     async def get_login_info(self) -> dict:
         return await self.call("get_login_info", {})
