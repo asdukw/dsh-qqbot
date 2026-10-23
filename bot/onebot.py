@@ -28,6 +28,15 @@ class OneBotConfig:
 
 
 @dataclass
+class PokeEvent:
+    """A QQ "戳一戳" notice (post_type=notice, notice_type=notify)."""
+
+    user_id: int
+    target_id: int
+    group_id: int | None = None
+
+
+@dataclass
 class MessageEvent:
     message_type: str
     user_id: int
@@ -126,6 +135,28 @@ class MessageParser:
             log.warning("malformed message event: %s", exc)
             return None
 
+    def parse_notice(self, event: dict) -> PokeEvent | None:
+        """Recognise poke notices; everything else returns None."""
+        if event.get("post_type") != "notice":
+            return None
+        notice_type = str(event.get("notice_type") or "")
+        sub_type = str(event.get("sub_type") or "")
+        if notice_type == "notify":
+            if sub_type != "poke":
+                return None
+        elif notice_type not in ("poke", "POKE"):
+            return None
+        try:
+            user_id = int(event.get("user_id") or 0)
+            target_id = int(event.get("target_id") or 0)
+            group_id = int(event["group_id"]) if event.get("group_id") else None
+        except (TypeError, ValueError) as exc:
+            log.warning("malformed poke event: %s", exc)
+            return None
+        if not user_id or not target_id:
+            return None
+        return PokeEvent(user_id=user_id, target_id=target_id, group_id=group_id)
+
     def _extract_text(
         self, message: Any
     ) -> tuple[str, bool, list[str], int | None, list[str]]:
@@ -193,6 +224,8 @@ class MessageParser:
                 value = str(data.get("id") or "")
                 if value.isdigit():
                     reply_to = int(value)
+            elif kind == "poke":
+                parts.append("[戳一戳]")
             elif kind == "face":
                 parts.append("[表情]")
             elif kind == "record":
@@ -211,9 +244,11 @@ class OneBotWSClient:
         self,
         config: OneBotConfig,
         on_message: Callable[[MessageEvent], Awaitable[None]],
+        on_notice: Callable[[dict], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.on_message = on_message
+        self.on_notice = on_notice
         self._parser = MessageParser(config.self_id)
         self._ws: Any = None
         self._pending: dict[str, asyncio.Future] = {}
@@ -278,6 +313,9 @@ class OneBotWSClient:
                     if message is not None:
                         task = asyncio.create_task(self._run_handler(message))
                         task.add_done_callback(self._log_handler_error)
+                    elif self.on_notice is not None and payload.get("post_type") == "notice":
+                        task = asyncio.create_task(self._run_notice(payload))
+                        task.add_done_callback(self._log_handler_error)
         finally:
             self._connected.clear()
             self._ws = None
@@ -303,6 +341,17 @@ class OneBotWSClient:
 
     async def wait_connected(self, timeout: float = 15.0) -> None:
         await asyncio.wait_for(self._connected.wait(), timeout)
+
+    def parse_notice(self, payload: dict) -> PokeEvent | None:
+        return self._parser.parse_notice(payload)
+
+    async def _run_notice(self, payload: dict) -> None:
+        if self.on_notice is None:
+            return
+        try:
+            await self.on_notice(payload)
+        except Exception:  # noqa: BLE001 - one bad notice must not kill the loop
+            log.exception("notice handler failed")
 
     async def _run_handler(self, message: MessageEvent) -> None:
         try:

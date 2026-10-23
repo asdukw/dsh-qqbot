@@ -25,8 +25,8 @@
 职责：
 
 - 维护到 NapCat 的 OneBot 11 正向 WebSocket：token 鉴权、重连、心跳、echo 关联；
-- 解析消息段（text / at / image / face / record 等），去重；
-- 决定是否回复：私聊全回；群聊在被 @、叫当前角色名（卡片的 `name`/`nickname` 或 `aliases`）或引用机器人消息时回复，其余消息按主动策略参与；
+- 解析消息段（text / at / image / face / record / poke 等），去重；
+- 决定是否回复：私聊全回；群聊在被 @、叫当前角色名、引用机器人消息或被戳一戳时回复，其余消息按主动策略参与；第三方之间的戳一戳只记入群上下文；
 - 把 QQ 会话映射成稳定的 DSH `session_id`；
 - 角色卡库（SQLite）与热切换、系统提示词构建、世界书落盘；
 - 长回复拆分、发送失败日志；

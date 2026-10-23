@@ -501,7 +501,7 @@ class Bot:
         self.dsh = dsh
         self.conversations = conversations
         self.group_context = GroupContextBuffer(config.bot.group_context_messages)
-        self.onebot = OneBotWSClient(config.onebot, self.handle)
+        self.onebot = OneBotWSClient(config.onebot, self.handle, self.handle_notice)
         self.commands = CommandRouter(self)
         self.proactive = ProactivePolicy(config.bot.proactive)
         self._closed = False
@@ -515,6 +515,12 @@ class Bot:
         self._own_messages: dict[int, deque[int]] = {}
         # Names from the active card, used to notice "大肥鱼，..." without an @.
         self._card_names: tuple[str, ...] = ()
+        # Recent display names by QQ id, so notices (which carry no name) can
+        # still say who poked whom.
+        self._names: dict[int, str] = {}
+        # Poke replies are rate limited per chat.
+        self._poke_last: dict[int, float] = {}
+        self._poke_cooldown = 8.0
         self._system_prompt = ""
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
@@ -561,6 +567,8 @@ class Bot:
             self.tasks.close()
 
     async def handle(self, event: MessageEvent) -> None:
+        if event.sender_name:
+            self._names[event.user_id] = event.sender_name
         text = event.text[: self.config.bot.max_input_chars]
         if not text and not event.images:
             return
@@ -610,6 +618,41 @@ class Bot:
         lock = self._locks.setdefault(conversation_id, asyncio.Lock())
         async with lock, self._global:
             await self._reply(conversation_id, event, text)
+
+    async def handle_notice(self, payload: dict) -> None:
+        """Turn poke notices into context lines or a direct reply."""
+        poke = self.onebot.parse_notice(payload)
+        if poke is None or poke.user_id == self.config.onebot.self_id:
+            return
+        name = self._names.get(poke.user_id) or str(poke.user_id)
+        target = self._names.get(poke.target_id) or str(poke.target_id)
+
+        if poke.target_id != self.config.onebot.self_id:
+            if poke.group_id is not None:
+                self.group_context.add(
+                    poke.group_id,
+                    name,
+                    f"[戳了戳 {target}]",
+                    user_id=poke.user_id,
+                )
+            return
+
+        key = poke.group_id if poke.group_id is not None else poke.user_id
+        now = time.time()
+        if now - self._poke_last.get(key, 0.0) < self._poke_cooldown:
+            return
+        self._poke_last[key] = now
+        await self.handle(
+            MessageEvent(
+                message_type="group" if poke.group_id is not None else "private",
+                user_id=poke.user_id,
+                message_id=0,
+                text="[有人戳了戳你]",
+                at_me=poke.group_id is not None,
+                sender_name=name,
+                group_id=poke.group_id,
+            )
+        )
 
     def _addresses_bot(self, event: MessageEvent, text: str) -> bool:
         """Name mentions and quote-replies to the bot count as being addressed.
