@@ -48,6 +48,13 @@ lines += [
     "# ── Admin UI (localhost + Workbench port forwarding) ──────────",
     f"ADMIN_UI_PASSWORD={values.get('ADMIN_UI_PASSWORD', '')}",
     f"ADMIN_UI_SECRET={values.get('ADMIN_UI_SECRET', '')}",
+    "",
+    "# ── Outbound proxy (optional mihomo mixed port) ───────────────",
+    f"HTTP_PROXY={values.get('HTTP_PROXY', '')}",
+    f"HTTPS_PROXY={values.get('HTTPS_PROXY', '')}",
+    f"ALL_PROXY={values.get('ALL_PROXY', '')}",
+    f"NO_PROXY={values.get('NO_PROXY', '')}",
+    f"NODE_USE_ENV_PROXY={values.get('NODE_USE_ENV_PROXY', '')}",
 ]
 lines += [
     "",
