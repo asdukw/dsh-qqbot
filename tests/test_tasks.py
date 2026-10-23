@@ -18,10 +18,12 @@ from tasks import (  # noqa: E402
     describe_record,
     describe_target,
     extract_task_marker,
+    extract_task_management,
     next_run_for,
     resolve_target,
     parse_task,
     parse_task_json,
+    render_task_list,
     spec_of,
 )
 
@@ -140,6 +142,7 @@ class SpecTests(unittest.TestCase):
             weekday=None,
             run_at=None,
             every_minutes=None,
+            mode="fixed",
             enabled=True,
             created_at=0,
             next_run=0,
@@ -185,6 +188,7 @@ class TaskRequestTests(unittest.TestCase):
             weekday=None,
             run_at=None,
             every_minutes=None,
+            mode="fixed",
             enabled=True,
             created_at=0,
             next_run=0,
@@ -223,6 +227,56 @@ class TaskRequestTests(unittest.TestCase):
         self.assertEqual(self.created, [])
 
 
+class TaskManagementTests(unittest.TestCase):
+    def test_extract_management_markers(self) -> None:
+        self.assertEqual(
+            extract_task_management("好。\n[定时列表]"),
+            ("好。", ("列表", "")),
+        )
+        self.assertEqual(
+            extract_task_management("[定时删除: 喝水]"),
+            ("", ("删除", "喝水")),
+        )
+        self.assertEqual(
+            extract_task_management("[定时暂停：3]"), ("", ("暂停", "3"))
+        )
+        self.assertEqual(extract_task_management("普通回复"), ("普通回复", None))
+
+    def test_spec_mode(self) -> None:
+        self.assertEqual(spec().mode, "fixed")
+        parsed = parse_task_json(
+            '{"kind":"daily","time":"08:00","message":"x","mode":"generate"}'
+        )
+        self.assertEqual(parsed.mode, "generate")
+        with self.assertRaises(ValueError):
+            parse_task_json('{"kind":"daily","time":"08:00","message":"x","mode":"no"}')
+
+    def test_render_lists_target_and_mode(self) -> None:
+        record = TaskRecord(
+            id=5,
+            chat_type="group",
+            chat_id=42,
+            created_by="1",
+            instruction="每天喝水",
+            message="该喝水啦",
+            kind="daily",
+            time_of_day="08:00",
+            weekday=None,
+            run_at=None,
+            every_minutes=None,
+            mode="generate",
+            enabled=True,
+            created_at=0,
+            next_run=int(NOW.timestamp()),
+            last_run=0,
+            runs=0,
+        )
+        text = render_task_list([record])
+        self.assertIn("群 42", text)
+        self.assertIn("生成", text)
+        self.assertIn("该喝水啦", text)
+
+
 class StoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -252,6 +306,12 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(describe_record(record), "每天 08:00")
         self.assertTrue(self.store.delete(record.id))
         self.assertEqual(self.store.count(), 0)
+
+    def test_count_for_chat(self) -> None:
+        self.add()
+        self.add(chat_id=43)
+        self.assertEqual(self.store.count_for("group", 42), 1)
+        self.assertEqual(self.store.count_for("group", 99), 0)
 
     def test_due_only_returns_enabled_tasks_that_are_due(self) -> None:
         due = self.add(next_run=NOW - timedelta(minutes=1))
@@ -284,8 +344,8 @@ class SchedulerTests(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    async def send(self, chat_type: str, chat_id: int, text: str) -> None:
-        self.sent.append((chat_type, chat_id, text))
+    async def send(self, task) -> None:
+        self.sent.append((task.chat_type, task.chat_id, task.message))
 
     def test_tick_fires_and_reschedules(self) -> None:
         record = self.store.add(
@@ -346,7 +406,7 @@ class SchedulerTests(unittest.TestCase):
             next_run=NOW - timedelta(minutes=5),
         )
 
-        async def boom(chat_type, chat_id, text):
+        async def boom(task):
             raise RuntimeError("network down")
 
         scheduler = TaskScheduler(self.store, boom)

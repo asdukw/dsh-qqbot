@@ -62,6 +62,7 @@ enabled = true
 database = "/var/lib/qqbot/tasks.db"
 check_seconds = 20         # scheduler poll interval
 max_tasks = 50
+max_per_chat = 10
 
 [bot]
 # Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;

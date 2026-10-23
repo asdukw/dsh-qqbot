@@ -185,7 +185,9 @@ CREATE TABLE group_facts (
 - 语义化解析：一次 thin client 调用把描述转成 `TaskSpec`（`daily|weekly|once|interval` + 时间/星期/间隔 + 要发送的内容），Pydantic 校验字段组合与取值，`next_run_for()` 计算严格晚于当前时间的下一次执行。
 - 存储：`/var/lib/qqbot/tasks.db` 的 `tasks` 表，记录目标会话（群/私聊）、原始描述、消息内容、排期字段、启用状态、下次/上次执行和次数；重启后从 `next_run` 继续。
 - 执行：`TaskScheduler` 在事件循环里每 `[tasks] check_seconds` 秒查一次到期任务；先原子推进 `next_run`（一次性任务直接禁用）再发送，失败不会重复轰炸；发送复用 OneBot 文本接口。
-- 限制：`max_tasks` 总任务数上限；`interval` 最小 5 分钟；消息最长 300 字。
+- 自然语言管理：同一套标记协议还支持 `[定时列表]`、`[定时删除: 关键词]`、`[定时暂停: 关键词]`、`[定时恢复: 关键词]`；adapter 只在当前会话的任务里按 id/关键词匹配，非管理员直接剥掉标记。
+- 文案：`mode=fixed` 原样发送 `message`；`mode=generate` 到点用当前角色卡的系统提示词让模型现写一句，失败回落到 `message`。
+- 限制：`max_tasks` 总数、`max_per_chat` 每会话上限；`interval` 最小 5 分钟；消息最长 300 字；一次性任务迟到超过 12 小时直接丢弃而不是补发。
 
 ## 赛程输出（`bot/schedule.py`）
 

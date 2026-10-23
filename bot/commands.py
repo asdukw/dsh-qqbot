@@ -17,7 +17,7 @@ from llm import LLMError
 from models import ModelRecord, ModelRegistry
 from onebot import OneBotError
 from stickers import StickerError, download_image
-from tasks import TZ as TASK_TZ, describe_record, describe_target
+from tasks import TZ as TASK_TZ, describe_record, describe_target, render_task_list
 
 from cards import CardError, CardRecord
 
@@ -499,7 +499,7 @@ class CommandRouter:
                 await self.bot.send_text(event, "用法: /task run <id>")
                 return
             try:
-                await self.bot._send_scheduled(record.chat_type, record.chat_id, record.message)
+                await self.bot._send_scheduled(record)
             except (OneBotError, OSError) as exc:
                 await self.bot.send_text(event, f"执行失败: {exc}")
                 return
@@ -514,29 +514,7 @@ class CommandRouter:
 
     @staticmethod
     def _render_tasks(rows: list[Any]) -> str:
-        if not rows:
-            return "还没有定时任务。用 /task add <一句话> 创建。"
-        lines = [f"定时任务（共 {len(rows)} 个）:"]
-        for record in rows[:20]:
-            mark = "*" if record.enabled else "-"
-            target = (
-                f"群 {record.chat_id}"
-                if record.chat_type == "group"
-                else f"私聊 {record.chat_id}"
-            )
-            if record.enabled and record.next_run:
-                when = datetime.fromtimestamp(record.next_run, TASK_TZ).strftime(
-                    "%m-%d %H:%M"
-                )
-            else:
-                when = "暂停"
-            lines.append(
-                f"{mark} #{record.id} {describe_record(record)} → {target} "
-                f"｜ 下次 {when} ｜ {record.message}"
-            )
-        if len(rows) > 20:
-            lines.append(f"…还有 {len(rows) - 20} 个，先删掉不用的再列。")
-        return "\n".join(lines)
+        return render_task_list(rows)
 
     # ----------------------------------------------------------- stickers
 

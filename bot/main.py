@@ -39,8 +39,10 @@ from tasks import (
     describe_record,
     describe_target,
     extract_task_marker,
+    extract_task_management,
     next_run_for,
     parse_task,
+    render_task_list,
     resolve_target,
     spec_of,
 )
@@ -161,6 +163,7 @@ class TasksSection:
     enabled: bool = True
     check_seconds: int = 20
     max_tasks: int = 50
+    max_per_chat: int = 10
 
 
 @dataclass
@@ -298,6 +301,7 @@ def load_config(path: str | Path) -> AppConfig:
         enabled=bool(tasks_raw.get("enabled", True)),
         check_seconds=max(5, int(tasks_raw.get("check_seconds", 20))),
         max_tasks=max(0, int(tasks_raw.get("max_tasks", 50))),
+        max_per_chat=max(0, int(tasks_raw.get("max_per_chat", 10))),
     )
 
     models_raw = _section(table, "models")
@@ -623,6 +627,65 @@ class Bot:
 
     # ------------------------------------------------------------- tasks
 
+    @staticmethod
+    def _append_note(reply: str, note: str) -> str:
+        return f"{reply}" + ("" if not reply else chr(10)) + note
+
+    async def _handle_task_management(
+        self, event: MessageEvent, reply: str, action: str, argument: str
+    ) -> str:
+        """List/delete/pause/resume tasks in the current chat, admins only."""
+        if not self.is_admin(event.user_id):
+            return reply
+        store = self.tasks
+        if store is None or not self.config.tasks.enabled:
+            return reply
+        chat_type, chat_id = resolve_target(
+            "here", event.message_type, event.user_id, event.group_id
+        )
+        rows = [
+            row
+            for row in store.list(limit=200)
+            if row.chat_type == chat_type and row.chat_id == chat_id
+        ]
+        if action == "列表":
+            return self._append_note(reply, render_task_list(rows))
+
+        record = None
+        if argument.isdigit():
+            record = next((row for row in rows if row.id == int(argument)), None)
+        elif argument:
+            matches = [
+                row for row in rows if argument in row.instruction or argument in row.message
+            ]
+            if len(matches) == 1:
+                record = matches[0]
+            elif len(matches) > 1:
+                listing = chr(10).join(
+                    f"#{row.id} {describe_record(row)} {row.instruction}" for row in matches[:5]
+                )
+                return self._append_note(reply, f"有多个匹配，请用编号：{chr(10)}{listing}")
+        if record is None:
+            return self._append_note(reply, f"没找到匹配的任务：{argument or '（空）'}")
+
+        if action == "删除":
+            store.delete(record.id)
+            note = f"已删除任务 #{record.id}（{describe_record(record)}）"
+        elif action == "暂停":
+            store.set_enabled(record.id, False, None)
+            note = f"已暂停任务 #{record.id}"
+        else:  # 恢复
+            try:
+                next_run = next_run_for(spec_of(record), datetime.now(TASK_TZ))
+            except ValueError as exc:
+                return self._append_note(reply, f"恢复失败：{exc}")
+            store.set_enabled(record.id, True, next_run)
+            note = (
+                f"已恢复任务 #{record.id}，下次 "
+                f"{next_run.strftime('%m-%d %H:%M')}"
+            )
+        return self._append_note(reply, note)
+
     async def _handle_task_request(
         self, event: MessageEvent, reply: str, description: str
     ) -> str:
@@ -653,7 +716,9 @@ class Bot:
         return (
             "\n" + "（对方是管理员：想让我定时提醒/定时发消息时，在回复最后单独一行写 "
             "[定时: 原始描述]，例如 [定时: 每天早上8点提醒我起床]；"
-            "adapter 会创建任务并附上排期。其他情况正常聊天。）"
+            "查看/删除/暂停现有任务时写 [定时列表]、[定时删除: 关键词]、"
+            "[定时暂停: 关键词]、[定时恢复: 关键词]。adapter 会执行并附上结果。"
+            "其他情况正常聊天。）"
         )
 
     def start_scheduler(self) -> None:
@@ -668,13 +733,55 @@ class Bot:
         self._scheduler.start()
         log.info("task scheduler started (%d task(s))", self.tasks.count())
 
-    async def _send_scheduled(self, chat_type: str, chat_id: int, text: str) -> None:
-        if chat_type == "group":
-            data = await self.onebot.send_group(chat_id, text)
-            self._remember_own_message(chat_id, int(data.get("message_id") or 0))
-            self.proactive.note_speaking(chat_id, time.time())
+    async def _send_scheduled(self, task: Any) -> None:
+        text = task.message
+        if getattr(task, "mode", "fixed") == "generate":
+            text = await self._compose_task_message(task)
+        if task.chat_type == "group":
+            data = await self.onebot.send_group(task.chat_id, text)
+            self._remember_own_message(task.chat_id, int(data.get("message_id") or 0))
+            self.proactive.note_speaking(task.chat_id, time.time())
         else:
-            await self.onebot.send_private(chat_id, text)
+            await self.onebot.send_private(task.chat_id, text)
+
+    async def _compose_task_message(self, task: Any) -> str:
+        """Let DSH (tools included) or the card write the scheduled line."""
+        prompt = (
+            f"[定时任务] {task.message}。现在是 "
+            f"{datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}，"
+            "按人设完成这件事，只输出要发送的内容。"
+        )
+        if self.dsh is not None:
+            try:
+                reply = await asyncio.to_thread(
+                    self.dsh.run, f"task-{task.id}", prompt
+                )
+            except DSHError as exc:
+                log.warning("task #%s DSH generation failed: %s", task.id, exc)
+            else:
+                if reply.strip():
+                    return reply.strip()
+        card = self._card
+        if card is None:
+            return task.message
+        system = build_system_prompt(card.data, card.name, "群友", datetime.now(TZ), [])
+        try:
+            reply = await self.client.chat([
+                {
+                    "role": "system",
+                    "content": system
+                    + "\n\n[定时任务]\n现在是任务触发时间，按人设发一句提醒，"
+                      "不要解释，也不要提自己是 AI。",
+                },
+                {
+                    "role": "user",
+                    "content": f"任务：{task.message}。只输出要发送的那一句话。",
+                },
+            ])
+        except LLMError as exc:
+            log.warning("task #%s generation failed: %s", task.id, exc)
+            return task.message
+        return reply.strip() or task.message
 
     async def create_task(
         self, event: MessageEvent, description: str
@@ -697,6 +804,13 @@ class Bot:
             event.user_id,
             event.group_id,
         )
+        if (
+            self.config.tasks.max_per_chat
+            and store.count_for(chat_type, chat_id) >= self.config.tasks.max_per_chat
+        ):
+            raise ValueError(
+                f"这个会话的任务数已达上限（{self.config.tasks.max_per_chat}）"
+            )
         record = store.add(
             chat_type=chat_type,
             chat_id=int(chat_id),
@@ -885,6 +999,9 @@ class Bot:
         reply, task_description = extract_task_marker(reply)
         if task_description is not None:
             reply = await self._handle_task_request(event, reply, task_description)
+        reply, management = extract_task_management(reply)
+        if management is not None:
+            reply = await self._handle_task_management(event, reply, *management)
         visible, hint = extract_sticker_marker(reply)
         for chunk in split_text(visible, self.config.bot.max_reply_chars):
             await self._send(event, chunk)

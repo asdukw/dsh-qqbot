@@ -30,6 +30,19 @@ MAX_MESSAGE_CHARS = 300
 # A one-shot reminder more than this late is dropped instead of fired at boot.
 ONCE_MAX_LATE_SECONDS = 12 * 3600
 
+# Natural-language task management: "[定时列表]", "[定时删除: 喝水]" and so on.
+_MANAGE_RE = re.compile(r"\[定时(列表|删除|暂停|恢复)[:：]?\s*([^\]\n]{0,100})\]")
+
+
+def extract_task_management(text: str) -> tuple[str, tuple[str, str] | None]:
+    """Split a management marker out of a reply; return (visible, (action, arg))."""
+    match = _MANAGE_RE.search(text or "")
+    if match is None:
+        return text, None
+    visible = _MANAGE_RE.sub("", text, count=1).strip()
+    return visible, (match.group(1), match.group(2).strip())
+
+
 # Natural-language task requests: the model emits "[定时: ...]" and the
 # adapter validates + creates it. Only admins reach the creation branch.
 _TASK_MARKER_RE = re.compile(r"\[定时[:：]\s*([^\]\n]{1,200})\]")
@@ -52,6 +65,7 @@ _TASK_PROMPT = """把管理员这句话解析成定时任务，只返回 JSON，
 - run_at: ISO 8601 时间，带 +08:00（once 必填，必须晚于当前时间）
 - every_minutes: 间隔分钟数，最小 {min_interval}（interval 必填）
 - target: "here" 就在当前会话 | "private" 私聊管理员 | "group" 当前群（私聊里不能选 group）；默认 here
+- mode: "fixed" 按 message 原样发送 | "generate" 到点按人设现写一句；默认 fixed
 - message: 到点要发送的内容，一句话，保留原意，不要包含时间
 例子：{{"kind":"daily","time":"08:00","message":"该喝水啦，别一直坐着。"}}
 管理员的话：{description}"""
@@ -63,6 +77,7 @@ class TaskSpec(BaseModel):
     kind: Literal["daily", "weekly", "once", "interval"]
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
     target: Literal["here", "private", "group"] = "here"
+    mode: Literal["fixed", "generate"] = "fixed"
     time: str | None = None
     weekday: int | None = Field(default=None, ge=0, le=6)
     run_at: datetime | None = None
@@ -105,7 +120,7 @@ class TaskSpec(BaseModel):
         if not isinstance(data, dict):
             return data
         kind = data.get("kind")
-        keep = {"kind", "message", "target"}
+        keep = {"kind", "message", "target", "mode"}
         if kind in ("daily", "weekly"):
             keep.add("time")
             if kind == "weekly":
@@ -198,6 +213,28 @@ def resolve_target(
     return "private", int(user_id)
 
 
+def render_task_list(rows: list[TaskRecord], limit: int = 20) -> str:
+    """Shared rendering for /task list and the natural-language list marker."""
+    if not rows:
+        return "还没有定时任务。"
+    lines = [f"定时任务（共 {len(rows)} 个）:"]
+    for record in rows[:limit]:
+        mark = "*" if record.enabled else "-"
+        mode = " 生成" if record.mode == "generate" else ""
+        when = (
+            datetime.fromtimestamp(record.next_run, TZ).strftime("%m-%d %H:%M")
+            if record.enabled and record.next_run
+            else "暂停"
+        )
+        lines.append(
+            f"{mark} #{record.id} {describe_record(record)} → {describe_target(record)}"
+            f"｜ 下次 {when}{mode} ｜ {record.message}"
+        )
+    if len(rows) > limit:
+        lines.append(f"…还有 {len(rows) - limit} 个。")
+    return "\n".join(lines)
+
+
 def describe_target(record: TaskRecord) -> str:
     kind = "群" if record.chat_type == "group" else "私聊"
     return f"{kind} {record.chat_id}"
@@ -279,6 +316,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     weekday       INTEGER,
     run_at        INTEGER,
     every_minutes INTEGER,
+    mode          TEXT NOT NULL DEFAULT 'fixed',
     enabled       INTEGER NOT NULL DEFAULT 1,
     created_at    INTEGER NOT NULL,
     next_run      INTEGER NOT NULL,
@@ -302,6 +340,7 @@ class TaskRecord:
     weekday: int | None
     run_at: int | None
     every_minutes: int | None
+    mode: str
     enabled: bool
     created_at: int
     next_run: int
@@ -322,6 +361,7 @@ def _record(row: sqlite3.Row) -> TaskRecord:
         weekday=row["weekday"],
         run_at=row["run_at"],
         every_minutes=row["every_minutes"],
+        mode=row["mode"] or "fixed",
         enabled=bool(row["enabled"]),
         created_at=int(row["created_at"]),
         next_run=int(row["next_run"]),
@@ -339,6 +379,11 @@ class TaskStore:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA)
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(tasks)")}
+        if "mode" not in columns:
+            self._db.execute(
+                "ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'fixed'"
+            )
         self._db.commit()
 
     def add(
@@ -357,9 +402,9 @@ class TaskStore:
                 """
                 INSERT INTO tasks
                     (chat_type, chat_id, created_by, instruction, message, kind,
-                     time_of_day, weekday, run_at, every_minutes, enabled,
+                     time_of_day, weekday, run_at, every_minutes, mode, enabled,
                      created_at, next_run)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 """,
                 (
                     chat_type,
@@ -372,6 +417,7 @@ class TaskStore:
                     spec.weekday,
                     int(spec.run_at.timestamp()) if spec.run_at else None,
                     spec.every_minutes,
+                    spec.mode,
                     now,
                     int(next_run.timestamp()),
                 ),
@@ -395,6 +441,14 @@ class TaskStore:
                 (max(1, min(int(limit), 200)),),
             ).fetchall()
         return [_record(row) for row in rows]
+
+    def count_for(self, chat_type: str, chat_id: int) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE chat_type = ? AND chat_id = ?",
+                (chat_type, int(chat_id)),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def count(self) -> int:
         with self._lock:
@@ -539,7 +593,7 @@ class TaskScheduler:
                 next_run = None
             self.store.mark_run(task.id, next_run=next_run, ran_at=now)
             try:
-                await self._send(task.chat_type, task.chat_id, task.message)
+                await self._send(task)
             except Exception:  # noqa: BLE001 - one failed send must not stop the loop
                 log.exception("task #%s failed to send", task.id)
             else:
