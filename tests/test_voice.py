@@ -196,11 +196,11 @@ class VoiceProbabilityTests(unittest.TestCase):
         with patch("main.random.random", return_value=0.6):
             self.assertFalse(self.bot._voice_roll("晚安呀"))
 
-    def test_long_text_never_rolls(self) -> None:
+    def test_long_text_is_also_eligible(self) -> None:
         from unittest.mock import patch
 
         with patch("main.random.random", return_value=0.0):
-            self.assertFalse(self.bot._voice_roll("长" * 200))
+            self.assertTrue(self.bot._voice_roll("长" * 200))
 
     def test_disabled_or_zero_probability_never_rolls(self) -> None:
         from unittest.mock import patch
@@ -250,9 +250,14 @@ class SendVoiceTests(unittest.TestCase):
         self.assertFalse(asyncio.run(self.bot._send_voice(self.event(), "再说一句")))
         self.assertEqual(len(self.sent), 1)
 
-    def test_long_text_skips_voice(self) -> None:
+    def test_long_text_skips_voice_when_capped(self) -> None:
         self.assertFalse(asyncio.run(self.bot._send_voice(self.event(), "长" * 200)))
         self.assertEqual(self.sent, [])
+
+    def test_no_cap_allows_long_text(self) -> None:
+        self.bot.config.voice.max_chars = 0
+        self.assertTrue(asyncio.run(self.bot._send_voice(self.event(), "长" * 200)))
+        self.assertEqual(len(self.sent), 1)
 
 
 if __name__ == "__main__":

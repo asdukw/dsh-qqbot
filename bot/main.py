@@ -218,8 +218,9 @@ class VoiceSection:
     instruction: str = ""
     speed: float = 1.0
     # Chance to voice a short proactive reply the model did not mark [语音].
-    probability: float = 0.2
-    max_chars: int = 80
+    probability: float = 0.4
+    # 0 = no extra cap (provider limit is 1000); >0 limits the spoken text.
+    max_chars: int = 0
     cooldown_seconds: int = 30
 
 
@@ -391,8 +392,8 @@ def load_config(path: str | Path) -> AppConfig:
         base_url=str(voice_raw.get("base_url", "https://api.stepfun.com")),
         instruction=str(voice_raw.get("instruction", "")),
         speed=float(voice_raw.get("speed", 1.0)),
-        probability=max(0.0, min(1.0, float(voice_raw.get("probability", 0.2)))),
-        max_chars=max(10, int(voice_raw.get("max_chars", 80))),
+        probability=max(0.0, min(1.0, float(voice_raw.get("probability", 0.4)))),
+        max_chars=max(0, int(voice_raw.get("max_chars", 0))),
         cooldown_seconds=max(0, int(voice_raw.get("cooldown_seconds", 30))),
     )
 
@@ -905,11 +906,15 @@ class Bot:
     def _voice_hint(self) -> str:
         if not self.config.voice.enabled:
             return ""
+        limit = (
+            f"控制在 {self.config.voice.max_chars} 字以内"
+            if self.config.voice.max_chars > 0
+            else "不要长篇大论（上限 1000 字）"
+        )
         return (
             chr(10) + "（对方明确要求发语音/听语音/用语音说时，你必须使用 [语音]："
-            "在回复最后单独一行写 [语音]，并把要说的正文控制在 "
-            f"{self.config.voice.max_chars} 字以内；括号里的动作描写不会被读出来。"
-            "其他时候想用语音也可以用。）"
+            "在回复最后单独一行写 [语音]，把要说的正文" + limit +
+            "；括号里的动作描写不会被读出来。其他时候想用语音也可以用。）"
         )
 
     def _task_hint(self, event: MessageEvent) -> str:
@@ -1256,7 +1261,7 @@ class Bot:
         if not text:
             log.info("voice skipped: empty spoken text")
             return False
-        if len(text) > config.max_chars:
+        if config.max_chars > 0 and len(text) > config.max_chars:
             log.info("voice skipped: spoken text %d > %d chars", len(text), config.max_chars)
             return False
         key = event.group_id if event.group_id is not None else event.user_id
@@ -1378,7 +1383,7 @@ class Bot:
         if not config.enabled or config.probability <= 0:
             return False
         cleaned = " ".join((text or "").split())
-        if not cleaned or len(cleaned) > config.max_chars:
+        if not cleaned:
             return False
         return random.random() < config.probability
 

@@ -100,9 +100,10 @@ base_url = "https://api.stepfun.com"
 # Only stepaudio-2.5/3-tts read this; e.g. "傲娇、带点撒娇，语速稍快".
 instruction = ""
 speed = 1.0
-# Chance to voice a short proactive group reply the model did not mark [语音].
-probability = 0.2
-max_chars = 80
+# Chance to voice a proactive group reply the model did not mark [语音].
+probability = 0.4
+# 0 = no extra cap (provider limit is 1000); set e.g. 300 to keep voice replies short.
+max_chars = 0
 cooldown_seconds = 30
 
 [tasks]

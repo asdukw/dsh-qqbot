@@ -19,7 +19,7 @@ DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_FISH_MODEL = "s2.1-pro-free"
 DEFAULT_STEPFUN_MODEL = "stepaudio-3-tts"
 STEPFUN_INSTRUCTION_MODELS = ("stepaudio-2.5-tts", "stepaudio-3-tts")
-MAX_CHARS = 80
+MAX_CHARS = 1000  # provider-side safety cap
 
 _VOICE_RE = re.compile(r"\[语音\]")
 _STAGE_RE = re.compile(r"\*[^*]*\*|（[^）]*）|\([^)]*\)")
