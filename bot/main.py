@@ -27,7 +27,7 @@ from conversations import ConversationStore
 from dsh_client import DSHClient, DSHConfig, DSHError
 from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
 from llm import LLMClient, LLMConfig, LLMError
-from memory import Memory
+from memory import Memory, format_recall
 from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from onebot import EMPTY_REPLY, MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
@@ -1095,6 +1095,24 @@ class Bot:
         log.info("voice reply sent to %s (%d bytes)", key, len(audio))
         return True
 
+    async def _recall_block(self, event: MessageEvent, text: str) -> str:
+        """Related older messages from this conversation, for the prompt."""
+        if len(text.strip()) < 3:
+            return ""
+        if event.message_type == "group" and event.group_id is not None:
+            conversation_id = f"group:{event.group_id}"
+        elif event.message_type == "private":
+            conversation_id = f"private:{event.user_id}"
+        else:
+            return ""
+        try:
+            rows = await self.memory.recall(conversation_id, text, limit=3)
+        except sqlite3.Error as exc:
+            log.warning("memory recall failed: %s", exc)
+            return ""
+        block = format_recall(rows)
+        return f"\n\n[相关历史]\n{block}" if block else ""
+
     async def _send_reply(
         self, event: MessageEvent, conversation_id: str, reply: str
     ) -> None:
@@ -1512,6 +1530,7 @@ class Bot:
         # drains the group buffer.
         image_urls = self._turn_images(event)
         prompt, context_lines = self._turn_prompt(event, text)
+        prompt += await self._recall_block(event, text)
         images = await self._image_urls(image_urls) if image_urls else []
 
         await self.memory.add(conversation_id, "user", text)
@@ -1555,6 +1574,7 @@ class Bot:
         # Read the group buffer before _turn_prompt() drains it.
         image_urls = self._turn_images(event)
         turn_text, _ = self._turn_prompt(event, text)
+        turn_text += await self._recall_block(event, text)
         messages = build_messages(
             data=data,
             history=history,
