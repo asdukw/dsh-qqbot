@@ -11,7 +11,11 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from commands import CommandRouter, strip_message_markers  # noqa: E402
+from commands import (  # noqa: E402
+    CommandRouter,
+    strip_leading_mention,
+    strip_message_markers,
+)
 from models import ModelRegistry  # noqa: E402
 
 from cards import CardRegistry, normalise  # noqa: E402
@@ -44,6 +48,18 @@ class FakeBot:
     async def reload_card(self) -> bool:
         self.card_reloads += 1
         return True
+
+
+class StripMentionTests(unittest.TestCase):
+    def test_typed_at_before_a_command_is_removed(self) -> None:
+        self.assertEqual(
+            strip_leading_mention("@嘻嘻 /sub add 456664753"), "/sub add 456664753"
+        )
+        self.assertEqual(strip_leading_mention("@bot   /model"), "/model")
+
+    def test_chatter_is_untouched(self) -> None:
+        self.assertEqual(strip_leading_mention("@嘻嘻 你好呀"), "@嘻嘻 你好呀")
+        self.assertEqual(strip_leading_mention("你好 /sub"), "你好 /sub")
 
 
 class CommandRouterTests(unittest.TestCase):

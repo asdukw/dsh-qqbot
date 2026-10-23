@@ -28,9 +28,20 @@ log = logging.getLogger(__name__)
 _MARKER_RE = re.compile(r"\[(?:图片|表情包|表情|语音|视频|文件|动画表情)\]")
 
 
+_LEADING_MENTION_RE = re.compile(r"^@\S+\s+(?=/)")
+
 def strip_message_markers(text: str) -> str:
     """Drop the placeholders MessageParser adds for non-text segments."""
     return _MARKER_RE.sub("", text).strip()
+
+
+def strip_leading_mention(text: str) -> str:
+    """Drop a typed "@name " prefix in front of a slash command.
+
+    QQ sometimes delivers a typed "@bot" as plain text instead of a mention.
+    Only applies when a command follows, so ordinary chatter is untouched.
+    """
+    return _LEADING_MENTION_RE.sub("", text, count=1).strip()
 
 
 def source_label(source: str) -> str:

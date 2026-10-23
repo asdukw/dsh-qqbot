@@ -77,6 +77,9 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(
             bilibili_feed_url("https://example.com/feed.xml"), "https://example.com/feed.xml"
         )
+        other = f"{DEFAULT_RSSHUB_BASE}/bilibili/user/dynamic/456664753"
+        self.assertEqual(bilibili_feed_url("UID:456664753"), other)
+        self.assertEqual(bilibili_feed_url("uid：456664753"), other)
         with self.assertRaises(FeedError):
             bilibili_feed_url("老番茄")
 

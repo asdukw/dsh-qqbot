@@ -60,7 +60,7 @@ def strip_html(text: str, limit: int = MAX_SUMMARY) -> str:
 
 def bilibili_feed_url(target: str, base_url: str = DEFAULT_RSSHUB_BASE) -> str:
     """Turn a UID or space URL into an RSSHub dynamics feed URL."""
-    target = target.strip()
+    target = re.sub(r"(?i)^uid\s*[:：]\s*", "", target.strip())
     if target.startswith("http://") or target.startswith("https://"):
         parts = urlsplit(target)
         if "bilibili.com" not in parts.netloc:

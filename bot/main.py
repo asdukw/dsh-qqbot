@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from admins import parse_admin_ids
 from card_fetch import CardFetchError, fetch_card_bytes_sync
-from commands import CommandRouter, strip_message_markers
+from commands import CommandRouter, strip_leading_mention, strip_message_markers
 from conversations import ConversationStore
 from dsh_client import DSHClient, DSHConfig, DSHError
 from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
@@ -691,7 +691,7 @@ class Bot:
         if not text and not event.images:
             return
 
-        command_text = strip_message_markers(text)
+        command_text = strip_leading_mention(strip_message_markers(text))
         if self.commands.is_command(command_text):
             await self.commands.handle(event, command_text)
             return
