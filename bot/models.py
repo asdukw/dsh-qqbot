@@ -73,19 +73,15 @@ DEFAULTS: list[dict[str, Any]] = [
         "max_output_tokens": 2048, "reasoning_effort": "low", "capabilities": _EFFORTS,
     },
     {
-        "provider": "opencode-go", "model_id": "deepseek-v4.1-flash-free",
-        "display_name": "DeepSeek V4.1 Flash Free",
+        "provider": "opencode-go", "model_id": "beam-free",
+        "display_name": "Beam Free",
         "base_url": "https://opencode.ai/zen/go/v1",
-        "api_key_env": "OPENCODE_API_KEY", "context_window": 200_000,
-        "max_output_tokens": 2048, "reasoning_effort": "low", "capabilities": _EFFORTS,
+        "api_key_env": "OPENCODE_API_KEY", "context_window": 1_048_576,
+        "max_output_tokens": 8192, "capabilities": _EFFORTS,
     },
-    {
-        "provider": "fake", "model_id": "fake-model",
-        "display_name": "Fake Model (local test)",
-        "base_url": "http://127.0.0.1:8000/v1",
-        "api_key_env": "FAKE_KEY", "context_window": 128_000,
-        "max_output_tokens": 2048, "reasoning_effort": "low", "capabilities": _EFFORTS,
-    },
+    # Only the paid Flash and Beam Free are seeded. The Flash free tier only
+    # works inside the OpenCode client (403 FreeTierError elsewhere), and local
+    # test routes such as the fake model are registered ad hoc with --set-model.
 ]
 
 # Fields --set-model may change, with their parsers.
@@ -228,8 +224,8 @@ class ModelRegistry:
                 (
                     row["provider"], row["model_id"], row["display_name"],
                     row["base_url"], row["api_key_env"], row["context_window"],
-                    row["max_output_tokens"], row["reasoning_effort"],
-                    json.dumps(row["capabilities"]),
+                    row.get("max_output_tokens", 2048), row.get("reasoning_effort", ""),
+                    json.dumps(row.get("capabilities", {})),
                     1 if (row["provider"], row["model_id"]) == DEFAULT_ACTIVE else 0,
                     now,
                 ),

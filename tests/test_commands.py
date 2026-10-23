@@ -52,7 +52,13 @@ class CommandRouterTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.db = root / "models.db"
         self.cards_db = root / "cards.db"
-        ModelRegistry(self.db).close()
+        registry = ModelRegistry(self.db)
+        registry.upsert("deepseek", "deepseek-flash", {
+            "base_url": "https://api.deepseek.com",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "context_window": "1000000",
+        })
+        registry.close()
         self.bot = FakeBot(self.db, self.cards_db)
         self.a, _ = self.bot.cards.install_payload(
             card_payload("阿杜", description="温柔的图书管理员", tags=["日常"]),
@@ -97,11 +103,11 @@ class CommandRouterTests(unittest.TestCase):
         self.assertIn("opencode-go/deepseek-v4.1-flash", self.bot.sent[0])
 
     def test_switches_by_index(self) -> None:
-        self.run_command("/model 3")
+        self.run_command("/model 2")
         self.assertEqual(self.bot.reloads, 1)
 
     def test_switches_by_model_id(self) -> None:
-        self.run_command("/model deepseek-v4.1-flash-free")
+        self.run_command("/model deepseek/deepseek-flash")
         self.assertIn("已切换模型", self.bot.sent[0])
 
     def test_unknown_model(self) -> None:

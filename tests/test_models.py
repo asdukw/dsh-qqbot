@@ -17,6 +17,13 @@ class ModelRegistryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "models.db"
         self.registry = ModelRegistry(self.db_path)
+        # A second route for switch tests; the shipped defaults now only seed
+        # the paid OpenCode Go model.
+        self.registry.upsert("deepseek", "deepseek-flash", {
+            "base_url": "https://api.deepseek.com",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "context_window": "1000000",
+        })
 
     def tearDown(self) -> None:
         self.registry.close()
@@ -29,7 +36,10 @@ class ModelRegistryTests(unittest.TestCase):
     def test_seeds_defaults_once_and_keeps_edits(self) -> None:
         keys = [record.key for record in self.registry.list()]
         self.assertIn("opencode-go/deepseek-v4.1-flash", keys)
-        self.assertIn("opencode-go/deepseek-v4.1-flash-free", keys)
+        self.assertEqual(
+            sorted(key for key in keys if key.startswith("opencode-go/")),
+            ["opencode-go/beam-free", "opencode-go/deepseek-v4.1-flash"],
+        )
         self.registry.upsert("opencode-go", "deepseek-v4.1-flash", {"context_window": "123"})
         self.reopen()
         record = self.registry.get("opencode-go", "deepseek-v4.1-flash")
@@ -39,29 +49,30 @@ class ModelRegistryTests(unittest.TestCase):
 
     def test_defaults(self) -> None:
         paid = self.registry.get("opencode-go", "deepseek-v4.1-flash")
-        free = self.registry.get("opencode-go", "deepseek-v4.1-flash-free")
-        assert paid is not None and free is not None
+        assert paid is not None
         self.assertEqual(paid.context_window, 1_000_000)
-        self.assertEqual(free.context_window, 200_000)
         self.assertEqual(paid.reasoning_effort, "low")
         self.assertEqual(paid.effective_effort, "low")
         self.assertEqual(paid.max_output_tokens, 2048)
+        beam = self.registry.get("opencode-go", "beam-free")
+        assert beam is not None
+        self.assertEqual(beam.context_window, 1_048_576)
 
     def test_exactly_one_active_model(self) -> None:
         active = self.registry.active()
         assert active is not None
         self.assertEqual(active.key, "opencode-go/deepseek-v4.1-flash")
-        self.registry.use("opencode-go", "deepseek-v4.1-flash-free")
+        self.registry.use("deepseek", "deepseek-flash")
         self.reopen()
         actives = [r.key for r in self.registry.list() if r.is_active]
-        self.assertEqual(actives, ["opencode-go/deepseek-v4.1-flash-free"])
+        self.assertEqual(actives, ["deepseek/deepseek-flash"])
 
     def test_use_rejects_unknown_and_disabled(self) -> None:
         with self.assertRaises(ValueError):
             self.registry.use("opencode-go", "missing")
-        self.registry.upsert("fake", "fake-model", {"enabled": "false"})
+        self.registry.upsert("deepseek", "deepseek-flash", {"enabled": "false"})
         with self.assertRaises(ValueError):
-            self.registry.use("fake", "fake-model")
+            self.registry.use("deepseek", "deepseek-flash")
 
     def test_cannot_disable_active_model(self) -> None:
         with self.assertRaises(ValueError):
@@ -81,7 +92,7 @@ class ModelRegistryTests(unittest.TestCase):
 
     def test_upsert_requires_core_fields_for_new_rows(self) -> None:
         with self.assertRaises(ValueError):
-            self.registry.upsert("deepseek", "deepseek-flash", {"context_window": "1000"})
+            self.registry.upsert("deepseek", "missing-model", {"context_window": "1000"})
 
     def test_effort_must_be_declared(self) -> None:
         with self.assertRaises(ValueError):
@@ -106,10 +117,10 @@ class ModelRegistryTests(unittest.TestCase):
         # adapters (the OpenCode session header) and model catalog.
         self.assertNotIn("api", opencode)
         self.assertNotIn("headers", opencode)
-        self.assertIn("api", patch[0]["config"]["providers"]["fake"])
+        # Non-built-in provider: DSH needs an explicit adapter base URL.
+        self.assertIn("api", patch[0]["config"]["providers"]["deepseek"])
         models = {m["id"]: m for m in opencode["models"]}
         self.assertEqual(models["deepseek-v4.1-flash"]["contextWindow"], 1_000_000)
-        self.assertEqual(models["deepseek-v4.1-flash-free"]["contextWindow"], 200_000)
         self.assertEqual(
             models["deepseek-v4.1-flash"]["reasoningEfforts"],
             {"low": "low", "medium": "medium", "high": "high"},
@@ -122,18 +133,19 @@ class ModelRegistryTests(unittest.TestCase):
         after = self.registry.active_signature()
         assert after is not None
         self.assertNotEqual(after, before)
-        self.registry.use("opencode-go", "deepseek-v4.1-flash-free")
+        self.registry.use("deepseek", "deepseek-flash")
         switched = self.registry.active_signature()
         assert switched is not None
-        self.assertIn("opencode-go/deepseek-v4.1-flash-free", switched)
+        self.assertIn("deepseek/deepseek-flash", switched)
 
     def test_disabled_rows_are_excluded(self) -> None:
-        self.registry.upsert("opencode-go", "deepseek-v4.1-flash-free", {"enabled": "0"})
+        self.registry.upsert("deepseek", "deepseek-flash", {"enabled": "0"})
         target = Path(self.tmp.name) / "models.patch.json"
         self.registry.write_dsh_patch(target)
         patch = json.loads(target.read_text(encoding="utf-8"))
-        ids = [m["id"] for m in patch[0]["config"]["providers"]["opencode-go"]["models"]]
-        self.assertNotIn("deepseek-v4.1-flash-free", ids)
+        deepseek = patch[0]["config"]["providers"].get("deepseek", {"models": []})
+        ids = [m["id"] for m in deepseek["models"]]
+        self.assertNotIn("deepseek-flash", ids)
 
     def test_inconsistent_provider_metadata_is_rejected(self) -> None:
         self.registry.upsert("opencode-go", "other", {
