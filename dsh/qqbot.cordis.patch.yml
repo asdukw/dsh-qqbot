@@ -66,3 +66,23 @@
         providers: {}
     - id: user-profile
       name: '/opt/qqbot/dsh/plugins/user-profile.mjs'
+    # Web search/fetch: the official service and model-facing tools, with a
+    # keyless provider instead of the exa/perplexity/deepseek ones (each of
+    # those needs its own API key; the keyless backend matches what OpenCode's
+    # own websearch tool uses).
+    - id: web
+      name: '@deepseek-ai/dsh-web'
+      config:
+        searchProvider: keyless
+        fetchProvider: http
+    - id: web-search-keyless
+      name: '/opt/qqbot/dsh/plugins/web-search-keyless.mjs'
+    - id: web-fetch-http
+      name: '@deepseek-ai/dsh-web-fetch-http'
+    - id: tool-web
+      name: '@deepseek-ai/dsh-tool-web'
+      config:
+        search: true
+        fetch: true
+        searchMaxResults: 5
+        searchTimeoutMs: 30000

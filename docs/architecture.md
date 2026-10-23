@@ -50,6 +50,8 @@
 - `subprocess`（仅供 `tool-fs-search` 启动打包的 `rg`）
 - `fs-observation-policy`
 - `user-profile`（自定义插件）
+- `web` + `tool-web` + `web-fetch-http`（官方 web seam 与 `web_search` / `web_fetch` 工具）
+- `web-search-keyless`（自定义 provider，注册到官方 `ctx.web`；官方 exa/perplexity/deepseek provider 都要各自的 key，这个走免密钥搜索后端）
 
 禁用：
 
