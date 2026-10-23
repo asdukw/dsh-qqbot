@@ -146,6 +146,8 @@ class StickersSection:
     collect: bool = True
     max_per_hour: int = 20  # per group
     max_bytes: int = 8 * 1024 * 1024
+    # Oldest/least-used stickers are dropped beyond this many.
+    max_stored: int = 500
     # Sending: the model asks with a trailing "[表情: ...]" line.
     send: bool = True
     send_cooldown_seconds: int = 60
@@ -281,6 +283,7 @@ def load_config(path: str | Path) -> AppConfig:
         collect=bool(stickers_raw.get("collect", True)),
         max_per_hour=max(0, int(stickers_raw.get("max_per_hour", 20))),
         max_bytes=max(1024, int(stickers_raw.get("max_bytes", 8 * 1024 * 1024))),
+        max_stored=max(0, int(stickers_raw.get("max_stored", 500))),
         send=bool(stickers_raw.get("send", True)),
         send_cooldown_seconds=max(0, int(stickers_raw.get("send_cooldown_seconds", 60))),
         max_sends_per_hour=max(0, int(stickers_raw.get("max_sends_per_hour", 10))),
@@ -763,6 +766,7 @@ class Bot:
                     record.id, event.group_id, record.size,
                 )
                 await self._tag_sticker(record)
+                await asyncio.to_thread(store.evict, self.config.stickers.max_stored)
 
     async def _tag_sticker(self, record: Any) -> None:
         """Ask the vision model for a description and a few emotion tags."""
@@ -788,8 +792,10 @@ class Bot:
                             "type": "text",
                             "text": (
                                 "这是一个聊天表情包。用不超过 20 个字描述画面和情绪；"
-                                "再给 1-3 个情绪标签（如 开心/无语/生气/委屈/得意/疑惑/累/吃饭/睡觉）。"
-                                '只返回 JSON：{"desc": "...", "tags": ["..."]}'
+                                "再给 1-3 个情绪标签（如 开心/无语/生气/委屈/得意/疑惑/累/吃饭/睡觉）；"
+                                "最后判断是否适合在群聊发送：色情、暴力、违法、辱骂、聊天截图、"
+                                "文字过多都算不合适。只返回 JSON："
+                                '{"desc": "...", "tags": ["..."], "safe": true}'
                             ),
                         },
                         {"type": "image_url", "image_url": {"url": uri}},
@@ -799,14 +805,20 @@ class Bot:
         except LLMError as exc:
             log.warning("sticker tagging failed: %s", exc)
             return
-        description, tags = parse_tags(raw)
+        description, tags, safe = parse_tags(raw)
         try:
             await asyncio.to_thread(store.describe, record.id, description, tags)
+            if not safe:
+                await asyncio.to_thread(store.set_status, record.id, "banned")
         except (ValueError, sqlite3.Error) as exc:
             log.warning("cannot store sticker tags: %s", exc)
             return
         log.info(
-            "sticker #%s tagged: %s %s", record.id, description, ",".join(tags) or "-"
+            "sticker #%s tagged: %s %s%s",
+            record.id,
+            description,
+            ",".join(tags) or "-",
+            "" if safe else " (banned by moderation)",
         )
 
     def _sticker_hint(self) -> str:

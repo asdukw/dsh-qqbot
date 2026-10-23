@@ -146,7 +146,9 @@ class CommandRouterTests(unittest.TestCase):
 
         root = Path(self.tmp.name)
         self.bot.stickers = StickerStore(root / "stickers.db", root / "sticker-files")
-        self.bot.config.stickers = SimpleNamespace(max_bytes=8 * 1024 * 1024)
+        self.bot.config.stickers = SimpleNamespace(
+            max_bytes=8 * 1024 * 1024, max_stored=500
+        )
         png = bytes.fromhex("89504e470d0a1a0a") + b"fake"
         uri = "data:image/png;base64," + base64.b64encode(png).decode()
         self.run_command("/sticker add", images=(uri,))

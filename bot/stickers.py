@@ -52,17 +52,20 @@ def extract_sticker_marker(text: str) -> tuple[str, str | None]:
     return cleaned, hint
 
 
-def parse_tags(raw: str) -> tuple[str, tuple[str, ...]]:
-    """Read {"desc": ..., "tags": [...]} out of a model reply, tolerantly."""
+def parse_tags(raw: str) -> tuple[str, tuple[str, ...], bool]:
+    """Read {"desc", "tags", "safe"} out of a model reply, tolerantly.
+
+    `safe` defaults to True so a model that omits it cannot ban everything.
+    """
     start, end = raw.find("{"), raw.rfind("}")
     if start < 0 or end <= start:
-        return raw.strip()[:200], ()
+        return raw.strip()[:200], (), True
     try:
         payload = json.loads(raw[start:end + 1])
     except json.JSONDecodeError:
-        return raw.strip()[:200], ()
+        return raw.strip()[:200], (), True
     if not isinstance(payload, dict):
-        return raw.strip()[:200], ()
+        return raw.strip()[:200], (), True
     desc = str(payload.get("desc") or payload.get("description") or "").strip()
     raw_tags = payload.get("tags") or payload.get("emotions") or []
     tags = (
@@ -70,7 +73,8 @@ def parse_tags(raw: str) -> tuple[str, tuple[str, ...]]:
         if isinstance(raw_tags, list)
         else ()
     )
-    return desc or raw.strip()[:200], tags
+    safe = payload.get("safe", True)
+    return (desc or raw.strip()[:200]), tags, bool(safe)
 
 
 class StickerError(RuntimeError):
@@ -258,6 +262,32 @@ class StickerStore:
                 rows = matched
         tagged = [row for row in rows if row.description or row.tags]
         return random.choice(tagged or rows)
+
+    def evict(self, max_count: int) -> int:
+        """Delete the least-used, oldest stickers until at most max_count remain."""
+        if max_count <= 0:
+            return 0
+        with self._lock, self._db:
+            total = self._db.execute("SELECT COUNT(*) FROM stickers").fetchone()[0]
+            excess = int(total) - int(max_count)
+            if excess <= 0:
+                return 0
+            rows = self._db.execute(
+                "SELECT id, path FROM stickers ORDER BY uses, last_used, created_at, id "
+                "LIMIT ?",
+                (excess,),
+            ).fetchall()
+            self._db.executemany(
+                "DELETE FROM stickers WHERE id = ?", [(row["id"],) for row in rows]
+            )
+        for row in rows:
+            path = Path(row["path"]) if row["path"] else None
+            if path is not None and path.is_file():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    log.warning("cannot remove evicted sticker %s: %s", path, exc)
+        return len(rows)
 
     def stats(self) -> dict[str, int]:
         with self._lock:

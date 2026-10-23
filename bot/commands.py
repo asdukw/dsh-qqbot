@@ -672,14 +672,18 @@ class CommandRouter:
         except (StickerError, OSError, sqlite3.Error) as exc:
             await self.bot.send_text(event, f"收藏失败: {exc}")
             return
+        store.evict(self.bot.config.stickers.max_stored)
         state = "已收藏" if created else "库里已经有这张"
         await self.bot.send_text(event, f"{state}: #{record.id}（共 {store.count()} 张）")
 
     async def _send_sticker(self, event: Any, args: list[str]) -> None:
         store = self.bot.stickers
-        record = store.get(int(args[0])) if args and args[0].isdigit() else None
+        if args and args[0].isdigit():
+            record = store.get(int(args[0]))
+        else:
+            record = store.pick(" ".join(args)) if args else None
         if record is None:
-            await self.bot.send_text(event, "用法: /sticker send <id>")
+            await self.bot.send_text(event, "用法: /sticker send <id|标签>")
             return
         if record.status != "ok":
             await self.bot.send_text(
@@ -705,8 +709,9 @@ class CommandRouter:
             await self.bot.send_text(event, f"发送失败: {exc}")
             return
         store.mark_used(record.id)
+        store.evict(self.bot.config.stickers.max_stored)
         if not in_group:
-            await self.bot.send_text(event, f"已发送 #{record.id}")
+            await self.bot.send_text(event, f"已发送 #{record.id} {record.description}")
 
     async def _tag_sticker(self, event: Any, args: list[str]) -> None:
         store = self.bot.stickers
@@ -764,6 +769,7 @@ class CommandRouter:
                 added += 1
             else:
                 skipped += 1
+        store.evict(self.bot.config.stickers.max_stored)
         await self.bot.send_text(
             event,
             f"导入完成：新增 {added}，已存在 {skipped}，失败 {failed}。"

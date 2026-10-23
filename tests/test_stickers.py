@@ -48,14 +48,22 @@ class MarkerTests(unittest.TestCase):
 
 class ParseTagsTests(unittest.TestCase):
     def test_reads_json_with_surrounding_prose(self) -> None:
-        desc, tags = parse_tags('好的：{"desc": "一只翻白眼的猫", "tags": ["无语", "猫"]}')
+        desc, tags, safe = parse_tags(
+            '好的：{"desc": "一只翻白眼的猫", "tags": ["无语", "猫"], "safe": false}'
+        )
         self.assertEqual(desc, "一只翻白眼的猫")
         self.assertEqual(tags, ("无语", "猫"))
+        self.assertFalse(safe)
+
+    def test_missing_safe_defaults_to_true(self) -> None:
+        _desc, _tags, safe = parse_tags('{"desc": "开心", "tags": ["开心"]}')
+        self.assertTrue(safe)
 
     def test_falls_back_to_plain_text(self) -> None:
-        desc, tags = parse_tags("一只翻白眼的猫")
+        desc, tags, safe = parse_tags("一只翻白眼的猫")
         self.assertEqual(desc, "一只翻白眼的猫")
         self.assertEqual(tags, ())
+        self.assertTrue(safe)
 
 
 class StickerStoreTests(unittest.TestCase):
@@ -128,6 +136,26 @@ class StickerStoreTests(unittest.TestCase):
         record, _ = self.store.add_bytes(PNG)
         self.store.set_status(record.id, "banned")
         self.assertIsNone(self.store.pick("开心"))
+
+    def test_evict_drops_least_used_first(self) -> None:
+        keep, _ = self.store.add_bytes(PNG)
+        old_unused, _ = self.store.add_bytes(JPEG)
+        middle, _ = self.store.add_bytes(GIF)
+        self.store.mark_used(keep.id)
+        path = Path(old_unused.path)
+        removed = self.store.evict(2)
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.store.count(), 2)
+        self.assertIsNone(self.store.get(old_unused.id))
+        self.assertIsNotNone(self.store.get(keep.id))
+        self.assertIsNotNone(self.store.get(middle.id))
+        self.assertFalse(path.exists())
+
+    def test_evict_is_noop_under_the_cap(self) -> None:
+        self.store.add_bytes(PNG)
+        self.assertEqual(self.store.evict(10), 0)
+        self.assertEqual(self.store.evict(0), 0)
+        self.assertEqual(self.store.count(), 1)
 
     def test_stats(self) -> None:
         self.store.add_bytes(PNG)
