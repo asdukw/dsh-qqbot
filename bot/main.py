@@ -503,6 +503,34 @@ def write_lore(card, workspace: str) -> None:
     tmp.replace(path)
 
 
+def _shrink_image(data: bytes, mime: str) -> tuple[bytes, str]:
+    """Downscale large chat images before they go to the model.
+
+    Every image also stays in the DSH session history, so sending 1-8 MB
+    originals makes later requests proportionally slower. Re-encoding to WebP
+    at 1024px cuts that by an order of magnitude with no useful detail loss.
+    """
+    if len(data) <= 250 * 1024:
+        return data, mime
+    try:
+        from io import BytesIO
+
+        from PIL import Image, ImageOps
+
+        with Image.open(BytesIO(data)) as image:
+            image = ImageOps.exif_transpose(image)
+            if max(image.size) > 1024:
+                image.thumbnail((1024, 1024))
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGB")
+            output = BytesIO()
+            image.save(output, format="WEBP", quality=80)
+            return output.getvalue(), "image/webp"
+    except Exception as exc:  # noqa: BLE001 - keep the original on any failure
+        log.warning("image shrink failed: %s", exc)
+        return data, mime
+
+
 def split_text(text: str, limit: int) -> list[str]:
     text = text.strip()
     if limit <= 0 or len(text) <= limit:
@@ -1434,14 +1462,17 @@ class Bot:
             "proactive reply: group=%s trigger=%s(%s) context=%d images=%d",
             event.group_id, event.sender_name, event.user_id, len(lines), len(images),
         )
+        started = time.time()
         try:
             reply = await asyncio.to_thread(dsh.run, session_id, prompt, images)
         except DSHError as exc:
-            log.error("proactive DSH failed: %s", exc)
+            log.error("proactive DSH failed after %.1fs: %s", time.time() - started, exc)
             return
+        log.info("proactive DSH turn took %.1fs", time.time() - started)
 
         self.proactive.record(event.group_id, time.time())
         self.group_context.drain(event.group_id)
+        log.info("LLM turn took %.1fs (images=%d)", time.time() - started, len(images))
         await self.memory.add(conversation_id, "assistant", reply)
         await self._send_reply(event, conversation_id, reply)
 
@@ -1562,6 +1593,7 @@ class Bot:
                 mime = mime.split(";")[0].strip().lower()
                 if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
                     mime = "image/jpeg"
+                data, mime = await asyncio.to_thread(_shrink_image, data, mime)
                 fetched.append(
                     f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
                 )
@@ -1629,13 +1661,16 @@ class Bot:
             conversation_id, session_id, event.sender_name, event.user_id, len(text),
             context_lines, len(images),
         )
+        started = time.time()
         try:
             reply = await asyncio.to_thread(dsh.run, session_id, prompt, images)
         except DSHError as exc:
-            log.error("DSH failed: %s", exc)
+            log.error("DSH failed after %.1fs: %s", time.time() - started, exc)
             if self.config.bot.notify_errors:
                 await self._send(event, self.config.bot.error_message)
             return
+        elapsed = time.time() - started
+        log.info("DSH turn took %.1fs (images=%d, prompt=%d chars)", elapsed, len(images), len(prompt))
 
         await self.memory.add(conversation_id, "assistant", reply)
         await self._send_reply(event, conversation_id, reply)
@@ -1696,10 +1731,11 @@ class Bot:
                     break
             log.info("attached %d image(s) to conv=%s", len(images), conversation_id)
 
+        started = time.time()
         try:
             reply = await self.client.chat(messages)
         except LLMError as exc:
-            log.error("LLM failed: %s", exc)
+            log.error("LLM failed after %.1fs: %s", time.time() - started, exc)
             if self.config.bot.notify_errors:
                 await self._send(event, self.config.bot.error_message)
             return

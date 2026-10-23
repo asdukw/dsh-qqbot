@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
 from group_context import GroupContextBuffer, format_group_turn  # noqa: E402
 from llm import LLMError  # noqa: E402
-from main import AppConfig, Bot  # noqa: E402
+from main import AppConfig, Bot, _shrink_image  # noqa: E402
 from onebot import MessageEvent  # noqa: E402
 
 PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -82,6 +82,26 @@ class TurnImageTests(unittest.TestCase):
         bot.group_context.add(7, "甲", "[图片]", images=("https://a/own.jpg",))
         event = self.group_event(message_type="private", group_id=None, images=())
         self.assertEqual(bot._turn_images(event), [])
+
+
+class ShrinkImageTests(unittest.TestCase):
+    def test_small_images_pass_through(self) -> None:
+        self.assertEqual(_shrink_image(b"tiny", "image/jpeg"), (b"tiny", "image/jpeg"))
+
+    def test_large_images_become_smaller_webp(self) -> None:
+        import io
+
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        image = Image.effect_noise((1600, 1200), 100).convert("RGB")
+        image.save(buffer, format="PNG")
+        original = buffer.getvalue()
+        shrunk, mime = _shrink_image(original, "image/png")
+        self.assertEqual(mime, "image/webp")
+        self.assertLess(len(shrunk), len(original))
+        with Image.open(io.BytesIO(shrunk)) as decoded:
+            self.assertLessEqual(max(decoded.size), 1024)
 
 
 class FakeClient:
