@@ -39,14 +39,14 @@
     mode: workspace-write
     workspaceRoot: /var/lib/qqbot/dsh-workspace
 
-# ── context pressure: compact at ~80% of the window ────────────
+# ── context pressure: DSH default (80% threshold, 16% retained) ─
 - id: compaction-basic
   config:
-    # Compact early: a 1M window otherwise grows to ~150k input tokens before
-    # compaction, which made every group turn take 70s+. Keep ~20k recent tokens.
-    thresholdRatio: 0.06
+    # Image history is now stored as text placeholders, so keep the stock
+    # 1M-window policy while evaluating the change.
+    thresholdRatio: 0.8
     headroomTokens: 16384
-    retainTokens: 20000
+    retainRatio: 0.16
     auto: true
 
 # ── no DeepSeek session-log upload ──────────────────────────────
