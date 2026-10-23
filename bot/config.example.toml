@@ -54,6 +54,14 @@ max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
+[tasks]
+# Admin-only scheduled messages. Creation is semantic: one thin-client call
+# turns "/task add 每天早上8点提醒大家喝水" into a validated schedule.
+enabled = true
+database = "/var/lib/qqbot/tasks.db"
+check_seconds = 20         # scheduler poll interval
+max_tasks = 50
+
 [bot]
 # Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;
 # this list is the fallback for local runs.

@@ -319,6 +319,10 @@ class OneBotWSClient:
         except Exception:  # noqa: BLE001
             pass
 
+    @property
+    def connected(self) -> bool:
+        return self._ws is not None
+
     async def call(self, action: str, params: dict, timeout: float = 30.0) -> dict:
         ws = self._ws
         if ws is None:

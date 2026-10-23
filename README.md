@@ -8,6 +8,7 @@
 
 - **QQ 私聊聊天**，群聊默认只回复 @ 消息（`reply_group_at = false` 可关闭）
 - **赛程**：赛程类回答由模型输出 ```schedule JSON，adapter 用 Pydantic 校验后渲染成固定格式（阶段/北京时间/对阵/BO），校验失败不会把半成品发出去；
+- **定时任务**：管理员直接说"每天早上8点提醒我起床"即可创建（模型输出 `[定时: ...]`，adapter 解析 + Pydantic 校验后排期），也支持 `/task add`；到点自动发到创建时的群/私聊；`/task list|delete|pause|resume|run`；
 - **联网搜索**：DSH 官方的 `web_search` / `web_fetch` 工具；搜索 provider 用免密钥后端（与 OpenCode 自带 websearch 同类），不需要额外 API key；
 - **角色卡**：SillyTavern Character Card V1 / V2 / V3，支持 `.json` 和 `.png`（读取 `ccv3` → `chara` → `iTXt`）；SQLite 角色库，`/card search/install/use` 热切换
 - **DSH session**：每个 QQ 会话一份持久化 JSONL 历史，自动上下文压缩
@@ -147,6 +148,9 @@ sudo journalctl -u qqbot -f
 | `/sticker stats` | 数量与占用空间 |
 | `/sticker tag <id> <描述> [标签,标签]` | 手动补描述/标签，发送时按语境挑 |
 | `/sticker send <id>` | 手动发一张，验证发送链路 |
+| `/task add <一句话>` | 语义化创建定时任务（仅管理员），如 `每天早上8点提醒大家喝水` |
+| `/task` / `/task list` | 列出任务、下次执行时间和目标会话 |
+| `/task delete\|pause\|resume\|run <id>` | 删除 / 暂停 / 恢复 / 立即执行一次 |
 
 命令行等价操作：
 

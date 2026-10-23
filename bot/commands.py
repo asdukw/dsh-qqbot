@@ -8,13 +8,16 @@ import logging
 import re
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from card_fetch import CardFetchError, fetch_card_bytes
+from llm import LLMError
 from models import ModelRecord, ModelRegistry
 from onebot import OneBotError
 from stickers import StickerError, download_image
+from tasks import TZ as TASK_TZ, describe_record, describe_target
 
 from cards import CardError, CardRecord
 
@@ -47,6 +50,7 @@ HELP = """可用命令:
 /card alias [add|remove] <名称>  管理别名（叫到别名也算直接找它）
 /proactive [on|off|status|test]        群聊主动回复
 /sticker        表情库管理与导入
+/task           定时任务（仅管理员）
 /help           显示帮助"""
 
 CARD_HELP = """/card                     列出角色卡
@@ -60,6 +64,13 @@ CARD_HELP = """/card                     列出角色卡
 /card alias add <名称>     添加别名，群里直接叫它就会被当成在找它
 /card alias remove <名称>  删除别名
 /card alias list <id|名称> 查看别的卡的别名"""
+
+
+TASK_HELP = """/task                     列出定时任务
+/task add <一句话>        语义化创建，例如：每天早上8点提醒大家喝水
+/task delete <id>         删除任务
+/task pause|resume <id>   暂停 / 恢复
+/task run <id>            立即执行一次（不改动排期）"""
 
 
 STICKER_HELP = """/sticker                     列出最近收藏的表情包
@@ -99,6 +110,8 @@ class CommandRouter:
             await self._proactive(event, parts[1:])
         elif name in ("/sticker", "/stickers"):
             await self._sticker(event, parts[1:])
+        elif name in ("/task", "/tasks", "/remind"):
+            await self._task(event, parts[1:])
         else:
             await self.bot.send_text(event, f"未知命令: {name}\n{HELP}")
 
@@ -409,6 +422,121 @@ class CommandRouter:
                 f"{status['day_count']}/{status['max_per_day']} 今天"
             )
         await self.bot.send_text(event, "\n".join(lines))
+
+    # --------------------------------------------------------------- tasks
+
+    async def _task(self, event: Any, args: list[str]) -> None:
+        store = getattr(self.bot, "tasks", None)
+        if store is None:
+            await self.bot.send_text(event, "定时任务没有启用（[tasks] enabled = false）。")
+            return
+        action = args[0].lower() if args else "list"
+
+        if action in ("add", "create", "+"):
+            description = " ".join(args[1:]).strip()
+            if not description:
+                await self.bot.send_text(
+                    event,
+                    "用法: /task add <用一句话描述>\n"
+                    "例如: /task add 每天早上8点提醒大家喝水",
+                )
+                return
+            try:
+                record, next_run = await self.bot.create_task(event, description)
+            except (ValueError, LLMError) as exc:
+                await self.bot.send_text(event, f"创建失败: {exc}")
+                return
+            await self.bot.send_text(
+                event,
+                f"已创建任务 #{record.id}：{describe_record(record)}\n"
+                f"发送到: {describe_target(record)}\n"
+                f"下次执行: {next_run.strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
+                f"内容: {record.message}\n"
+                f"用 /task delete {record.id} 可以删掉。",
+            )
+            return
+
+        if action in ("list", "ls"):
+            rows = store.list()
+            await self.bot.send_text(event, self._render_tasks(rows))
+            return
+
+        if action in ("delete", "rm", "remove"):
+            record = store.get(int(args[1])) if len(args) > 1 and args[1].isdigit() else None
+            if record is None:
+                await self.bot.send_text(event, "用法: /task delete <id>")
+                return
+            store.delete(record.id)
+            await self.bot.send_text(event, f"已删除任务 #{record.id}")
+            return
+
+        if action in ("pause", "stop"):
+            record = store.get(int(args[1])) if len(args) > 1 and args[1].isdigit() else None
+            if record is None:
+                await self.bot.send_text(event, "用法: /task pause <id>")
+                return
+            store.set_enabled(record.id, False, None)
+            await self.bot.send_text(event, f"已暂停任务 #{record.id}")
+            return
+
+        if action in ("resume", "start"):
+            record = store.get(int(args[1])) if len(args) > 1 and args[1].isdigit() else None
+            if record is None:
+                await self.bot.send_text(event, "用法: /task resume <id>")
+                return
+            try:
+                updated = self.bot.resume_task(record)
+            except ValueError as exc:
+                await self.bot.send_text(event, f"恢复失败: {exc}")
+                return
+            when = datetime.fromtimestamp(updated.next_run, TASK_TZ).strftime("%m-%d %H:%M")
+            await self.bot.send_text(event, f"已恢复任务 #{record.id}，下次 {when}")
+            return
+
+        if action in ("run", "test"):
+            record = store.get(int(args[1])) if len(args) > 1 and args[1].isdigit() else None
+            if record is None:
+                await self.bot.send_text(event, "用法: /task run <id>")
+                return
+            try:
+                await self.bot._send_scheduled(record.chat_type, record.chat_id, record.message)
+            except (OneBotError, OSError) as exc:
+                await self.bot.send_text(event, f"执行失败: {exc}")
+                return
+            await self.bot.send_text(event, f"已执行任务 #{record.id}")
+            return
+
+        if action in ("help", "?"):
+            await self.bot.send_text(event, TASK_HELP)
+            return
+
+        await self.bot.send_text(event, f"未知任务命令: {action}\n{TASK_HELP}")
+
+    @staticmethod
+    def _render_tasks(rows: list[Any]) -> str:
+        if not rows:
+            return "还没有定时任务。用 /task add <一句话> 创建。"
+        lines = [f"定时任务（共 {len(rows)} 个）:"]
+        for record in rows[:20]:
+            mark = "*" if record.enabled else "-"
+            target = (
+                f"群 {record.chat_id}"
+                if record.chat_type == "group"
+                else f"私聊 {record.chat_id}"
+            )
+            if record.enabled and record.next_run:
+                when = datetime.fromtimestamp(record.next_run, TASK_TZ).strftime(
+                    "%m-%d %H:%M"
+                )
+            else:
+                when = "暂停"
+            lines.append(
+                f"{mark} #{record.id} {describe_record(record)} → {target} "
+                f"｜ 下次 {when} ｜ {record.message}"
+            )
+        if len(rows) > 20:
+            lines.append(f"…还有 {len(rows) - 20} 个，先删掉不用的再列。")
+        return "\n".join(lines)
 
     # ----------------------------------------------------------- stickers
 

@@ -179,6 +179,14 @@ CREATE TABLE group_facts (
 - 图片输入走 DSH 官方 content block（ACP 形状 `{"type":"image","data":<base64>,"mimeType":...}`），不再先转文字描述；只有 thin client 路径和打标用 `image_url`。
 - 表里的 `status='banned'` 不会进入候选；`uses` / `last_used` 记录发送情况。
 
+## 定时任务（`bot/tasks.py`）
+
+- 仅管理员：两条创建路径——直接说话（模型在回复里输出 `[定时: 原始描述]`）或 `/task add <自然语言>`。模型只在发言者被标注为“管理员”时收到这句提示；adapter 在 `_handle_task_request` 里再次校验 `is_admin`，非管理员的标记会被静默剥掉、不创建任务。
+- 语义化解析：一次 thin client 调用把描述转成 `TaskSpec`（`daily|weekly|once|interval` + 时间/星期/间隔 + 要发送的内容），Pydantic 校验字段组合与取值，`next_run_for()` 计算严格晚于当前时间的下一次执行。
+- 存储：`/var/lib/qqbot/tasks.db` 的 `tasks` 表，记录目标会话（群/私聊）、原始描述、消息内容、排期字段、启用状态、下次/上次执行和次数；重启后从 `next_run` 继续。
+- 执行：`TaskScheduler` 在事件循环里每 `[tasks] check_seconds` 秒查一次到期任务；先原子推进 `next_run`（一次性任务直接禁用）再发送，失败不会重复轰炸；发送复用 OneBot 文本接口。
+- 限制：`max_tasks` 总任务数上限；`interval` 最小 5 分钟；消息最长 300 字。
+
 ## 赛程输出（`bot/schedule.py`）
 
 - 系统提示词要求模型把赛程问题写成 ```schedule 代码块，内容为 `{event, matches[{stage, start_time, team_a, team_b, best_of, note}]}`。
