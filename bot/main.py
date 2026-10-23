@@ -67,6 +67,9 @@ class BotSection:
     # Non-@ group messages kept per group and handed to the model on the next @.
     group_context_messages: int = 30
     group_context_chars: int = 3000
+    # Recent group images attached to the next reply (the model cannot see them
+    # once their message has scrolled into the text-only context window).
+    group_context_images: int = 2
     # Privileged QQ numbers (ADMIN_QQ_IDS, comma/space separated).
     admin_qq_ids: tuple[int, ...] = ()
     # Heuristic proactive group replies (see [bot.proactive]).
@@ -251,6 +254,9 @@ def load_config(path: str | Path) -> AppConfig:
             error_message=str(bot_raw.get("error_message", "（我这边网络或模型出了点问题，等一下再试）")),
             group_context_messages=int(bot_raw.get("group_context_messages", 30)),
             group_context_chars=int(bot_raw.get("group_context_chars", 3000)),
+            group_context_images=max(
+                0, min(4, int(bot_raw.get("group_context_images", 2)))
+            ),
             admin_qq_ids=admin_qq_ids,
             proactive=proactive,
         ),
@@ -467,7 +473,9 @@ class Bot:
             await self.ensure_card()
             addressed = event.at_me or self._addresses_bot(event, text)
             if not self.config.bot.reply_group_at or not addressed:
-                self.group_context.add(event.group_id, event.sender_name, text)
+                self.group_context.add(
+                    event.group_id, event.sender_name, text, images=event.images
+                )
                 if not addressed:
                     await self._maybe_reply_proactively(conversation_id, event, text)
                 return
@@ -625,7 +633,9 @@ class Bot:
             return
         conversation_id = f"group:{event.group_id}"
         if not self.group_context.peek(event.group_id):
-            self.group_context.add(event.group_id, event.sender_name, event.text)
+            self.group_context.add(
+                event.group_id, event.sender_name, event.text, images=event.images
+            )
         await self._maybe_reload_model()
         lock = self._locks.setdefault(conversation_id, asyncio.Lock())
         async with lock, self._global:
@@ -649,13 +659,21 @@ class Bot:
                 log.error("cannot record conversation identity: %s", exc)
 
         lines = self.group_context.peek(event.group_id, self.config.bot.group_context_messages)
+        image_urls = self.group_context.images(
+            event.group_id, self.config.bot.group_context_images
+        )
+        # DSH cannot take image parts, so describe them first; the captions
+        # join the prompt as text and stay inside the group's own session.
+        captions = await self._image_captions(image_urls) if image_urls else []
         prompt = self._context_header(event) + "\n" + format_proactive_turn(
             lines, self.config.bot.proactive.prompt, self.config.bot.group_context_chars
         )
+        if captions:
+            prompt += "\n\n[群里的图片]\n" + "\n".join(f"- {c}" for c in captions)
         await self.memory.add(conversation_id, "user", f"{event.sender_name}: {event.text}")
         log.info(
-            "proactive reply: group=%s trigger=%s(%s) context=%d",
-            event.group_id, event.sender_name, event.user_id, len(lines),
+            "proactive reply: group=%s trigger=%s(%s) context=%d images=%d",
+            event.group_id, event.sender_name, event.user_id, len(lines), len(captions),
         )
         try:
             reply = await asyncio.to_thread(dsh.run, session_id, prompt)
@@ -744,12 +762,32 @@ class Bot:
         else:
             await self._reply_dsh(conversation_id, event, text)
 
-    async def _image_urls(self, event: MessageEvent) -> list[str]:
+    def _turn_images(self, event: MessageEvent) -> list[str]:
+        """Images this turn should see: its own plus recent ones from the group.
+
+        Call this before _turn_prompt(), which drains the group buffer.
+        """
+        urls = list(event.images)
+        if event.message_type == "group" and event.group_id is not None:
+            urls.extend(
+                self.group_context.images(
+                    event.group_id, self.config.bot.group_context_images
+                )
+            )
+        seen: set[str] = set()
+        unique: list[str] = []
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                unique.append(url)
+        return unique
+
+    async def _image_urls(self, urls: list[str]) -> list[str]:
         """Turn OneBot image URLs into data URIs the model API can read."""
-        urls: list[str] = []
-        for raw in event.images[:4]:
+        fetched: list[str] = []
+        for raw in urls[:4]:
             if raw.startswith("data:"):
-                urls.append(raw)
+                fetched.append(raw)
                 continue
             try:
                 async with httpx.AsyncClient(
@@ -758,7 +796,7 @@ class Bot:
                     response = await client.get(raw)
                 if response.status_code != 200:
                     log.warning("image download HTTP %s: %.120s", response.status_code, raw)
-                    urls.append(raw)
+                    fetched.append(raw)
                     continue
                 data = response.content
                 if len(data) > 8 * 1024 * 1024:
@@ -768,11 +806,39 @@ class Bot:
                 mime = mime.split(";")[0].strip().lower()
                 if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
                     mime = "image/jpeg"
-                urls.append(f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}")
+                fetched.append(
+                    f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+                )
             except httpx.HTTPError as exc:
                 log.warning("image download failed: %s", exc)
-                urls.append(raw)
-        return urls
+                fetched.append(raw)
+        return fetched
+
+    async def _image_captions(self, urls: list[str]) -> list[str]:
+        """Short descriptions for images the DSH path cannot attach directly."""
+        captions: list[str] = []
+        for uri in await self._image_urls(urls):
+            try:
+                caption = await self.client.chat([
+                    {"role": "system", "content": "你是一个图片描述助手。"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "用一两句中文客观描述这张图片；其中有文字就照抄关键文字。",
+                            },
+                            {"type": "image_url", "image_url": {"url": uri}},
+                        ],
+                    },
+                ])
+            except LLMError as exc:
+                log.warning("image caption failed: %s", exc)
+                continue
+            caption = caption.strip()
+            if caption:
+                captions.append(caption)
+        return captions
 
     async def _reply_dsh(self, conversation_id: str, event: MessageEvent, text: str) -> None:
         dsh = self.dsh
@@ -834,6 +900,8 @@ class Bot:
             max_chars=self.config.bot.lore_max_chars,
         )
         now = datetime.now(TZ)
+        # Read the group buffer before _turn_prompt() drains it.
+        image_urls = self._turn_images(event)
         turn_text, _ = self._turn_prompt(event, text)
         messages = build_messages(
             data=data,
@@ -851,7 +919,7 @@ class Bot:
             conversation_id, event.sender_name, event.user_id, len(text), len(history), len(lore),
         )
 
-        images = await self._image_urls(event)
+        images = await self._image_urls(image_urls)
         if images:
             for message in reversed(messages):
                 if message.get("role") == "user":

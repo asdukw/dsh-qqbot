@@ -10,6 +10,9 @@ from dataclasses import dataclass
 class GroupLine:
     sender: str
     text: str
+    # Image URLs from that message, so an @ or a proactive turn can still see
+    # the picture after the message itself has scrolled into the context.
+    images: tuple[str, ...] = ()
 
 
 class GroupContextBuffer:
@@ -25,13 +28,21 @@ class GroupContextBuffer:
         self.max_line_chars = max_line_chars
         self._buffers: dict[int, deque[GroupLine]] = {}
 
-    def add(self, group_id: int, sender: str, text: str) -> None:
+    def add(
+        self, group_id: int, sender: str, text: str, images: tuple[str, ...] = ()
+    ) -> None:
         if self.max_messages == 0 or not text.strip():
             return
         buffer = self._buffers.get(group_id)
         if buffer is None:
             buffer = self._buffers[group_id] = deque(maxlen=self.max_messages)
-        buffer.append(GroupLine(sender or "某人", text.strip()[: self.max_line_chars]))
+        buffer.append(
+            GroupLine(
+                sender or "某人",
+                text.strip()[: self.max_line_chars],
+                tuple(images),
+            )
+        )
 
     def drain(self, group_id: int) -> list[GroupLine]:
         buffer = self._buffers.pop(group_id, None)
@@ -43,6 +54,20 @@ class GroupContextBuffer:
             return []
         lines = list(buffer)
         return lines[-limit:] if limit else lines
+
+    def images(self, group_id: int, limit: int) -> list[str]:
+        """The newest buffered image URLs, oldest first, deduplicated."""
+        if limit <= 0:
+            return []
+        newest: list[str] = []
+        for line in reversed(self._buffers.get(group_id, ())):
+            for url in reversed(line.images):
+                if url in newest:
+                    continue
+                newest.append(url)
+                if len(newest) >= limit:
+                    return list(reversed(newest))
+        return list(reversed(newest))
 
 
 def format_group_turn(lines: list[GroupLine], sender: str, text: str, max_chars: int) -> str:

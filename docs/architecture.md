@@ -75,20 +75,21 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 2. adapter 提取文本、判断是否需要回复：
    - 私聊：生成 `conversation_id = private:<user_id>`；
    - 群聊被叫到（被 @、消息里出现角色卡的名字、或引用了机器人最近发的消息）：生成 `conversation_id = group:<group_id>`，直接回复；
-   - 其余群消息：放进该群的内存缓冲（`bot/group_context.py`，默认最近 30 条），再交给 `[bot.proactive]` 判定是否主动接话（概率、冷却、小时/天配额、安静时段、关键词、接话窗口）。
+   - 其余群消息：放进该群的内存缓冲（`bot/group_context.py`，默认最近 30 条；图片消息同时保留图片 URL），再交给 `[bot.proactive]` 判定是否主动接话（概率、冷却、小时/天配额、安静时段、关键词、接话窗口）。
 3. `session_id = conversation_id.replace(":", "-")`。
 4. 读取角色卡库的 active signature（`id` / `updated_at` / `fingerprint`）；变化时重新生成系统提示词、原子写 `memory/lore.md`、重启 DSH runtime（session 保留）。`/card use` 会直接触发这次刷新；`[cards] bootstrap` 文件被修改时也会被检测到。
 5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
 6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称: 内容`。
-7. `asyncio.to_thread(dsh.run, session_id, prompt)`：
+7. 图片：模型能直接读图，但只有 thin client 支持 `image_url` 内容块。被叫到的消息自带图片时走 `_reply_llm`，并把群里最近 `group_context_images`（默认 2）张图片一起以 data URI 附上；DSH 的 content-block 协议不支持图片，所以主动接话先用一次视觉调用把最近图片转成一两句文字描述，再拼进 prompt。
+8. `asyncio.to_thread(dsh.run, session_id, prompt)`：
    - DSH 启动/复用 runtime；
    - 加载或创建 `session_id` 的 JSONL 历史；
    - 组装 system prompt（插件按 `conversations` 查身份，注入用户画像和群画像）；
    - 跑 agent loop；
    - 如果模型调用画像工具或文件工具，执行并把结果回灌；
    - 返回 `final_response`。
-8. adapter 按 `max_reply_chars` 拆分并发送。
-9. 用户消息和助手回复同时写入本地 SQLite `messages` 表，仅作审计。
+9. adapter 按 `max_reply_chars` 拆分并发送。
+10. 用户消息和助手回复同时写入本地 SQLite `messages` 表，仅作审计。
 
 ## 身份传递
 
