@@ -45,6 +45,12 @@ for name in KEY_VARS:
     lines.append(f"{name}={values.get(name, '')}")
 lines += [
     "",
+    "# ── Admin UI (localhost + Workbench port forwarding) ──────────",
+    f"ADMIN_UI_PASSWORD={values.get('ADMIN_UI_PASSWORD', '')}",
+    f"ADMIN_UI_SECRET={values.get('ADMIN_UI_SECRET', '')}",
+]
+lines += [
+    "",
     "# ── Model registry (SQLite, keyed by provider + model_id) ──────",
     "# Active model, context window, max output and reasoning effort live here:",
     "#   main.py --list-models | --use-model p/m | --set-model p/m field=value",

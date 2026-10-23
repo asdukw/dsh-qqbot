@@ -85,8 +85,10 @@ install -m 644 "$SRC/deploy/qqbot.service" /etc/systemd/system/qqbot.service
 install -m 644 "$SRC/deploy/qqbot-alert.service" /etc/systemd/system/qqbot-alert.service
 install -m 644 "$SRC/deploy/qqbot-backup.service" /etc/systemd/system/qqbot-backup.service
 install -m 644 "$SRC/deploy/qqbot-backup.timer" /etc/systemd/system/qqbot-backup.timer
+install -m 644 "$SRC/deploy/qqbot-admin.service" /etc/systemd/system/qqbot-admin.service
 systemctl daemon-reload
 systemctl enable qqbot >/dev/null
+systemctl enable qqbot-admin >/dev/null
 systemctl enable --now qqbot-backup.timer >/dev/null
 
 echo "bot installed."

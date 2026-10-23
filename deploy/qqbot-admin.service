@@ -1,0 +1,23 @@
+[Unit]
+Description=qqbot admin UI (read-only, localhost)
+After=network.target
+
+[Service]
+Type=simple
+User=qqbot
+Group=qqbot
+EnvironmentFile=/etc/qqbot/bot.env
+Environment=HOME=/var/lib/qqbot
+ExecStart=/opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/admin_ui.py --config /etc/qqbot/config.toml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qqbot
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
