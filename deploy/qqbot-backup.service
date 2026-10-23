@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up qqbot SQLite databases
+
+[Service]
+Type=oneshot
+User=qqbot
+Group=qqbot
+Environment=HOME=/var/lib/qqbot
+ExecStart=/opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/backup.py

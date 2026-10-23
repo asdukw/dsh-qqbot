@@ -82,8 +82,12 @@ if [ -d /etc/needrestart ]; then
 fi
 
 install -m 644 "$SRC/deploy/qqbot.service" /etc/systemd/system/qqbot.service
+install -m 644 "$SRC/deploy/qqbot-alert.service" /etc/systemd/system/qqbot-alert.service
+install -m 644 "$SRC/deploy/qqbot-backup.service" /etc/systemd/system/qqbot-backup.service
+install -m 644 "$SRC/deploy/qqbot-backup.timer" /etc/systemd/system/qqbot-backup.timer
 systemctl daemon-reload
 systemctl enable qqbot >/dev/null
+systemctl enable --now qqbot-backup.timer >/dev/null
 
 echo "bot installed."
 echo "next: put OPENCODE_API_KEY into /etc/qqbot/bot.env, then: systemctl start qqbot"

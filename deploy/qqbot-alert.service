@@ -1,0 +1,12 @@
+[Unit]
+Description=Notify admins that qqbot failed
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=qqbot
+Group=qqbot
+Environment=HOME=/var/lib/qqbot
+ExecStart=/opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/alert.py
+TimeoutStartSec=90

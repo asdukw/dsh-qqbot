@@ -2,6 +2,7 @@
 Description=QQ chat bot (NapCat + DSH)
 After=network-online.target docker.service
 Wants=network-online.target
+OnFailure=qqbot-alert.service
 # Tolerate restart storms (apt unattended-upgrades + needrestart).
 StartLimitIntervalSec=300
 StartLimitBurst=10
