@@ -129,6 +129,15 @@ sudo journalctl -u qqbot -f
 
 命令不会写入对话历史，也不会送进模型。
 
+## Admin UI
+
+面板是 `admin/` 下的 Vite + React + Tailwind 应用，组件按 shadcn/ui 的方式直接放在 `src/components/ui/`，主题为蓝白。Python 端只提供 JSON API 和静态文件：
+
+- 本地构建：`cd admin && npm install && npm run build`；产物在 `admin/dist/`（已随仓库提交，便于纯 Python 部署）。
+- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面，接口为 `/api/session`、`/api/login`、`/api/logout`、`/api/dashboard`；登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
+- 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
+- 页面包含模型、角色卡、定时任务、RSS 订阅、表情库计数，只读，每 60 秒自动刷新。
+
 ## 角色卡
 
 角色卡统一入库到 SQLite `/var/lib/qqbot/characters.db`，内部一律存为 V3 结构（V1 平铺字段和 V2 的 `chara_card_v2` 都会自动升级）。管理员可以直接在聊天里管理：

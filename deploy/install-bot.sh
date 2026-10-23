@@ -23,6 +23,14 @@ cp -a "$SRC/cards/." /opt/qqbot/cards/
 chown -R root:qqbot /opt/qqbot/cards
 chmod -R g+r /opt/qqbot/cards
 
+if [ -d "$SRC/admin/dist" ]; then
+    install -d -o root -g qqbot -m 750 /opt/qqbot/admin
+    install -d -o root -g qqbot -m 750 /opt/qqbot/admin/dist
+    cp -a "$SRC/admin/dist/." /opt/qqbot/admin/dist/
+    chown -R root:qqbot /opt/qqbot/admin
+    chmod -R g+rX /opt/qqbot/admin
+fi
+
 python3 -m venv /opt/qqbot/bot/venv
 /opt/qqbot/bot/venv/bin/pip install -q --upgrade pip -i "$PIP_INDEX"
 /opt/qqbot/bot/venv/bin/pip install -q -r /opt/qqbot/bot/requirements.txt -i "$PIP_INDEX"

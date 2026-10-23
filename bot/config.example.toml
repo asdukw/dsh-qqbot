@@ -77,6 +77,8 @@ session_hours = 12
 # Optional second gate: only these source IPs/CIDRs may reach the panel.
 # Behind Cloudflare Tunnel the source is 127.0.0.1, so leave this empty there.
 allow_cidrs = []
+# React/shadcn bundle served by bot/admin_ui.py.
+static_dir = "/opt/qqbot/admin/dist"
 
 [feeds]
 # RSS/Atom subscriptions forwarded into the chat where they were added.

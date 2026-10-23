@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -13,7 +14,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from admin_ui import AdminHandler, db_rows, fmt_ts, ip_allowed, issue_session, page, scalar, valid_session  # noqa: E402
+from admin_ui import (  # noqa: E402
+    AdminHandler,
+    db_rows,
+    fmt_ts,
+    ip_allowed,
+    issue_session,
+    page,
+    scalar,
+    valid_session,
+)
 
 
 class SessionTests(unittest.TestCase):
@@ -107,6 +117,13 @@ class HttpTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+        dist = root / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text(
+            '<!doctype html><div id="root">admin-spa</div>', encoding="utf-8"
+        )
+        (dist / "assets" / "app-abc.js").write_text("console.log(1)", encoding="utf-8")
+
         self.config = {
             "paths": {"database": self.dbs["memory"]},
             "models": {"database": self.dbs["models"]},
@@ -114,12 +131,14 @@ class HttpTests(unittest.TestCase):
             "tasks": {"database": self.dbs["tasks"]},
             "feeds": {"database": self.dbs["feeds"]},
             "stickers": {"database": self.dbs["stickers"]},
-            "admin": {"session_hours": 1},
+            "admin": {"session_hours": 1, "static_dir": str(dist)},
         }
         self.old_env = {k: os.environ.get(k) for k in ("ADMIN_UI_PASSWORD", "ADMIN_UI_SECRET")}
         os.environ["ADMIN_UI_PASSWORD"] = "test-password"
         os.environ["ADMIN_UI_SECRET"] = "test-secret"
         AdminHandler.config = self.config
+        AdminHandler.static_dir = str(dist)
+        AdminHandler._failures.clear()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), AdminHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -128,6 +147,7 @@ class HttpTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.shutdown()
         self.server.server_close()
+        AdminHandler._failures.clear()
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -145,45 +165,81 @@ class HttpTests(unittest.TestCase):
             return exc
 
     def login(self, password: str = "test-password"):
-        data = f"password={password}".encode()
+        data = json.dumps({"password": password}).encode()
         request = urllib.request.Request(
-            self.base + "/login", data=data, method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            self.base + "/api/login",
+            data=data,
+            method="POST",
+            headers={"Content-Type": "application/json"},
         )
         opener = urllib.request.build_opener(NoRedirect)
         try:
             response = opener.open(request, timeout=5)
         except urllib.error.HTTPError as exc:
             response = exc
-        return response.headers.get("Set-Cookie", "").split(";")[0]
+        cookie = response.headers.get("Set-Cookie", "").split(";")[0]
+        return cookie, response
 
     def test_healthz_needs_no_auth(self) -> None:
         response = self.get("/healthz")
         self.assertEqual(response.status, 200)
 
-    def test_dashboard_requires_login_and_renders(self) -> None:
+    def test_spa_and_dashboard_require_login(self) -> None:
         response = self.get("/")
         self.assertEqual(response.status, 200)
-        self.assertIn("登录", response.read().decode())
+        self.assertIn("admin-spa", response.read().decode())
 
-        cookie = self.login()
+        response = self.get("/api/dashboard")
+        self.assertEqual(response.status, 401)
+
+        session = self.get("/api/session")
+        self.assertEqual(json.loads(session.read().decode()), {"authenticated": False})
+
+        cookie, login_response = self.login()
+        self.assertEqual(login_response.status, 200)
         self.assertIn("qqbot_admin=", cookie)
-        response = self.get("/", cookie)
+        self.assertEqual(json.loads(login_response.read().decode()), {"ok": True})
+
+        response = self.get("/api/dashboard", cookie)
         text = response.read().decode()
         self.assertEqual(response.status, 200)
-        self.assertIn("qqbot admin", text)
-        self.assertIn("央视新闻", text)
-        self.assertIn("喝水", text)
-        self.assertIn("&lt;script&gt;card", text)
+        payload = json.loads(text)
+        self.assertEqual(payload["active_model"], "opencode-go/flash")
+        self.assertEqual(payload["active_card"], "<script>card</script>")
+        self.assertEqual(payload["messages"]["total"], 0)
+        self.assertEqual(payload["tasks"], {"total": 1, "enabled": 1})
+        self.assertEqual(payload["feeds"], {"total": 1})
+        self.assertEqual(payload["task_rows"][0]["message"], "喝水")
+        self.assertEqual(payload["feed_rows"][0]["title"], "央视新闻")
+        self.assertEqual(payload["card_rows"][0]["aliases"], [])
+        self.assertGreater(payload["generated_at"], 0)
 
     def test_wrong_password_is_rejected(self) -> None:
-        data = b"password=nope"
-        request = urllib.request.Request(
-            self.base + "/login", data=data, method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        response = urllib.request.urlopen(request, timeout=5)
+        _, response = self.login("nope")
+        self.assertEqual(response.status, 401)
         self.assertIn("密码不对", response.read().decode())
+
+    def test_static_assets_are_cached(self) -> None:
+        response = self.get("/assets/app-abc.js")
+        self.assertEqual(response.status, 200)
+        self.assertIn("javascript", response.headers.get("Content-Type", ""))
+        self.assertIn("immutable", response.headers.get("Cache-Control", ""))
+
+    def test_logout_clears_the_session(self) -> None:
+        cookie, _ = self.login()
+        request = urllib.request.Request(self.base + "/api/logout", data=b"", method="POST")
+        request.add_header("Cookie", cookie)
+        response = urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(response.status, 200)
+        self.assertIn("Max-Age=0", response.headers.get("Set-Cookie", ""))
+        # Logout is cookie-based: the browser drops it. A replayed cookie
+        # remains valid until its HMAC expiry, so only assert the clear header.
+        session = json.loads(self.get("/api/session").read().decode())
+        self.assertFalse(session["authenticated"])
+
+    def test_path_traversal_is_rejected(self) -> None:
+        response = self.get("/assets/../../etc/passwd")
+        self.assertEqual(response.status, 404)
 
 
 if __name__ == "__main__":
