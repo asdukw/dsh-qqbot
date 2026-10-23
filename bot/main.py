@@ -31,7 +31,13 @@ from memory import Memory
 from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from onebot import MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
-from stickers import StickerError, StickerStore, download_image
+from stickers import (
+    StickerError,
+    StickerStore,
+    download_image,
+    extract_sticker_marker,
+    parse_tags,
+)
 from prompt import build_messages, build_system_prompt
 
 from cards import CardError, CardRecord, CardRegistry, CharacterCard
@@ -127,6 +133,10 @@ class StickersSection:
     collect: bool = True
     max_per_hour: int = 20  # per group
     max_bytes: int = 8 * 1024 * 1024
+    # Sending: the model asks with a trailing "[表情: ...]" line.
+    send: bool = True
+    send_cooldown_seconds: int = 60
+    max_sends_per_hour: int = 10
 
 
 @dataclass
@@ -248,6 +258,9 @@ def load_config(path: str | Path) -> AppConfig:
         collect=bool(stickers_raw.get("collect", True)),
         max_per_hour=max(0, int(stickers_raw.get("max_per_hour", 20))),
         max_bytes=max(1024, int(stickers_raw.get("max_bytes", 8 * 1024 * 1024))),
+        send=bool(stickers_raw.get("send", True)),
+        send_cooldown_seconds=max(0, int(stickers_raw.get("send_cooldown_seconds", 60))),
+        max_sends_per_hour=max(0, int(stickers_raw.get("max_sends_per_hour", 10))),
     )
 
     models_raw = _section(table, "models")
@@ -461,6 +474,8 @@ class Bot:
         # Sticker collection runs off the message path, one task per message.
         self._tasks: set[asyncio.Task] = set()
         self._sticker_budget: dict[int, deque[float]] = {}
+        self._sticker_sends: dict[int, deque[float]] = {}
+        self._sticker_last: dict[int, float] = {}
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.config.bot.admin_qq_ids
@@ -599,6 +614,116 @@ class Bot:
                     "sticker #%s collected from group %s (%d bytes)",
                     record.id, event.group_id, record.size,
                 )
+                await self._tag_sticker(record)
+
+    async def _tag_sticker(self, record: Any) -> None:
+        """Ask the vision model for a description and a few emotion tags."""
+        store = self.stickers
+        if store is None:
+            return
+        try:
+            data = await asyncio.to_thread(Path(record.path).read_bytes)
+        except OSError as exc:
+            log.warning("cannot read sticker #%s: %s", record.id, exc)
+            return
+        uri = (
+            f"data:{record.mime or 'image/png'};base64,"
+            f"{base64.b64encode(data).decode('ascii')}"
+        )
+        try:
+            raw = await self.client.chat([
+                {"role": "system", "content": "你是一个表情包标注助手。"},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "这是一个聊天表情包。用不超过 20 个字描述画面和情绪；"
+                                "再给 1-3 个情绪标签（如 开心/无语/生气/委屈/得意/疑惑/累/吃饭/睡觉）。"
+                                '只返回 JSON：{"desc": "...", "tags": ["..."]}'
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": uri}},
+                    ],
+                },
+            ])
+        except LLMError as exc:
+            log.warning("sticker tagging failed: %s", exc)
+            return
+        description, tags = parse_tags(raw)
+        try:
+            await asyncio.to_thread(store.describe, record.id, description, tags)
+        except (ValueError, sqlite3.Error) as exc:
+            log.warning("cannot store sticker tags: %s", exc)
+            return
+        log.info(
+            "sticker #%s tagged: %s %s", record.id, description, ",".join(tags) or "-"
+        )
+
+    def _sticker_hint(self) -> str:
+        store = self.stickers
+        if store is None or not self.config.stickers.send:
+            return ""
+        try:
+            stats = store.stats()
+        except sqlite3.Error:
+            return ""
+        if stats["count"] <= stats["banned"]:
+            return ""
+        return (
+            "\n（想发表情包时，在回复最后单独加一行 [表情: 语气词]，"
+            "例如 [表情: 无语]；不想发就省略这一行。）"
+        )
+
+    async def _send_sticker(self, event: MessageEvent, hint: str) -> None:
+        store = self.stickers
+        if store is None or not self.config.stickers.send:
+            return
+        key = event.group_id if event.group_id is not None else event.user_id
+        now = time.time()
+        window = self._sticker_sends.setdefault(key, deque())
+        while window and now - window[0] > 3600:
+            window.popleft()
+        if len(window) >= self.config.stickers.max_sends_per_hour:
+            return
+        if now - self._sticker_last.get(key, 0.0) < self.config.stickers.send_cooldown_seconds:
+            return
+        record = await asyncio.to_thread(store.pick, hint)
+        if record is None:
+            return
+        try:
+            data = await asyncio.to_thread(Path(record.path).read_bytes)
+        except OSError as exc:
+            log.warning("cannot read sticker #%s: %s", record.id, exc)
+            return
+        file = "base64://" + base64.b64encode(data).decode("ascii")
+        try:
+            if event.message_type == "group" and event.group_id is not None:
+                sent = await self.onebot.send_group_image(event.group_id, file)
+                self._remember_own_message(
+                    event.group_id, int(sent.get("message_id") or 0)
+                )
+            else:
+                await self.onebot.send_private_image(event.user_id, file)
+        except (OneBotError, TypeError, ValueError) as exc:
+            log.error("failed to send sticker: %s", exc)
+            return
+        window.append(now)
+        self._sticker_last[key] = now
+        store.mark_used(record.id)
+        log.info("sent sticker #%s to %s (hint=%r)", record.id, key, hint)
+
+    async def _send_reply(
+        self, event: MessageEvent, conversation_id: str, reply: str
+    ) -> None:
+        """Send the visible text, then an optional trailing sticker."""
+        visible, hint = extract_sticker_marker(reply)
+        for chunk in split_text(visible, self.config.bot.max_reply_chars):
+            await self._send(event, chunk)
+            await asyncio.sleep(0.35)
+        if hint is not None:
+            await self._send_sticker(event, hint)
 
     def _remember_own_message(self, group_id: int, message_id: int) -> None:
         if message_id <= 0:
@@ -622,8 +747,11 @@ class Bot:
             body = format_group_turn(
                 lines, event.sender_name, text, self.config.bot.group_context_chars
             )
-            return self._context_header(event) + "\n" + body, len(lines)
-        return self._context_header(event) + "\n" + text, 0
+            return (
+                self._context_header(event) + "\n" + body + self._sticker_hint(),
+                len(lines),
+            )
+        return self._context_header(event) + "\n" + text + self._sticker_hint(), 0
 
     def refresh_card(self, force: bool = False) -> bool:
         """Load the active card, reloading when /card use or --use-card changed it."""
@@ -761,21 +889,24 @@ class Bot:
         image_urls = self.group_context.images(
             event.group_id, self.config.bot.group_context_images
         )
-        # DSH cannot take image parts, so describe them first; the captions
-        # join the prompt as text and stay inside the group's own session.
-        captions = await self._image_captions(image_urls) if image_urls else []
-        prompt = self._context_header(event) + "\n" + format_proactive_turn(
-            lines, self.config.bot.proactive.prompt, self.config.bot.group_context_chars
+        prompt = (
+            self._context_header(event)
+            + "\n"
+            + format_proactive_turn(
+                lines,
+                self.config.bot.proactive.prompt,
+                self.config.bot.group_context_chars,
+            )
+            + self._sticker_hint()
         )
-        if captions:
-            prompt += "\n\n[群里的图片]\n" + "\n".join(f"- {c}" for c in captions)
+        images = await self._image_urls(image_urls) if image_urls else []
         await self.memory.add(conversation_id, "user", f"{event.sender_name}: {event.text}")
         log.info(
             "proactive reply: group=%s trigger=%s(%s) context=%d images=%d",
-            event.group_id, event.sender_name, event.user_id, len(lines), len(captions),
+            event.group_id, event.sender_name, event.user_id, len(lines), len(images),
         )
         try:
-            reply = await asyncio.to_thread(dsh.run, session_id, prompt)
+            reply = await asyncio.to_thread(dsh.run, session_id, prompt, images)
         except DSHError as exc:
             log.error("proactive DSH failed: %s", exc)
             return
@@ -783,9 +914,7 @@ class Bot:
         self.proactive.record(event.group_id, time.time())
         self.group_context.drain(event.group_id)
         await self.memory.add(conversation_id, "assistant", reply)
-        for chunk in split_text(reply, self.config.bot.max_reply_chars):
-            await self._send(event, chunk)
-            await asyncio.sleep(0.35)
+        await self._send_reply(event, conversation_id, reply)
 
     async def _maybe_reload_model(self) -> None:
         """Pick up --use-model / --set-model changes on the next turn."""
@@ -957,23 +1086,21 @@ class Bot:
             except sqlite3.Error as exc:
                 log.error("cannot record conversation identity: %s", exc)
 
-        # DSH cannot take image parts, so describe images still sitting in
-        # the group buffer before _turn_prompt() drains it. Without this an
-        # @ about a picture posted a moment earlier reaches DSH as text only.
+        # DSH accepts ACP-style image blocks, so pass the pictures through
+        # instead of describing them first. Read them before _turn_prompt()
+        # drains the group buffer.
         image_urls = self._turn_images(event)
         prompt, context_lines = self._turn_prompt(event, text)
-        captions = await self._image_captions(image_urls) if image_urls else []
-        if captions:
-            prompt += "\n\n[群里的图片]\n" + "\n".join(f"- {c}" for c in captions)
+        images = await self._image_urls(image_urls) if image_urls else []
 
         await self.memory.add(conversation_id, "user", text)
         log.info(
             "replying via DSH: conv=%s session=%s user=%s(%s) chars=%d group_context=%d images=%d",
             conversation_id, session_id, event.sender_name, event.user_id, len(text),
-            context_lines, len(captions),
+            context_lines, len(images),
         )
         try:
-            reply = await asyncio.to_thread(dsh.run, session_id, prompt)
+            reply = await asyncio.to_thread(dsh.run, session_id, prompt, images)
         except DSHError as exc:
             log.error("DSH failed: %s", exc)
             if self.config.bot.notify_errors:
@@ -981,9 +1108,7 @@ class Bot:
             return
 
         await self.memory.add(conversation_id, "assistant", reply)
-        for chunk in split_text(reply, self.config.bot.max_reply_chars):
-            await self._send(event, chunk)
-            await asyncio.sleep(0.35)
+        await self._send_reply(event, conversation_id, reply)
 
     async def _reply_llm(self, conversation_id: str, event: MessageEvent, text: str) -> None:
         if not await self.ensure_card() or self._card is None:
@@ -1049,9 +1174,7 @@ class Bot:
             return
 
         await self.memory.add(conversation_id, "assistant", reply)
-        for chunk in split_text(reply, self.config.bot.max_reply_chars):
-            await self._send(event, chunk)
-            await asyncio.sleep(0.35)
+        await self._send_reply(event, conversation_id, reply)
 
     async def _send(self, event: MessageEvent, text: str) -> None:
         if not text:

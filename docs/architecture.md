@@ -172,7 +172,10 @@ CREATE TABLE group_facts (
 - 入站判定：OneBot `image` 段带 `summary="[动画表情]"` 或 `sub_type=1` 时视为表情包；解析器同时把它标成 `[表情包]` 写进文本，`MessageEvent.stickers` 单独带出 URL。
 - 只收群聊，私聊不收；下载异步执行，不阻塞回复；每个群每小时有收藏上限（`[stickers] max_per_hour`），单张上限 `max_bytes`，只接受 PNG/JPEG/GIF/WebP（按魔数判断，不信任 Content-Type）。
 - 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。
-- 表里预留 `description` / `tags` / `uses` / `last_used` / `status`，供后续打标签和发送阶段使用；`status='banned'` 的不会进入候选。
+- 收进来后用视觉模型打标：一次调用同时给描述和 1-3 个情绪标签，写进 `description` / `tags`；打标失败不影响入库。
+- 发送：prompt 里带一句约定，模型想发表情时在回复最后写 `[表情: 语气词]`；adapter 用 `extract_sticker_marker` 摘掉标记，按标签/描述匹配（`StickerStore.pick`）挑一张，以 `base64://` 图片段跟在文字后面发出，并受每会话冷却/小时上限约束。
+- 图片输入走 DSH 官方 content block（ACP 形状 `{"type":"image","data":<base64>,"mimeType":...}`），不再先转文字描述；只有 thin client 路径和打标用 `image_url`。
+- 表里的 `status='banned'` 不会进入候选；`uses` / `last_used` 记录发送情况。
 
 ## 上下文与压缩
 

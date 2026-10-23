@@ -11,6 +11,8 @@ import base64
 import hashlib
 import json
 import logging
+import random
+import re
 import sqlite3
 import threading
 import time
@@ -34,6 +36,41 @@ _SIGNATURES = (
 )
 
 VALID_STATUS = ("ok", "banned")
+
+# The model asks to send a sticker with a trailing "[表情: 无语]" line.
+_MARKER_RE = re.compile(r"\[表情[:：]\s*([^\]\n]{0,24})\]")
+
+
+def extract_sticker_marker(text: str) -> tuple[str, str | None]:
+    """Split "[表情: hint]" out of a reply; return (visible text, hint)."""
+    match = _MARKER_RE.search(text or "")
+    if match is None:
+        return text, None
+    hint = match.group(1).strip()
+    cleaned = _MARKER_RE.sub("", text, count=1)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, hint
+
+
+def parse_tags(raw: str) -> tuple[str, tuple[str, ...]]:
+    """Read {"desc": ..., "tags": [...]} out of a model reply, tolerantly."""
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return raw.strip()[:200], ()
+    try:
+        payload = json.loads(raw[start:end + 1])
+    except json.JSONDecodeError:
+        return raw.strip()[:200], ()
+    if not isinstance(payload, dict):
+        return raw.strip()[:200], ()
+    desc = str(payload.get("desc") or payload.get("description") or "").strip()
+    raw_tags = payload.get("tags") or payload.get("emotions") or []
+    tags = (
+        tuple(str(tag).strip() for tag in raw_tags if str(tag).strip())[:5]
+        if isinstance(raw_tags, list)
+        else ()
+    )
+    return desc or raw.strip()[:200], tags
 
 
 class StickerError(RuntimeError):
@@ -200,6 +237,27 @@ class StickerStore:
                 (needle, needle, needle, max(1, min(int(limit), 200))),
             ).fetchall()
         return [_record(row) for row in rows]
+
+    def pick(self, hint: str = "") -> StickerRecord | None:
+        """Choose a sendable sticker, preferring ones matching the hint."""
+        rows = self.list(limit=200, status="ok")
+        if not rows:
+            return None
+        needle = (hint or "").strip().lower()
+        if needle:
+            matched = [
+                row
+                for row in rows
+                if needle in row.description.lower()
+                or any(
+                    needle in tag.lower() or tag.lower() in needle
+                    for tag in row.tags
+                )
+            ]
+            if matched:
+                rows = matched
+        tagged = [row for row in rows if row.description or row.tags]
+        return random.choice(tagged or rows)
 
     def stats(self) -> dict[str, int]:
         with self._lock:

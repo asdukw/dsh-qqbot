@@ -143,6 +143,8 @@ sudo journalctl -u qqbot -f
 | `/sticker import` | 导入 QQ 账号里的收藏表情 |
 | `/sticker delete <id>` / `ban` / `unban` | 删除或禁用/恢复 |
 | `/sticker stats` | 数量与占用空间 |
+| `/sticker tag <id> <描述> [标签,标签]` | 手动补描述/标签，发送时按语境挑 |
+| `/sticker send <id>` | 手动发一张，验证发送链路 |
 
 命令行等价操作：
 

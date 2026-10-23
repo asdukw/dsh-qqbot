@@ -46,6 +46,11 @@ bootstrap = "/etc/qqbot/character.json"
 collect = true
 max_per_hour = 20          # per group
 max_bytes = 8388608        # 8 MB per sticker
+# The model asks to send one with a trailing "[表情: 语气词]" line; the adapter
+# picks a sticker whose tags/description match and sends it after the text.
+send = true
+send_cooldown_seconds = 60
+max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 

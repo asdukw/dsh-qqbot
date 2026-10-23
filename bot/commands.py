@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import sqlite3
@@ -67,6 +68,8 @@ STICKER_HELP = """/sticker                     列出最近收藏的表情包
 /sticker show <id>            查看详情（文件路径、大小、来源）
 /sticker add                  把附带的图片收藏进库
 /sticker import               导入 QQ 账号的收藏表情
+/sticker tag <id> <描述>      手动写描述（供发送时按语境挑选）
+/sticker send <id>            手动发一张，测试发送链路
 /sticker delete <id>          删除（同时删文件）
 /sticker ban|unban <id>       禁用/恢复，禁用的不会被发送
 /sticker stats                数量与占用空间"""
@@ -496,6 +499,14 @@ class CommandRouter:
             )
             return
 
+        if action == "send":
+            await self._send_sticker(event, rest)
+            return
+
+        if action == "tag":
+            await self._tag_sticker(event, rest)
+            return
+
         if action == "import":
             await self._import_stickers(event)
             return
@@ -535,6 +546,59 @@ class CommandRouter:
             return
         state = "已收藏" if created else "库里已经有这张"
         await self.bot.send_text(event, f"{state}: #{record.id}（共 {store.count()} 张）")
+
+    async def _send_sticker(self, event: Any, args: list[str]) -> None:
+        store = self.bot.stickers
+        record = store.get(int(args[0])) if args and args[0].isdigit() else None
+        if record is None:
+            await self.bot.send_text(event, "用法: /sticker send <id>")
+            return
+        if record.status != "ok":
+            await self.bot.send_text(
+                event, f"#{record.id} 已禁用，先 /sticker unban {record.id}"
+            )
+            return
+        try:
+            data = await asyncio.to_thread(Path(record.path).read_bytes)
+        except OSError as exc:
+            await self.bot.send_text(event, f"读取表情失败: {exc}")
+            return
+        file = "base64://" + base64.b64encode(data).decode("ascii")
+        try:
+            in_group = (
+                getattr(event, "message_type", "private") == "group"
+                and getattr(event, "group_id", None) is not None
+            )
+            if in_group:
+                await self.bot.onebot.send_group_image(event.group_id, file)
+            else:
+                await self.bot.onebot.send_private_image(event.user_id, file)
+        except OneBotError as exc:
+            await self.bot.send_text(event, f"发送失败: {exc}")
+            return
+        store.mark_used(record.id)
+        if not in_group:
+            await self.bot.send_text(event, f"已发送 #{record.id}")
+
+    async def _tag_sticker(self, event: Any, args: list[str]) -> None:
+        store = self.bot.stickers
+        record = store.get(int(args[0])) if args and args[0].isdigit() else None
+        if record is None or len(args) < 2:
+            await self.bot.send_text(event, "用法: /sticker tag <id> <描述> [标签,标签]")
+            return
+        body = " ".join(args[1:]).strip()
+        description, _, raw_tags = body.partition("|")
+        tags = tuple(tag.strip() for tag in raw_tags.replace("，", ",").split(",") if tag.strip())
+        try:
+            updated = store.describe(record.id, description.strip(), tags)
+        except (ValueError, sqlite3.Error) as exc:
+            await self.bot.send_text(event, f"写入失败: {exc}")
+            return
+        await self.bot.send_text(
+            event,
+            f"#{updated.id} 描述: {updated.description or '-'}  "
+            f"标签: {', '.join(updated.tags) or '-'}",
+        )
 
     async def _import_stickers(self, event: Any) -> None:
         store = self.bot.stickers

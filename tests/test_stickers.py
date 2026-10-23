@@ -7,7 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from stickers import StickerError, StickerStore, sniff_mime  # noqa: E402
+from stickers import (  # noqa: E402
+    StickerError,
+    StickerStore,
+    extract_sticker_marker,
+    parse_tags,
+    sniff_mime,
+)
 
 PNG = bytes.fromhex("89504e470d0a1a0a") + b"fake-png-body"
 JPEG = bytes.fromhex("ffd8ff") + b"fake-jpeg-body"
@@ -24,6 +30,32 @@ class SniffTests(unittest.TestCase):
 
     def test_unknown_format(self) -> None:
         self.assertEqual(sniff_mime(b"not an image"), ("", ""))
+
+
+class MarkerTests(unittest.TestCase):
+    def test_extracts_and_strips_the_marker(self) -> None:
+        self.assertEqual(
+            extract_sticker_marker("哼，才不是。\n[表情: 无语]"),
+            ("哼，才不是。", "无语"),
+        )
+        self.assertEqual(extract_sticker_marker("[表情：开心]"), ("", "开心"))
+        self.assertEqual(extract_sticker_marker("只有表情 [表情: 累]"), ("只有表情", "累"))
+
+    def test_plain_replies_are_untouched(self) -> None:
+        self.assertEqual(extract_sticker_marker("正常回复"), ("正常回复", None))
+        self.assertEqual(extract_sticker_marker("[图片] 这是啥"), ("[图片] 这是啥", None))
+
+
+class ParseTagsTests(unittest.TestCase):
+    def test_reads_json_with_surrounding_prose(self) -> None:
+        desc, tags = parse_tags('好的：{"desc": "一只翻白眼的猫", "tags": ["无语", "猫"]}')
+        self.assertEqual(desc, "一只翻白眼的猫")
+        self.assertEqual(tags, ("无语", "猫"))
+
+    def test_falls_back_to_plain_text(self) -> None:
+        desc, tags = parse_tags("一只翻白眼的猫")
+        self.assertEqual(desc, "一只翻白眼的猫")
+        self.assertEqual(tags, ())
 
 
 class StickerStoreTests(unittest.TestCase):
@@ -81,6 +113,21 @@ class StickerStoreTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(self.store.count(), 0)
         self.assertFalse(self.store.delete(record.id))
+
+    def test_pick_prefers_matching_tags(self) -> None:
+        first, _ = self.store.add_bytes(PNG)
+        second, _ = self.store.add_bytes(JPEG)
+        self.store.describe(first.id, "开心地转圈", ["开心"])
+        self.store.describe(second.id, "无语地翻白眼", ["无语"])
+        self.assertEqual(self.store.pick("开心").id, first.id)
+        self.assertEqual(self.store.pick("无语").id, second.id)
+        self.assertIn(self.store.pick("没有这个词").id, (first.id, second.id))
+
+    def test_pick_skips_banned_and_empty(self) -> None:
+        self.assertIsNone(self.store.pick("开心"))
+        record, _ = self.store.add_bytes(PNG)
+        self.store.set_status(record.id, "banned")
+        self.assertIsNone(self.store.pick("开心"))
 
     def test_stats(self) -> None:
         self.store.add_bytes(PNG)
