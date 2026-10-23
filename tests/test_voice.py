@@ -168,6 +168,40 @@ class StepFunSynthTests(unittest.TestCase):
             )
 
 
+class VoiceProbabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.bot = object.__new__(Bot)
+        self.bot.config = AppConfig()
+        self.bot.config.voice.enabled = True
+        self.bot.config.voice.probability = 0.5
+        self.bot.config.voice.max_chars = 80
+
+    def test_roll_follows_the_configured_probability(self) -> None:
+        from unittest.mock import patch
+
+        with patch("main.random.random", return_value=0.4):
+            self.assertTrue(self.bot._voice_roll("晚安呀"))
+        with patch("main.random.random", return_value=0.6):
+            self.assertFalse(self.bot._voice_roll("晚安呀"))
+
+    def test_long_text_never_rolls(self) -> None:
+        from unittest.mock import patch
+
+        with patch("main.random.random", return_value=0.0):
+            self.assertFalse(self.bot._voice_roll("长" * 200))
+
+    def test_disabled_or_zero_probability_never_rolls(self) -> None:
+        from unittest.mock import patch
+
+        self.bot.config.voice.probability = 0
+        with patch("main.random.random", return_value=0.0):
+            self.assertFalse(self.bot._voice_roll("晚安"))
+        self.bot.config.voice.probability = 0.5
+        self.bot.config.voice.enabled = False
+        with patch("main.random.random", return_value=0.0):
+            self.assertFalse(self.bot._voice_roll("晚安"))
+
+
 class SendVoiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bot = object.__new__(Bot)

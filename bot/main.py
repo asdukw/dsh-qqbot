@@ -7,6 +7,7 @@ import asyncio
 import base64
 import logging
 import os
+import random
 import signal
 import sqlite3
 import sys
@@ -215,6 +216,8 @@ class VoiceSection:
     base_url: str = "https://api.stepfun.com"
     instruction: str = ""
     speed: float = 1.0
+    # Chance to voice a short proactive reply the model did not mark [语音].
+    probability: float = 0.2
     max_chars: int = 80
     cooldown_seconds: int = 30
 
@@ -387,6 +390,7 @@ def load_config(path: str | Path) -> AppConfig:
         base_url=str(voice_raw.get("base_url", "https://api.stepfun.com")),
         instruction=str(voice_raw.get("instruction", "")),
         speed=float(voice_raw.get("speed", 1.0)),
+        probability=max(0.0, min(1.0, float(voice_raw.get("probability", 0.2)))),
         max_chars=max(10, int(voice_raw.get("max_chars", 80))),
         cooldown_seconds=max(0, int(voice_raw.get("cooldown_seconds", 30))),
     )
@@ -1359,8 +1363,23 @@ class Bot:
         block = format_recall(rows)
         return f"\n\n[相关历史]\n{block}" if block else ""
 
+    def _voice_roll(self, text: str) -> bool:
+        """Random gate for voicing an unmarked proactive reply."""
+        config = self.config.voice
+        if not config.enabled or config.probability <= 0:
+            return False
+        cleaned = " ".join((text or "").split())
+        if not cleaned or len(cleaned) > config.max_chars:
+            return False
+        return random.random() < config.probability
+
     async def _send_reply(
-        self, event: MessageEvent, conversation_id: str, reply: str
+        self,
+        event: MessageEvent,
+        conversation_id: str,
+        reply: str,
+        *,
+        proactive: bool = False,
     ) -> None:
         """Send the visible text, then an optional trailing sticker."""
         outer, schedule = extract_schedule(reply)
@@ -1376,6 +1395,8 @@ class Bot:
         reply, meme_text = extract_meme_marker(reply)
         reply, wants_voice = extract_voice_marker(reply)
         visible, hint = extract_sticker_marker(reply)
+        if not wants_voice and proactive and self._voice_roll(visible):
+            wants_voice = True
         voice_sent = (
             await self._send_voice(event, visible) if wants_voice and visible else False
         )
@@ -1608,7 +1629,7 @@ class Bot:
         self.group_context.drain(event.group_id)
         log.info("LLM turn took %.1fs (images=%d)", time.time() - started, len(images))
         await self.memory.add(conversation_id, "assistant", reply)
-        await self._send_reply(event, conversation_id, reply)
+        await self._send_reply(event, conversation_id, reply, proactive=True)
 
     async def _maybe_reload_model(self) -> None:
         """Pick up --use-model / --set-model changes on the next turn."""
