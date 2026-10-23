@@ -565,8 +565,12 @@ class Bot:
         self._card_sig = signature
         self._card_names = tuple(
             dict.fromkeys(
-                name
-                for name in (card.data.get("name"), card.data.get("nickname"))
+                name.strip()
+                for name in (
+                    card.data.get("name"),
+                    card.data.get("nickname"),
+                    *record.aliases,
+                )
                 if isinstance(name, str) and name.strip()
             )
         )
@@ -1141,7 +1145,11 @@ def print_cards(records: list[CardRecord]) -> None:
     for record in records:
         marker = "*" if record.is_active else " "
         tags = f" [{', '.join(record.tags)}]" if record.tags else ""
-        print(f"{marker} #{record.id:<4} {record.display_name}{tags}  source={record.source_kind}")
+        aliases = f"  aliases={', '.join(record.aliases)}" if record.aliases else ""
+        print(
+            f"{marker} #{record.id:<4} {record.display_name}{tags}"
+            f"  source={record.source_kind}{aliases}"
+        )
 
 
 def manage_cards(config: AppConfig, args: argparse.Namespace) -> int:
@@ -1165,9 +1173,23 @@ def manage_cards(config: AppConfig, args: argparse.Namespace) -> int:
             if record is None:
                 raise ValueError(f"no such character card: {args.use_card}")
             registry.use(record.id)
+        if args.add_card_alias or args.remove_card_alias:
+            active = registry.active()
+            if active is None:
+                raise ValueError("no active character card; run --use-card first")
+            if args.add_card_alias:
+                active = registry.add_alias(active.id, args.add_card_alias)
+            if args.remove_card_alias:
+                active = registry.remove_alias(active.id, args.remove_card_alias)
+            print(f"aliases for #{active.id} {active.display_name}: {', '.join(active.aliases) or '-'}")
         print_cards(registry.search(args.search_cards) if args.search_cards else registry.list())
-        if args.install_card or args.use_card:
-            print("the running bot picks this up on its next message")
+        if (
+            args.install_card
+            or args.use_card
+            or args.add_card_alias
+            or args.remove_card_alias
+        ):
+            print("the running bot picks this up on its next group message")
         return 0
     except (CardError, CardFetchError, OSError, sqlite3.Error, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1218,6 +1240,14 @@ def main() -> int:
     parser.add_argument("--use-card", metavar="ID|NAME", help="make a character card active and exit")
     parser.add_argument("--install-card", metavar="URL|PATH", help="install a character card and exit")
     parser.add_argument("--search-cards", metavar="QUERY", help="search the character card library and exit")
+    parser.add_argument(
+        "--add-card-alias", metavar="NAME",
+        help="add an address alias to the active character card and exit",
+    )
+    parser.add_argument(
+        "--remove-card-alias", metavar="NAME",
+        help="remove an address alias from the active character card and exit",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -1253,7 +1283,14 @@ def main() -> int:
     if args.list_models or args.use_model or args.set_model:
         return manage_models(config, args)
 
-    if args.list_cards or args.use_card or args.install_card or args.search_cards:
+    if (
+        args.list_cards
+        or args.use_card
+        or args.install_card
+        or args.search_cards
+        or args.add_card_alias
+        or args.remove_card_alias
+    ):
         return manage_cards(config, args)
 
     if args.check_dsh or (args.check and config.dsh.enabled):

@@ -368,6 +368,7 @@ CREATE TABLE IF NOT EXISTS cards (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     name              TEXT NOT NULL,
     nickname          TEXT NOT NULL DEFAULT '',
+    aliases           TEXT NOT NULL DEFAULT '[]',
     description       TEXT NOT NULL DEFAULT '',
     personality       TEXT NOT NULL DEFAULT '',
     scenario          TEXT NOT NULL DEFAULT '',
@@ -400,11 +401,42 @@ def fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+_ALIAS_LIMIT = 8
+_ALIAS_MAX_CHARS = 32
+
+
+def _normalise_aliases(
+    values: Any, *, name: str = "", nickname: str = ""
+) -> list[str]:
+    """Trim, dedupe and bound the names that address this card.
+
+    Single-character aliases are dropped: matching them inside ordinary chat
+    would fire far too often, and ``ProactivePolicy.named`` ignores them anyway.
+    """
+    if isinstance(values, str):
+        values = values.replace("，", ",").split(",")
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    reserved = {name.strip(), nickname.strip()}
+    aliases: list[str] = []
+    for value in values:
+        alias = str(value).strip()
+        if len(alias) < 2 or len(alias) > _ALIAS_MAX_CHARS:
+            continue
+        if alias in reserved or alias in aliases:
+            continue
+        aliases.append(alias)
+        if len(aliases) >= _ALIAS_LIMIT:
+            break
+    return aliases
+
+
 @dataclass(frozen=True)
 class CardRecord:
     id: int
     name: str
     nickname: str
+    aliases: tuple[str, ...]
     description: str
     personality: str
     scenario: str
@@ -444,10 +476,20 @@ def _record(row: sqlite3.Row) -> CardRecord:
     except (TypeError, json.JSONDecodeError):
         raw_tags = []
     tags = tuple(str(tag) for tag in raw_tags if str(tag).strip()) if isinstance(raw_tags, list) else ()
+    try:
+        raw_aliases = json.loads(row["aliases"] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        raw_aliases = []
+    aliases = (
+        tuple(str(alias) for alias in raw_aliases if str(alias).strip())
+        if isinstance(raw_aliases, list)
+        else ()
+    )
     return CardRecord(
         id=int(row["id"]),
         name=row["name"] or "Assistant",
         nickname=row["nickname"] or "",
+        aliases=aliases,
         description=row["description"] or "",
         personality=row["personality"] or "",
         scenario=row["scenario"] or "",
@@ -483,6 +525,11 @@ class CardRegistry:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA)
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(cards)")}
+        if "aliases" not in columns:
+            self._db.execute(
+                "ALTER TABLE cards ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'"
+            )
         self._db.commit()
 
     # --------------------------------------------------------------- reads
@@ -528,12 +575,19 @@ class CardRegistry:
             return self.get(int(target))
         needle = target.lower()
         rows = self.list()
-        exact = [r for r in rows if r.name.lower() == needle or r.nickname.lower() == needle]
+        exact = [
+            r for r in rows
+            if r.name.lower() == needle
+            or r.nickname.lower() == needle
+            or any(alias.lower() == needle for alias in r.aliases)
+        ]
         if len(exact) == 1:
             return exact[0]
         partial = [
             r for r in rows
-            if needle in r.name.lower() or needle in r.nickname.lower()
+            if needle in r.name.lower()
+            or needle in r.nickname.lower()
+            or any(needle in alias.lower() for alias in r.aliases)
         ]
         return partial[0] if len(partial) == 1 else None
 
@@ -680,6 +734,47 @@ class CardRegistry:
             )
             row = self._db.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
         return _record(row)
+
+    def set_aliases(self, card_id: int, aliases: Any) -> CardRecord:
+        """Replace the card's address aliases; its own name/nickname are dropped."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"character card #{card_id} does not exist")
+            cleaned = _normalise_aliases(
+                aliases, name=row["name"] or "", nickname=row["nickname"] or ""
+            )
+            self._db.execute(
+                "UPDATE cards SET aliases = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(cleaned, ensure_ascii=False), int(time.time()), card_id),
+            )
+            row = self._db.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+        return _record(row)
+
+    def add_alias(self, card_id: int, alias: str) -> CardRecord:
+        record = self.get(card_id)
+        if record is None:
+            raise ValueError(f"character card #{card_id} does not exist")
+        wanted = alias.strip()
+        if wanted in record.aliases:
+            return record
+        cleaned = _normalise_aliases([wanted], name=record.name, nickname=record.nickname)
+        if not cleaned:
+            raise ValueError(
+                f"{wanted!r} cannot be an alias: use at least two characters "
+                "that differ from the card's name/nickname"
+            )
+        return self.set_aliases(card_id, [*record.aliases, *cleaned])
+
+    def remove_alias(self, card_id: int, alias: str) -> CardRecord:
+        record = self.get(card_id)
+        if record is None:
+            raise ValueError(f"character card #{card_id} does not exist")
+        wanted = alias.strip()
+        remaining = [item for item in record.aliases if item != wanted]
+        if len(remaining) == len(record.aliases):
+            raise ValueError(f"character card #{card_id} has no alias {wanted!r}")
+        return self.set_aliases(card_id, remaining)
 
     def delete(self, card_id: int) -> bool:
         with self._lock, self._db:

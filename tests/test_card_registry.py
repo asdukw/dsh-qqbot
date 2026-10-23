@@ -55,6 +55,35 @@ class CardRegistryTests(unittest.TestCase):
         self.registry.close()
         self.registry = CardRegistry(self.db_path)
 
+    def test_aliases_persist_and_resolve(self) -> None:
+        record, _ = self.install("大肥鱼", nickname="大肥鱼")
+        self.assertEqual(record.aliases, ())
+        updated = self.registry.add_alias(record.id, "肥鱼")
+        self.assertEqual(updated.aliases, ("肥鱼",))
+        self.reopen()
+        again = self.registry.get(record.id)
+        self.assertIsNotNone(again)
+        self.assertEqual(again.aliases, ("肥鱼",))
+        resolved = self.registry.resolve("肥鱼")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.id, record.id)
+
+    def test_alias_validation_and_idempotence(self) -> None:
+        record, _ = self.install("大肥鱼", nickname="大肥鱼")
+        for bad in ("", "鱼", "大肥鱼"):
+            with self.assertRaises(ValueError):
+                self.registry.add_alias(record.id, bad)
+        with self.assertRaises(ValueError):
+            self.registry.remove_alias(record.id, "肥鱼")
+        first = self.registry.add_alias(record.id, "肥鱼")
+        self.assertEqual(self.registry.add_alias(record.id, "肥鱼").aliases, first.aliases)
+        self.assertEqual(self.registry.remove_alias(record.id, "肥鱼").aliases, ())
+
+    def test_alias_list_is_bounded(self) -> None:
+        record, _ = self.install("大肥鱼", nickname="大肥鱼")
+        updated = self.registry.set_aliases(record.id, [f"别名{i}" for i in range(20)])
+        self.assertEqual(len(updated.aliases), 8)
+
     def install(self, name: str, **data):
         return self.registry.install_payload(payload(name, **data), installed_by="test")
 

@@ -112,6 +112,26 @@ class CommandRouterTests(unittest.TestCase):
 
     # ---------------------------------------------------------------- cards
 
+    def test_card_alias_add_list_remove(self) -> None:
+        self.run_command("/card alias add 小杜")
+        self.assertIn("添加别名", self.bot.sent[-1])
+        self.assertEqual(self.bot.cards.active().aliases, ("小杜",))
+        self.run_command("/card alias")
+        self.assertIn("别名: 小杜", self.bot.sent[-1])
+        self.run_command("/card alias remove 小杜")
+        self.assertIn("已删除别名", self.bot.sent[-1])
+        self.assertEqual(self.bot.cards.active().aliases, ())
+
+    def test_card_alias_rejects_short_names(self) -> None:
+        self.run_command("/card alias add 杜")
+        self.assertIn("添加别名失败", self.bot.sent[-1])
+        self.assertEqual(self.bot.cards.active().aliases, ())
+
+    def test_card_show_resolves_by_alias(self) -> None:
+        self.bot.cards.add_alias(self.a.id, "小杜")
+        self.run_command("/card show 小杜")
+        self.assertIn("阿杜", self.bot.sent[-1])
+
     def test_card_list_marks_active(self) -> None:
         self.run_command("/card")
         text = self.bot.sent[0]

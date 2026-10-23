@@ -159,11 +159,12 @@ CREATE TABLE group_facts (
 
 - SQLite `/var/lib/qqbot/characters.db`，表 `cards`，主键 `id`；部分唯一索引保证全表最多一行 `is_active = 1`。
 - 入库时统一归一化为 V3 `payload`（JSON），并抽出 `name` / `nickname` / `description` / `personality` / `scenario` / `tags` / `creator` 用于展示和搜索；`fingerprint` 是 payload 的 SHA-256，用于去重。
+- 别名单独存在 `aliases` 列（JSON 数组，最多 8 个、每个 2–32 字），不写进 payload，所以不影响 `fingerprint` 去重；`Bot.refresh_card()` 会把 `name` / `nickname` / 别名一起放进 `_card_names`，供「叫到名字」判定使用。
 - 搜索用 `LIKE` 逐字段匹配（关键词之间 AND、字段之间 OR），不依赖 FTS5 分词器，中文子串可以直接搜；`%` / `_` 会被转义。
 - 安装来源：`url`（`/card install <url>`、`--install-card`）、`image`（管理员发来的 PNG）、`file`（服务器路径）、`bootstrap`（旧版单卡文件）。下载上限 12 MB，只接受 PNG 或 JSON。
 - `active_signature()` 返回 `(id, updated_at, fingerprint)`，每轮消息只查一次；变化时 `Bot.refresh_card()` 重建 system prompt，并调用 `DSHClient.set_system_prompt()` 重启 DSH runtime。命令行的 `--use-card` 由同一机制在下一轮消息被发现。
 - `bootstrap` 兼容：库为空时导入 `[cards] bootstrap`；只要这张卡仍然激活，就按 mtime 重新导入，保留原来「改文件即热加载」的行为。
-- 命令行：`--list-cards`、`--search-cards <query>`、`--install-card <url|path>`、`--use-card <id|name>`、`--show-card`。
+- 命令行：`--list-cards`、`--search-cards <query>`、`--install-card <url|path>`、`--use-card <id|name>`、`--show-card`、`--add-card-alias <name>`、`--remove-card-alias <name>`。
 
 ## 上下文与压缩
 

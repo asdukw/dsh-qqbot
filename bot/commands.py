@@ -41,6 +41,7 @@ HELP = """可用命令:
 /card install <url|路径> 安装角色卡
 /card show <id|名称>     查看角色卡
 /card delete <id|名称>   删除角色卡
+/card alias [add|remove] <名称>  管理别名（叫到别名也算直接找它）
 /proactive [on|off|status|test]        群聊主动回复
 /help           显示帮助"""
 
@@ -50,7 +51,11 @@ CARD_HELP = """/card                     列出角色卡
 /card search <关键词>      在角色库中搜索
 /card install <url|路径>   从 URL 或服务器路径安装；
                            也可以把 PNG 角色卡发给机器人并附 /card install
-/card delete <id|名称>     从库中删除（不能删当前卡）"""
+/card delete <id|名称>     从库中删除（不能删当前卡）
+/card alias                查看当前卡的名称与别名
+/card alias add <名称>     添加别名，群里直接叫它就会被当成在找它
+/card alias remove <名称>  删除别名
+/card alias list <id|名称> 查看别的卡的别名"""
 
 
 class CommandRouter:
@@ -131,6 +136,8 @@ class CommandRouter:
             await self._install_card(event, rest)
         elif action in ("delete", "rm", "remove"):
             await self._delete_card(event, target)
+        elif action in ("alias", "aliases", "nick"):
+            await self._card_alias(event, rest)
         elif action in ("help", "?"):
             await self.bot.send_text(event, CARD_HELP)
         else:
@@ -179,6 +186,7 @@ class CommandRouter:
             f"#{record.id} {record.display_name}" + ("（当前）" if record.is_active else ""),
             f"来源: {record.source_kind} {record.source or '-'}",
             f"标签: {', '.join(record.tags) or '-'}",
+            f"别名: {', '.join(record.aliases) or '-'}",
             f"作者: {record.creator or '-'}  版本: {record.character_version or '-'}",
             f"简介: {len(data.get('description', ''))} 字符  "
             f"世界书: {len(card.lorebook.entries)} 条",
@@ -253,6 +261,77 @@ class CommandRouter:
             return
         await self.bot.send_text(
             event, f"已删除 #{record.id} {record.display_name}（剩 {self.bot.cards.count()} 张）"
+        )
+
+    async def _card_alias(self, event: Any, args: list[str]) -> None:
+        registry = self.bot.cards
+        action = args[0].lower() if args else "list"
+
+        if action in ("add", "+"):
+            name = " ".join(args[1:]).strip()
+            if not name:
+                await self.bot.send_text(event, "用法: /card alias add <名称>")
+                return
+            record = registry.active()
+            if record is None:
+                await self.bot.send_text(event, "还没有激活的角色卡。")
+                return
+            try:
+                updated = registry.add_alias(record.id, name)
+            except (ValueError, sqlite3.Error) as exc:
+                await self.bot.send_text(event, f"添加别名失败: {exc}")
+                return
+            await self.bot.send_text(
+                event,
+                f"已为 #{updated.id} {updated.display_name} 添加别名「{name}」\n"
+                f"当前别名: {', '.join(updated.aliases) or '-'}（下一条群消息生效）",
+            )
+            return
+
+        if action in ("remove", "rm", "del", "delete", "-"):
+            name = " ".join(args[1:]).strip()
+            if not name:
+                await self.bot.send_text(event, "用法: /card alias remove <名称>")
+                return
+            record = registry.active()
+            if record is None:
+                await self.bot.send_text(event, "还没有激活的角色卡。")
+                return
+            try:
+                updated = registry.remove_alias(record.id, name)
+            except (ValueError, sqlite3.Error) as exc:
+                await self.bot.send_text(event, f"删除别名失败: {exc}")
+                return
+            await self.bot.send_text(
+                event,
+                f"已删除别名「{name}」\n"
+                f"当前别名: {', '.join(updated.aliases) or '-'}",
+            )
+            return
+
+        if action not in ("list", "ls"):
+            await self.bot.send_text(event, CARD_HELP)
+            return
+
+        target = " ".join(args[1:]).strip()
+        if target:
+            record = registry.resolve(target)
+            if record is None:
+                await self.bot.send_text(event, await self._not_found(target))
+                return
+        else:
+            record = registry.active()
+            if record is None:
+                await self.bot.send_text(event, "还没有激活的角色卡。")
+                return
+        await self.bot.send_text(
+            event,
+            f"#{record.id} {record.display_name}"
+            + ("（当前）" if record.is_active else "")
+            + f"\n名称: {record.name}"
+            + f"\n昵称: {record.nickname or '-'}"
+            + f"\n别名: {', '.join(record.aliases) or '-'}"
+            + "\n用 /card alias add <名称> 添加。",
         )
 
     async def _not_found(self, target: str) -> str:

@@ -134,6 +134,9 @@ sudo journalctl -u qqbot -f
 | `/card use <id\|名称>` | 切换当前卡，立即生效，DSH session 历史保留 |
 | `/card show <id\|名称>` | 查看来源、标签、作者、简介长度和世界书条目数 |
 | `/card delete <id\|名称>` | 从库中删除（当前卡需先切换） |
+| `/card alias` | 查看当前卡的名称与别名 |
+| `/card alias add <名称>` | 添加别名：群里直接叫它（至少 2 个字）也会被当成在找它 |
+| `/card alias remove <名称>` | 删除别名 |
 
 命令行等价操作：
 
@@ -144,9 +147,12 @@ $M --list-cards
 $M --search-cards 图书
 $M --install-card https://example.com/card.png
 $M --use-card 2
+$M --add-card-alias 肥鱼
+$M --remove-card-alias 肥鱼
 ```
 
 - 按内容指纹去重：同一张卡重复安装会返回已有记录，不会产生副本；
+- 别名按卡保存（`cards.aliases`），和卡片自带的 `name` / `nickname` 一起参与「叫名字」判定；单字别名会被忽略；
 - 下载上限 12 MB；只接受 PNG 或 JSON，PNG 依次查找 `ccv3`、`chara` 的 `tEXt` / `iTXt` 块；
 - 卡里的 `description` / `personality` / `scenario` / `mes_example` / `system_prompt` 会渲染成 DSH 的系统提示词；
 - 世界书条目会原子写入 `memory/lore.md`，模型用 `grep` / `read` 查；
