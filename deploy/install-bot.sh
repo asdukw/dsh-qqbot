@@ -75,6 +75,11 @@ python3 "$SRC/deploy/update-bot-env.py" /etc/qqbot/bot.env
 chown root:qqbot /etc/qqbot/bot.env
 chmod 640 /etc/qqbot/bot.env
 
+if [ -d /etc/needrestart ]; then
+    install -d -m 755 /etc/needrestart/conf.d
+    install -m 644 "$SRC/deploy/needrestart-qqbot.conf" /etc/needrestart/conf.d/50-qqbot.conf
+fi
+
 install -m 644 "$SRC/deploy/qqbot.service" /etc/systemd/system/qqbot.service
 systemctl daemon-reload
 systemctl enable qqbot >/dev/null
