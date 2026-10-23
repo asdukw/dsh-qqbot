@@ -16,6 +16,18 @@ home = "/var/lib/qqbot/dsh-home"
 workspace = "/var/lib/qqbot/dsh-workspace"
 profile = "qqbot"
 request_timeout = 120.0
+# Image handling for the persistent DSH session.
+# placeholder: save the original under workspace/<image_dir>/<sha1>.<ext> and
+#   send only a short description + relative path; the model can read the
+#   original on demand (tool-fs.readImage must be true).
+# inline: old behavior, send image blocks and let DSH replay them.
+image_mode = "placeholder"
+image_dir = "images"
+image_caption = true
+caption_prompt = "用一两句中文客观描述这张图片；其中有文字就照抄关键文字。只输出描述。"
+image_max_bytes = 8388608
+image_keep_days = 14
+image_max_files = 1000
 # Compaction thresholds (thresholdRatio/headroom/retainRatio) live in
 # dsh/qqbot.cordis.patch.yml.
 

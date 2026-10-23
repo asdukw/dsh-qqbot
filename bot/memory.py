@@ -34,6 +34,14 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages (conversation_id, id);
+CREATE TABLE IF NOT EXISTS image_captions (
+    hash TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    mime TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -114,6 +122,47 @@ class Memory:
 
     async def history(self, conversation_id: str, limit: int) -> list[dict[str, str]]:
         return await asyncio.to_thread(self._history_sync, conversation_id, limit)
+
+    def _caption_get_sync(self, digest: str) -> str:
+        digest = str(digest or "").strip()
+        if not digest:
+            return ""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT description FROM image_captions WHERE hash = ?",
+                (digest,),
+            ).fetchone()
+        return str(row[0]).strip() if row else ""
+
+    async def caption_get(self, digest: str) -> str:
+        """Return a cached image description, or '' when it has not been built."""
+        return await asyncio.to_thread(self._caption_get_sync, digest)
+
+    def _caption_set_sync(
+        self, digest: str, description: str, model: str, path: str, mime: str
+    ) -> None:
+        digest = str(digest or "").strip()
+        description = str(description or "").strip()
+        if not digest or not description:
+            return
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO image_captions "
+                "(hash, description, model, path, mime, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(hash) DO UPDATE SET "
+                "description = excluded.description, model = excluded.model, "
+                "path = excluded.path, mime = excluded.mime",
+                (digest, description[:1000], str(model or ""), str(path or ""), str(mime or ""), int(time.time())),
+            )
+            self._db.commit()
+
+    async def caption_set(
+        self, digest: str, description: str, model: str = "", path: str = "", mime: str = ""
+    ) -> None:
+        await asyncio.to_thread(
+            self._caption_set_sync, digest, description, model, path, mime
+        )
 
     def _recall_sync(
         self, conversation_id: str, query: str, limit: int

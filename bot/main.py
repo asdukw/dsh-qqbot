@@ -27,6 +27,7 @@ from commands import CommandRouter, strip_leading_mention, strip_message_markers
 from conversations import ConversationStore
 from dsh_client import DSHClient, DSHConfig, DSHError
 from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
+from images import ImageStore, StoredImage
 from llm import LLMClient, LLMConfig, LLMError
 from memory import Memory, format_recall
 from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
@@ -146,6 +147,28 @@ class DSHSection:
     workspace: str = "/var/lib/qqbot/dsh-workspace"
     profile: str = "qqbot"
     request_timeout: float = 120.0
+    # "placeholder" saves originals under workspace and sends a text
+    # description/path; "inline" keeps the old ACP image-block behavior.
+    image_mode: str = "placeholder"
+    image_dir: str = "images"
+    image_caption: bool = True
+    caption_prompt: str = (
+        "用一两句中文客观描述这张图片；其中有文字就照抄关键文字。只输出描述。"
+    )
+    image_max_bytes: int = 8 * 1024 * 1024
+    image_keep_days: int = 14
+    image_max_files: int = 1000
+
+
+@dataclass(frozen=True)
+class PreparedImage:
+    """A stored image plus the short description shown to DSH."""
+
+    sha1: str
+    relative: str
+    mime: str
+    description: str
+    data_uri: str = ""
 
 
 @dataclass
@@ -291,12 +314,22 @@ def load_config(path: str | Path) -> AppConfig:
             return default
         return value.strip().lower() in ("1", "true", "yes", "on")
 
+    image_mode = str(dsh_raw.get("image_mode", "placeholder")).strip().lower()
+    if image_mode not in ("placeholder", "inline"):
+        image_mode = "placeholder"
     dsh = DSHSection(
         enabled=env_bool("DSH_ENABLED", bool(dsh_raw.get("enabled", True))),
         home=os.environ.get("DSH_HOME", "").strip() or str(dsh_raw.get("home", "/var/lib/qqbot/dsh-home")),
         workspace=os.environ.get("DSH_WORKSPACE", "").strip() or str(dsh_raw.get("workspace", "/var/lib/qqbot/dsh-workspace")),
         profile=os.environ.get("DSH_PROFILE", "").strip() or str(dsh_raw.get("profile", "qqbot")),
         request_timeout=float(dsh_raw.get("request_timeout", 120.0)),
+        image_mode=image_mode,
+        image_dir=str(dsh_raw.get("image_dir", "images")).strip().strip("/") or "images",
+        image_caption=bool(dsh_raw.get("image_caption", True)),
+        caption_prompt=str(dsh_raw.get("caption_prompt") or DSHSection.caption_prompt),
+        image_max_bytes=max(1024, int(dsh_raw.get("image_max_bytes", 8 * 1024 * 1024))),
+        image_keep_days=max(0, int(dsh_raw.get("image_keep_days", 14))),
+        image_max_files=max(0, int(dsh_raw.get("image_max_files", 1000))),
     )
 
     admins_raw = os.environ.get("ADMIN_QQ_IDS", "").strip()
@@ -637,6 +670,16 @@ class Bot:
         self.memory = memory
         self.client = client
         self.dsh = dsh
+        self.image_store: ImageStore | None = None
+        if (
+            config.dsh.image_mode == "placeholder"
+            and os.path.abspath(config.dsh.workspace) != os.path.abspath("/var/lib/qqbot/dsh-workspace")
+        ):
+            log.warning(
+                "dsh.workspace=%s does not match the sandbox workspaceRoot "
+                "/var/lib/qqbot/dsh-workspace; placeholder image paths may be unreadable",
+                config.dsh.workspace,
+            )
         self.conversations = conversations
         self.group_context = GroupContextBuffer(config.bot.group_context_messages)
         self.onebot = OneBotWSClient(config.onebot, self.handle, self.handle_notice)
@@ -1629,11 +1672,19 @@ class Bot:
             )
             + self._sticker_hint()
         )
-        images = await self._image_urls(image_urls) if image_urls else []
+        images: list[str] = []
+        prepared: list[PreparedImage] = []
+        if image_urls:
+            if self.config.dsh.image_mode == "inline":
+                images = await self._image_urls(image_urls)
+            else:
+                prepared = await self._prepare_images(image_urls)
+                prompt += self._image_hint(prepared)
+        image_count = len(prepared) if prepared else len(images)
         await self.memory.add(conversation_id, "user", f"{event.sender_name}: {event.text}")
         log.info(
             "proactive reply: group=%s trigger=%s(%s) context=%d images=%d",
-            event.group_id, event.sender_name, event.user_id, len(lines), len(images),
+            event.group_id, event.sender_name, event.user_id, len(lines), image_count,
         )
         started = time.time()
         try:
@@ -1645,7 +1696,7 @@ class Bot:
 
         self.proactive.record(event.group_id, time.time())
         self.group_context.drain(event.group_id)
-        log.info("LLM turn took %.1fs (images=%d)", time.time() - started, len(images))
+        log.info("LLM turn took %.1fs (images=%d)", time.time() - started, image_count)
         await self.memory.add(conversation_id, "assistant", reply)
         await self._send_reply(event, conversation_id, reply, proactive=True)
 
@@ -1715,9 +1766,7 @@ class Bot:
                 self._global.release()
 
     async def _reply(self, conversation_id: str, event: MessageEvent, text: str) -> None:
-        if event.images or self.dsh is None:
-            # DSH's content-block protocol needs attachment receipts that the
-            # Python SDK does not expose; the thin client speaks image_url.
+        if self.dsh is None:
             await self._reply_llm(conversation_id, event, text)
         else:
             await self._reply_dsh(conversation_id, event, text)
@@ -1741,6 +1790,141 @@ class Bot:
                 seen.add(url)
                 unique.append(url)
         return unique
+
+    def _image_store(self) -> ImageStore:
+        store = self.image_store
+        if store is None:
+            config = self.config.dsh
+            store = ImageStore(
+                config.workspace,
+                config.image_dir,
+                max_bytes=config.image_max_bytes,
+                keep_days=config.image_keep_days,
+                max_files=config.image_max_files,
+            )
+            self.image_store = store
+        return store
+
+    async def _fetch_image(self, raw: str) -> tuple[bytes, str] | None:
+        """Download or decode one image exactly once."""
+        if not raw:
+            return None
+        max_bytes = self.config.dsh.image_max_bytes
+        if raw.startswith("data:"):
+            header, _, payload = raw.partition(",")
+            mime = header[5:].split(";")[0].strip().lower() or "image/jpeg"
+            if "base64" not in header.lower():
+                log.warning("unsupported image data URI")
+                return None
+            if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+                mime = "image/jpeg"
+            try:
+                data = base64.b64decode(payload, validate=True)
+            except (ValueError, TypeError):
+                log.warning("invalid image data URI")
+                return None
+            if len(data) > max_bytes:
+                log.warning("image too large (%d bytes), skipping", len(data))
+                return None
+            return data, mime
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(20.0, connect=10.0), follow_redirects=True
+            ) as client:
+                response = await client.get(raw)
+            if response.status_code != 200:
+                log.warning("image download HTTP %s: %.120s", response.status_code, raw)
+                return None
+            data = response.content
+            if len(data) > max_bytes:
+                log.warning("image too large (%d bytes), skipping", len(data))
+                return None
+            mime = (response.headers.get("content-type") or "image/jpeg")
+            mime = mime.split(";")[0].strip().lower()
+            if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+                mime = "image/jpeg"
+            return data, mime
+        except httpx.HTTPError as exc:
+            log.warning("image download failed: %s", exc)
+            return None
+
+    async def _caption_image(self, stored: StoredImage, data: bytes, mime: str) -> str:
+        """Return a cached one-off description, generating it on first sight."""
+        cached = await self.memory.caption_get(stored.sha1)
+        if cached:
+            return cached
+        uri = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+        try:
+            caption = await self.client.chat([
+                {"role": "system", "content": "你是一个图片描述助手。"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": self.config.dsh.caption_prompt},
+                        {"type": "image_url", "image_url": {"url": uri}},
+                    ],
+                },
+            ])
+        except LLMError as exc:
+            log.warning("image caption failed: %s", exc)
+            return ""
+        caption = " ".join(str(caption or "").split()).strip()[:500]
+        if not caption:
+            return ""
+        await self.memory.caption_set(
+            stored.sha1,
+            caption,
+            model=getattr(self.client.config, "model", ""),
+            path=stored.relative,
+            mime=mime,
+        )
+        return caption
+
+    async def _prepare_images(
+        self, urls: list[str], *, limit: int = 4
+    ) -> list[PreparedImage]:
+        """Store each image once and return its path plus description."""
+        prepared: list[PreparedImage] = []
+        store = self._image_store()
+        for raw in urls[:limit]:
+            fetched = await self._fetch_image(raw)
+            if fetched is None:
+                continue
+            data, mime = fetched
+            data, mime = await asyncio.to_thread(_shrink_image, data, mime)
+            try:
+                stored = await asyncio.to_thread(store.save, data, mime)
+            except (OSError, ValueError) as exc:
+                log.warning("cannot store image: %s", exc)
+                continue
+            description = ""
+            if self.config.dsh.image_caption:
+                description = await self._caption_image(stored, data, mime)
+            prepared.append(PreparedImage(
+                sha1=stored.sha1,
+                relative=stored.relative,
+                mime=mime,
+                description=description,
+                data_uri=f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+            ))
+        return prepared
+
+    def _image_hint(self, images: list[PreparedImage]) -> str:
+        """Tell the model where each image went and that it can read it on demand."""
+        if not images:
+            return ""
+        lines = [
+            "",
+            "[图片附件]",
+            "为节省上下文，本轮图片不以内联图片块发送；原图已保存在工作区，下面是描述和路径。",
+        ]
+        for index, image in enumerate(images, 1):
+            description = image.description or "（描述生成失败，需要时用 read 查看原图）"
+            lines.append(f"- 图片 {index}：{description}")
+            lines.append(f"  原图：{image.relative}")
+        lines.append("如果描述不足以判断细节，用 read_image 工具读取对应原图（file_path 填上面的路径）；不需要时不要读。")
+        return "\n".join(lines)
 
     async def _image_urls(self, urls: list[str]) -> list[str]:
         """Turn OneBot image URLs into data URIs the model API can read."""
@@ -1820,19 +2004,27 @@ class Bot:
             except sqlite3.Error as exc:
                 log.error("cannot record conversation identity: %s", exc)
 
-        # DSH accepts ACP-style image blocks, so pass the pictures through
-        # instead of describing them first. Read them before _turn_prompt()
-        # drains the group buffer.
+        # Images are stored under the DSH workspace and referenced by text:
+        # the model sees a description plus a path, not an image block that
+        # would be replayed from the session on every later turn.
         image_urls = self._turn_images(event)
         prompt, context_lines = self._turn_prompt(event, text)
         prompt += await self._recall_block(event, text)
-        images = await self._image_urls(image_urls) if image_urls else []
+        images: list[str] = []
+        prepared: list[PreparedImage] = []
+        if image_urls:
+            if self.config.dsh.image_mode == "inline":
+                images = await self._image_urls(image_urls)
+            else:
+                prepared = await self._prepare_images(image_urls)
+                prompt += self._image_hint(prepared)
+        image_count = len(prepared) if prepared else len(images)
 
         await self.memory.add(conversation_id, "user", text)
         log.info(
             "replying via DSH: conv=%s session=%s user=%s(%s) chars=%d group_context=%d images=%d",
             conversation_id, session_id, event.sender_name, event.user_id, len(text),
-            context_lines, len(images),
+            context_lines, image_count,
         )
         started = time.time()
         try:
@@ -1843,7 +2035,7 @@ class Bot:
                 await self._send(event, self.config.bot.error_message)
             return
         elapsed = time.time() - started
-        log.info("DSH turn took %.1fs (images=%d, prompt=%d chars)", elapsed, len(images), len(prompt))
+        log.info("DSH turn took %.1fs (images=%d, prompt=%d chars)", elapsed, image_count, len(prompt))
 
         await self.memory.add(conversation_id, "assistant", reply)
         await self._send_reply(event, conversation_id, reply)

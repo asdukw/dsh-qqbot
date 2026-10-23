@@ -82,7 +82,7 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 4. 读取角色卡库的 active signature（`id` / `updated_at` / `fingerprint`）；变化时重新生成系统提示词、原子写 `memory/lore.md`、重启 DSH runtime（session 保留）。`/card use` 会直接触发这次刷新；`[cards] bootstrap` 文件被修改时也会被检测到。
 5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
 6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称(QQ号): 内容`；每行都带发言者 QQ 号（群名片相同的人也能区分），消息头的发言者若还有不同的 QQ 昵称会额外注明。
-7. 图片：模型能直接读图，但只有 thin client 支持 `image_url` 内容块。被叫到的消息自带图片时走 `_reply_llm`，并把群里最近 `group_context_images`（默认 2）张图片一起以 data URI 附上；DSH 的 content-block 协议不支持图片，所以主动接话先用一次视觉调用把最近图片转成一两句文字描述，再拼进 prompt。
+7. 图片：进入 DSH 历史的内容只有文字。图片下载后按 SHA-1 存到 `<dsh.workspace>/images/<sha1>.<ext>`（`bot/images.py`），用当前模型生成一次描述并缓存到 `memory.db` 的 `image_captions` 表；prompt 里只放 `[图片附件] 描述 + 相对路径`，模型需要细节时用 `read_image` 工具按路径读取原图（`tool-fs.readImage = true`）。同一张图重复出现只调用一次视觉模型。`[dsh] image_mode = "inline"` 可回退到旧的图片块行为；thin client 路径仍然使用 `image_url`。
 8. `asyncio.to_thread(dsh.run, session_id, prompt)`：
    - DSH 启动/复用 runtime；
    - 加载或创建 `session_id` 的 JSONL 历史；
@@ -176,7 +176,7 @@ CREATE TABLE group_facts (
 - 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。
 - 收进来后用视觉模型打标：一次调用同时给描述和 1-3 个情绪标签，写进 `description` / `tags`；打标失败不影响入库。
 - 发送：prompt 里带一句约定，模型想发表情时在回复最后写 `[表情: 语气词]`；adapter 用 `extract_sticker_marker` 摘掉标记，按标签/描述匹配（`StickerStore.pick`）挑一张，以 `base64://` 图片段跟在文字后面发出，并受每会话冷却/小时上限约束。
-- 图片输入走 DSH 官方 content block（ACP 形状 `{"type":"image","data":<base64>,"mimeType":...}`），不再先转文字描述；只有 thin client 路径和打标用 `image_url`。
+- 图片输入默认走占位符（见“一条消息的路径”第 7 步）：原图存 workspace、描述缓存、prompt 只带描述和路径；`read_image` 按需读原图。`[dsh] image_mode = "inline"` 时才使用 DSH content block；thin client 路径和打标仍用 `image_url`。
 - 表里的 `status='banned'` 不会进入候选；`uses` / `last_used` 记录发送情况。
 
 ## 订阅转发（`bot/feeds.py`）

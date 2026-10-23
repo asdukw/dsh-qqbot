@@ -28,7 +28,9 @@
 - id: tool-fs
   config:
     read: true
-    readImage: false
+    # Let the model open an original image on demand (the placeholder path
+    # only carries a description; details stay in the file).
+    readImage: true
     write: true
     edit: true
     readLimit: 2000
