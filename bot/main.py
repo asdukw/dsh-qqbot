@@ -787,7 +787,6 @@ class Bot:
             await self._send(event, chunk)
             await asyncio.sleep(0.35)
 
-
     async def _maybe_reload_model(self) -> None:
         """Pick up --use-model / --set-model changes on the next turn."""
         try:
@@ -958,12 +957,20 @@ class Bot:
             except sqlite3.Error as exc:
                 log.error("cannot record conversation identity: %s", exc)
 
+        # DSH cannot take image parts, so describe images still sitting in
+        # the group buffer before _turn_prompt() drains it. Without this an
+        # @ about a picture posted a moment earlier reaches DSH as text only.
+        image_urls = self._turn_images(event)
         prompt, context_lines = self._turn_prompt(event, text)
+        captions = await self._image_captions(image_urls) if image_urls else []
+        if captions:
+            prompt += "\n\n[群里的图片]\n" + "\n".join(f"- {c}" for c in captions)
 
         await self.memory.add(conversation_id, "user", text)
         log.info(
-            "replying via DSH: conv=%s session=%s user=%s(%s) chars=%d group_context=%d",
-            conversation_id, session_id, event.sender_name, event.user_id, len(text), context_lines,
+            "replying via DSH: conv=%s session=%s user=%s(%s) chars=%d group_context=%d images=%d",
+            conversation_id, session_id, event.sender_name, event.user_id, len(text),
+            context_lines, len(captions),
         )
         try:
             reply = await asyncio.to_thread(dsh.run, session_id, prompt)
