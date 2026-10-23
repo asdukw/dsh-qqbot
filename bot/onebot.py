@@ -419,6 +419,19 @@ class OneBotWSClient:
             "message": [{"type": "image", "data": {"file": file}}],
         }, timeout=timeout)
 
+    async def send_private_record(self, user_id: int, file: str, timeout: float = 60.0) -> dict:
+        """Send a voice message; `file` is a base64:// URI (NapCat accepts mp3)."""
+        return await self.call("send_private_msg", {
+            "user_id": user_id,
+            "message": [{"type": "record", "data": {"file": file}}],
+        }, timeout=timeout)
+
+    async def send_group_record(self, group_id: int, file: str, timeout: float = 60.0) -> dict:
+        return await self.call("send_group_msg", {
+            "group_id": group_id,
+            "message": [{"type": "record", "data": {"file": file}}],
+        }, timeout=timeout)
+
     async def get_login_info(self) -> dict:
         return await self.call("get_login_info", {})
 

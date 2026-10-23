@@ -46,6 +46,7 @@ from tasks import (
     resolve_target,
     spec_of,
 )
+from voice import VoiceError, extract_voice_marker, synthesize
 from stickers import (
     StickerError,
     StickerStore,
@@ -157,6 +158,16 @@ class StickersSection:
 
 
 @dataclass
+class VoiceSection:
+    # edge-tts voice replies; the model asks with a trailing "[语音]".
+    enabled: bool = True
+    voice: str = "zh-CN-XiaoxiaoNeural"
+    rate: str = "+0%"
+    max_chars: int = 80
+    cooldown_seconds: int = 30
+
+
+@dataclass
 class TasksSection:
     # Admin-created scheduled messages; semantic parsing uses the thin client.
     database: str = "/var/lib/qqbot/tasks.db"
@@ -175,6 +186,7 @@ class AppConfig:
     cards: CardsSection = field(default_factory=CardsSection)
     stickers: StickersSection = field(default_factory=StickersSection)
     tasks: TasksSection = field(default_factory=TasksSection)
+    voice: VoiceSection = field(default_factory=VoiceSection)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -292,6 +304,15 @@ def load_config(path: str | Path) -> AppConfig:
         max_sends_per_hour=max(0, int(stickers_raw.get("max_sends_per_hour", 10))),
     )
 
+    voice_raw = _section(table, "voice")
+    voice = VoiceSection(
+        enabled=bool(voice_raw.get("enabled", True)),
+        voice=str(voice_raw.get("voice", "zh-CN-XiaoxiaoNeural")),
+        rate=str(voice_raw.get("rate", "+0%")),
+        max_chars=max(10, int(voice_raw.get("max_chars", 80))),
+        cooldown_seconds=max(0, int(voice_raw.get("cooldown_seconds", 30))),
+    )
+
     tasks_raw = _section(table, "tasks")
     tasks = TasksSection(
         database=(
@@ -325,6 +346,7 @@ def load_config(path: str | Path) -> AppConfig:
         cards=cards,
         stickers=stickers,
         tasks=tasks,
+        voice=voice,
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -521,6 +543,8 @@ class Bot:
         # Poke replies are rate limited per chat.
         self._poke_last: dict[int, float] = {}
         self._poke_cooldown = 8.0
+        # Voice replies are rate limited per chat as well.
+        self._voice_last: dict[int, float] = {}
         self._system_prompt = ""
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
@@ -748,6 +772,14 @@ class Bot:
             f"下次 {next_run.strftime('%m-%d %H:%M')}，内容：{record.message}）"
         )
         return f"{reply}\n{line}" if reply else line
+
+    def _voice_hint(self) -> str:
+        if not self.config.voice.enabled:
+            return ""
+        return (
+            chr(10) + "（想用语音说时，在回复最后单独一行写 [语音]；"
+            f"内容不超过 {self.config.voice.max_chars} 字，超长会退回文字。）"
+        )
 
     def _task_hint(self, event: MessageEvent) -> str:
         if (
@@ -1031,6 +1063,38 @@ class Bot:
         store.mark_used(record.id)
         log.info("sent sticker #%s to %s (hint=%r)", record.id, key, hint)
 
+    async def _send_voice(self, event: MessageEvent, text: str) -> bool:
+        config = self.config.voice
+        if not config.enabled:
+            return False
+        text = " ".join(text.split())
+        if not text or len(text) > config.max_chars:
+            return False
+        key = event.group_id if event.group_id is not None else event.user_id
+        now = time.time()
+        if now - self._voice_last.get(key, 0.0) < config.cooldown_seconds:
+            return False
+        try:
+            audio = await synthesize(text, voice=config.voice, rate=config.rate)
+        except VoiceError as exc:
+            log.warning("voice synthesis failed: %s", exc)
+            return False
+        file = "base64://" + base64.b64encode(audio).decode("ascii")
+        try:
+            if event.message_type == "group" and event.group_id is not None:
+                sent = await self.onebot.send_group_record(event.group_id, file)
+                self._remember_own_message(
+                    event.group_id, int(sent.get("message_id") or 0)
+                )
+            else:
+                await self.onebot.send_private_record(event.user_id, file)
+        except (OneBotError, TypeError, ValueError) as exc:
+            log.error("failed to send voice: %s", exc)
+            return False
+        self._voice_last[key] = now
+        log.info("voice reply sent to %s (%d bytes)", key, len(audio))
+        return True
+
     async def _send_reply(
         self, event: MessageEvent, conversation_id: str, reply: str
     ) -> None:
@@ -1045,10 +1109,15 @@ class Bot:
         reply, management = extract_task_management(reply)
         if management is not None:
             reply = await self._handle_task_management(event, reply, *management)
+        reply, wants_voice = extract_voice_marker(reply)
         visible, hint = extract_sticker_marker(reply)
-        for chunk in split_text(visible, self.config.bot.max_reply_chars):
-            await self._send(event, chunk)
-            await asyncio.sleep(0.35)
+        voice_sent = (
+            await self._send_voice(event, visible) if wants_voice and visible else False
+        )
+        if not voice_sent:
+            for chunk in split_text(visible, self.config.bot.max_reply_chars):
+                await self._send(event, chunk)
+                await asyncio.sleep(0.35)
         if hint is not None:
             await self._send_sticker(event, hint)
 
@@ -1087,7 +1156,8 @@ class Bot:
                 + "\n"
                 + body
                 + self._sticker_hint()
-                + self._task_hint(event),
+                + self._task_hint(event)
+                + self._voice_hint(),
                 len(lines),
             )
         return (
@@ -1095,7 +1165,8 @@ class Bot:
             + "\n"
             + text
             + self._sticker_hint()
-            + self._task_hint(event),
+            + self._task_hint(event)
+            + self._voice_hint(),
             0,
         )
 

@@ -55,6 +55,14 @@ max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
+[voice]
+# edge-tts voice replies; the model marks a short reply with "[语音]".
+enabled = true
+voice = "zh-CN-XiaoxiaoNeural"
+rate = "+0%"
+max_chars = 80
+cooldown_seconds = 30
+
 [tasks]
 # Admin-only scheduled messages. Creation is semantic: one thin-client call
 # turns "/task add 每天早上8点提醒大家喝水" into a validated schedule.
