@@ -28,6 +28,15 @@ caption_prompt = "用一两句中文客观描述这张图片；其中有文字�
 image_max_bytes = 8388608
 image_keep_days = 14
 image_max_files = 1000
+# DSH session rotation. Generation 0 keeps the historical id; later
+# generations append -gN. Old JSONL files are kept on disk.
+# Groups rotate after this much idle time, or at the first message after
+# session_rotate_daily_hour (local time); private chats use the private idle.
+session_rotate_idle_hours = 24
+session_rotate_idle_hours_private = 168
+session_rotate_max_hours = 0
+session_rotate_max_messages = 0
+session_rotate_daily_hour = 4
 # Compaction thresholds (thresholdRatio/headroom/retainRatio) live in
 # dsh/qqbot.cordis.patch.yml.
 

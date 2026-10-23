@@ -207,6 +207,14 @@ CREATE TABLE group_facts (
 - `extract_schedule()` 从回复里取出代码块，用 Pydantic 校验：`start_time` 必须是可解析时间（无时区按 +08:00 处理），队名不能为空，`best_of` 限定 1–9；按时间排序。
 - 校验通过后由 `render_schedule()` 渲染固定格式（北京时间、无来源链接），代码块本身不会出现在聊天里；校验失败的块会被剥掉并提示重试，不会泄露原始 JSON。
 
+## 会话轮换（`bot/sessions.py`）
+
+- DSH session id 由 `conversation_id` 加 generation 组成：generation 0 保留历史 id（如 `group-123`），之后为 `group-123-gN`；旧 JSONL 不删除。
+- 默认策略：群聊空闲 24 小时、私聊空闲 168 小时、群聊每天 04:00 后第一条消息轮换；可选 `session_rotate_max_hours` / `session_rotate_max_messages`。配置在 `[dsh]`。
+- 启动时扫描现有 DSH JSONL，用最早/最晚事件时间和 `user/message` 数回填 `memory.db` 的 `session_state`，避免旧会话被误判为刚开始。
+- `/reset`（管理员，`/new` 同义）强制新 generation；`memory.db` 的 FTS recall 按 `conversation_id` 保留，轮换不影响长期记忆。
+- 压缩仍保持 80% 兜底；先靠轮换降低历史重放，等 token 账本上线后再决定是否把阈值降到约 20%。
+
 ## 上下文与压缩
 
 - 上下文长度来自模型注册表的 `context_window`（付费 Flash 1M，free 200k），经渲染后成为 DSH route 的 `contextWindow`。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。

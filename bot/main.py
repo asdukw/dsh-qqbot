@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import json
 import logging
+import re
 import os
 import random
 import signal
@@ -34,6 +36,7 @@ from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from onebot import EMPTY_REPLY, MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
 from schedule import extract_schedule, render_schedule
+from sessions import SessionStore
 from tasks import (
     TZ as TASK_TZ,
     TaskScheduler,
@@ -158,6 +161,13 @@ class DSHSection:
     image_max_bytes: int = 8 * 1024 * 1024
     image_keep_days: int = 14
     image_max_files: int = 1000
+    # DSH session rotation. Generation 0 keeps the historical session id;
+    # later generations append -gN. Old JSONL files are never deleted.
+    session_rotate_idle_hours: float = 24.0
+    session_rotate_idle_hours_private: float = 168.0
+    session_rotate_max_hours: float = 0.0
+    session_rotate_max_messages: int = 0
+    session_rotate_daily_hour: int = 4
 
 
 @dataclass(frozen=True)
@@ -330,6 +340,11 @@ def load_config(path: str | Path) -> AppConfig:
         image_max_bytes=max(1024, int(dsh_raw.get("image_max_bytes", 8 * 1024 * 1024))),
         image_keep_days=max(0, int(dsh_raw.get("image_keep_days", 14))),
         image_max_files=max(0, int(dsh_raw.get("image_max_files", 1000))),
+        session_rotate_idle_hours=max(0.0, float(dsh_raw.get("session_rotate_idle_hours", 24.0))),
+        session_rotate_idle_hours_private=max(0.0, float(dsh_raw.get("session_rotate_idle_hours_private", 168.0))),
+        session_rotate_max_hours=max(0.0, float(dsh_raw.get("session_rotate_max_hours", 0.0))),
+        session_rotate_max_messages=max(0, int(dsh_raw.get("session_rotate_max_messages", 0))),
+        session_rotate_daily_hour=int(dsh_raw.get("session_rotate_daily_hour", 4)),
     )
 
     admins_raw = os.environ.get("ADMIN_QQ_IDS", "").strip()
@@ -671,6 +686,15 @@ class Bot:
         self.client = client
         self.dsh = dsh
         self.image_store: ImageStore | None = None
+        self.sessions = SessionStore(
+            config.paths.database,
+            idle_hours=config.dsh.session_rotate_idle_hours,
+            idle_hours_private=config.dsh.session_rotate_idle_hours_private,
+            max_hours=config.dsh.session_rotate_max_hours,
+            max_messages=config.dsh.session_rotate_max_messages,
+            daily_hour=config.dsh.session_rotate_daily_hour,
+        )
+        self._seed_sessions()
         if (
             config.dsh.image_mode == "placeholder"
             and os.path.abspath(config.dsh.workspace) != os.path.abspath("/var/lib/qqbot/dsh-workspace")
@@ -747,6 +771,7 @@ class Bot:
             self.conversations.close()
         await self.client.close()
         self.memory.close()
+        self.sessions.close()
         self.cards.close()
         if self.stickers is not None:
             self.stickers.close()
@@ -1648,7 +1673,7 @@ class Bot:
         if not await self.ensure_card():
             return
 
-        session_id = conversation_id.replace(":", "-")
+        session_id, _ = self._session_for(conversation_id, is_group=True)
         if self.conversations is not None:
             try:
                 await asyncio.to_thread(
@@ -1693,6 +1718,7 @@ class Bot:
             log.error("proactive DSH failed after %.1fs: %s", time.time() - started, exc)
             return
         log.info("proactive DSH turn took %.1fs", time.time() - started)
+        self._touch_session(conversation_id)
 
         self.proactive.record(event.group_id, time.time())
         self.group_context.drain(event.group_id)
@@ -1790,6 +1816,86 @@ class Bot:
                 seen.add(url)
                 unique.append(url)
         return unique
+
+    def _session_for(self, conversation_id: str, *, is_group: bool) -> tuple[str, bool]:
+        store = getattr(self, "sessions", None)
+        if store is None:
+            return conversation_id.replace(":", "-"), False
+        state, rotated = store.current(conversation_id, is_group=is_group)
+        if rotated:
+            log.info(
+                "rotated DSH session: conv=%s -> %s (generation=%d)",
+                conversation_id, state.session_id, state.generation,
+            )
+        return state.session_id, rotated
+
+    def _touch_session(self, conversation_id: str) -> None:
+        store = getattr(self, "sessions", None)
+        if store is not None:
+            store.touch(conversation_id)
+
+    def reset_session(self, conversation_id: str):
+        """Force a new DSH generation; used by the admin /reset command."""
+        store = getattr(self, "sessions", None)
+        if store is None:
+            return None
+        state = store.reset(conversation_id)
+        log.info(
+            "manual DSH session reset: conv=%s -> %s (generation=%d)",
+            conversation_id, state.session_id, state.generation,
+        )
+        return state
+
+    def _seed_sessions(self) -> None:
+        """Seed rotation metadata for DSH sessions that predate this table."""
+        root = Path(self.config.dsh.home) / "sessions"
+        if not root.is_dir():
+            return
+        seeded = 0
+        for path in root.rglob("session.v4.jsonl"):
+            session_id = path.parent.name
+            if re.fullmatch(r"(?:group|private)-\d+", session_id) is None:
+                continue
+            conversation_id = session_id.replace("-", ":", 1)
+            existing = self.sessions.info(conversation_id)
+            if existing is not None and (existing.generation != 0 or existing.messages > 0):
+                continue
+            started_at = 0
+            last_active = 0
+            messages = 0
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            event = json.loads(line)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        stamp = int(event.get("time") or 0) // 1000
+                        if stamp > 0:
+                            started_at = stamp if started_at <= 0 else min(started_at, stamp)
+                            last_active = max(last_active, stamp)
+                        if event.get("type") == "user/message":
+                            messages += 1
+            except OSError:
+                continue
+            if started_at <= 0 or last_active <= 0:
+                try:
+                    last_active = int(path.stat().st_mtime)
+                except OSError:
+                    continue
+                started_at = last_active
+            try:
+                if self.sessions.seed_existing(
+                    conversation_id,
+                    started_at=started_at,
+                    last_active=last_active,
+                    messages=messages,
+                ):
+                    seeded += 1
+            except sqlite3.Error as exc:
+                log.warning("cannot seed session %s: %s", session_id, exc)
+        if seeded:
+            log.info("seeded %d existing DSH session(s) for rotation", seeded)
 
     def _image_store(self) -> ImageStore:
         store = self.image_store
@@ -1993,7 +2099,9 @@ class Bot:
             await self._send(event, self.config.bot.error_message)
             return
 
-        session_id = conversation_id.replace(":", "-")
+        session_id, _ = self._session_for(
+            conversation_id, is_group=event.message_type == "group"
+        )
         if self.conversations is not None:
             # Explicit identity for the profile plugin; written before the turn starts.
             try:
@@ -2035,6 +2143,7 @@ class Bot:
                 await self._send(event, self.config.bot.error_message)
             return
         elapsed = time.time() - started
+        self._touch_session(conversation_id)
         log.info("DSH turn took %.1fs (images=%d, prompt=%d chars)", elapsed, image_count, len(prompt))
 
         await self.memory.add(conversation_id, "assistant", reply)

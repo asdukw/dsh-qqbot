@@ -61,6 +61,7 @@ HELP = """可用命令:
 /card delete <id|名称>   删除角色卡
 /card alias [add|remove] <名称>  管理别名（叫到别名也算直接找它）
 /proactive [on|off|status|test]        群聊主动回复
+/reset          归档当前 DSH 会话，下一条消息开始新会话
 /sticker        表情库管理与导入
 /task           定时任务（仅管理员）
 /sub            RSS / B 站订阅（仅管理员）
@@ -127,6 +128,8 @@ class CommandRouter:
             await self._card(event, parts[1:])
         elif name == "/proactive":
             await self._proactive(event, parts[1:])
+        elif name in ("/reset", "/new"):
+            await self._reset(event)
         elif name in ("/sticker", "/stickers"):
             await self._sticker(event, parts[1:])
         elif name in ("/task", "/tasks", "/remind"):
@@ -135,6 +138,20 @@ class CommandRouter:
             await self._sub(event, parts[1:])
         else:
             await self.bot.send_text(event, f"未知命令: {name}\n{HELP}")
+
+    async def _reset(self, event: Any) -> None:
+        if event.message_type == "group" and event.group_id is not None:
+            conversation_id = f"group:{event.group_id}"
+        elif event.message_type == "private":
+            conversation_id = f"private:{event.user_id}"
+        else:
+            await self.bot.send_text(event, "无法识别当前会话")
+            return
+        state = self.bot.reset_session(conversation_id)
+        if state is None:
+            await self.bot.send_text(event, "DSH 未启用，没有可重置的会话")
+        else:
+            await self.bot.send_text(event, f"已开启新会话：{state.session_id}")
 
     async def _model(self, event: Any, args: list[str]) -> None:
         registry = ModelRegistry(self.bot.config.models.database)

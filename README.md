@@ -125,6 +125,7 @@ sudo journalctl -u qqbot -f
 - `/model`：列出模型及其序号；
 - `/model <序号|model_id|provider/model>`：切换激活模型，立即热切换，无需重启；
 - `/card` 系列：角色卡库的搜索、安装、切换、删除（见[角色卡](#角色卡)）；
+- `/reset`（或 `/new`）：归档当前 DSH 会话，下一条消息开始新会话；
 - `/help`：显示帮助。
 
 命令不会写入对话历史，也不会送进模型。
