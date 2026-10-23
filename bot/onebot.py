@@ -39,9 +39,23 @@ class MessageEvent:
     images: tuple[str, ...] = ()
     # message_id of the message this one quotes, if any (OneBot reply segment).
     reply_to: int | None = None
+    # Subset of images QQ marked as stickers (summary "[动画表情]" / sub_type 1).
+    stickers: tuple[str, ...] = ()
 
 
 _CQ_IMAGE_RE = re.compile(r"\[CQ:image,([^\]]*)\]")
+
+
+def _is_sticker_segment(data: dict[str, Any]) -> bool:
+    """QQ stickers arrive as image segments marked by summary/sub_type."""
+    if str(data.get("summary") or "").strip() == "[动画表情]":
+        return True
+    try:
+        return int(data.get("sub_type") or data.get("subType") or 0) == 1
+    except (TypeError, ValueError):
+        return False
+
+
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,([^\]]*)\]")
 _MAX_IMAGES = 4
 
@@ -70,7 +84,9 @@ class MessageParser:
             user_id = int(event.get("user_id") or 0)
             if user_id == self.self_id:
                 return None
-            text, at_me, images, reply_to = self._extract_text(event.get("message"))
+            text, at_me, images, reply_to, stickers = self._extract_text(
+                event.get("message")
+            )
             if not text and not images:
                 return None
             raw_sender = event.get("sender")
@@ -89,14 +105,18 @@ class MessageParser:
                 group_id=group_id,
                 images=tuple(images[:_MAX_IMAGES]),
                 reply_to=reply_to,
+                stickers=tuple(stickers[:_MAX_IMAGES]),
             )
         except (TypeError, ValueError) as exc:
             log.warning("malformed message event: %s", exc)
             return None
 
-    def _extract_text(self, message: Any) -> tuple[str, bool, list[str], int | None]:
+    def _extract_text(
+        self, message: Any
+    ) -> tuple[str, bool, list[str], int | None, list[str]]:
         at_me = False
         images: list[str] = []
+        stickers: list[str] = []
         reply_to: int | None = None
         if isinstance(message, str):
             for match in _CQ_IMAGE_RE.finditer(message):
@@ -107,6 +127,8 @@ class MessageParser:
                 url = params.get("url") or params.get("file") or ""
                 if url.startswith(("http://", "https://", "data:")):
                     images.append(url)
+                    if params.get("sub_type", "").strip() == "1":
+                        stickers.append(url)
             reply = _CQ_REPLY_RE.search(message)
             if reply:
                 for item in reply.group(1).split(","):
@@ -124,10 +146,10 @@ class MessageParser:
                 if end < 0:
                     break
                 text = text[:start] + text[end + 1:]
-            return text.strip(), at_me, images, reply_to
+            return text.strip(), at_me, images, reply_to, stickers
 
         if not isinstance(message, list):
-            return "", False, [], None
+            return "", False, [], None, []
 
         parts: list[str] = []
         for segment in message:
@@ -146,9 +168,12 @@ class MessageParser:
                     parts.append(f"@{data.get('name') or qq}")
             elif kind == "image":
                 url = str(data.get("url") or data.get("file") or "")
+                sticker = _is_sticker_segment(data)
                 if url.startswith(("http://", "https://", "data:")):
                     images.append(url)
-                parts.append("[图片]")
+                    if sticker:
+                        stickers.append(url)
+                parts.append("[表情包]" if sticker else "[图片]")
             elif kind == "reply":
                 value = str(data.get("id") or "")
                 if value.isdigit():
@@ -161,7 +186,7 @@ class MessageParser:
                 parts.append("[视频]")
             elif kind == "file":
                 parts.append("[文件]")
-        return "".join(parts).strip(), at_me, images, reply_to
+        return "".join(parts).strip(), at_me, images, reply_to, stickers
 
 
 class OneBotWSClient:
@@ -312,6 +337,19 @@ class OneBotWSClient:
             "group_id": group_id,
             "message": [{"type": "text", "data": {"text": text}}],
         })
+
+    async def send_private_image(self, user_id: int, file: str, timeout: float = 60.0) -> dict:
+        """Send an image; `file` is a base64:// URI, http(s) URL or host path."""
+        return await self.call("send_private_msg", {
+            "user_id": user_id,
+            "message": [{"type": "image", "data": {"file": file}}],
+        }, timeout=timeout)
+
+    async def send_group_image(self, group_id: int, file: str, timeout: float = 60.0) -> dict:
+        return await self.call("send_group_msg", {
+            "group_id": group_id,
+            "message": [{"type": "image", "data": {"file": file}}],
+        }, timeout=timeout)
 
     async def get_login_info(self) -> dict:
         return await self.call("get_login_info", {})

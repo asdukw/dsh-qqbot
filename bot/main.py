@@ -31,6 +31,7 @@ from memory import Memory
 from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from onebot import MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
+from stickers import StickerError, StickerStore, download_image
 from prompt import build_messages, build_system_prompt
 
 from cards import CardError, CardRecord, CardRegistry, CharacterCard
@@ -118,12 +119,24 @@ class CardsSection:
 
 
 @dataclass
+class StickersSection:
+    # Learned 表情包 library. Only images QQ marks as stickers are collected,
+    # and only from group chats.
+    database: str = "/var/lib/qqbot/stickers.db"
+    directory: str = "/var/lib/qqbot/stickers"
+    collect: bool = True
+    max_per_hour: int = 20  # per group
+    max_bytes: int = 8 * 1024 * 1024
+
+
+@dataclass
 class AppConfig:
     onebot: OneBotSection = field(default_factory=OneBotSection)
     llm: LLMSection = field(default_factory=LLMSection)
     dsh: DSHSection = field(default_factory=DSHSection)
     models: ModelsSection = field(default_factory=ModelsSection)
     cards: CardsSection = field(default_factory=CardsSection)
+    stickers: StickersSection = field(default_factory=StickersSection)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -222,6 +235,21 @@ def load_config(path: str | Path) -> AppConfig:
         ),
     )
 
+    stickers_raw = _section(table, "stickers")
+    stickers = StickersSection(
+        database=(
+            os.environ.get("STICKER_DB", "").strip()
+            or str(stickers_raw.get("database", "/var/lib/qqbot/stickers.db"))
+        ),
+        directory=(
+            os.environ.get("STICKER_DIR", "").strip()
+            or str(stickers_raw.get("directory", "/var/lib/qqbot/stickers"))
+        ),
+        collect=bool(stickers_raw.get("collect", True)),
+        max_per_hour=max(0, int(stickers_raw.get("max_per_hour", 20))),
+        max_bytes=max(1024, int(stickers_raw.get("max_bytes", 8 * 1024 * 1024))),
+    )
+
     models_raw = _section(table, "models")
     models = ModelsSection(
         database=os.environ.get("MODEL_DB", "").strip() or str(models_raw.get("database", "/var/lib/qqbot/models.db")),
@@ -241,6 +269,7 @@ def load_config(path: str | Path) -> AppConfig:
         dsh=dsh,
         models=models,
         cards=cards,
+        stickers=stickers,
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -402,9 +431,11 @@ class Bot:
         client: LLMClient,
         dsh: DSHClient | None = None,
         conversations: ConversationStore | None = None,
+        stickers: StickerStore | None = None,
     ):
         self.config = config
         self.cards = cards
+        self.stickers = stickers
         self.memory = memory
         self.client = client
         self.dsh = dsh
@@ -427,6 +458,9 @@ class Bot:
         self._system_prompt = ""
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
+        # Sticker collection runs off the message path, one task per message.
+        self._tasks: set[asyncio.Task] = set()
+        self._sticker_budget: dict[int, deque[float]] = {}
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.config.bot.admin_qq_ids
@@ -445,6 +479,9 @@ class Bot:
         if self._closed:
             return
         self._closed = True
+        for task in list(self._tasks):
+            task.cancel()
+        self._tasks.clear()
         await self.onebot.close()
         if self.dsh is not None:
             self.dsh.close()
@@ -453,6 +490,8 @@ class Bot:
         await self.client.close()
         self.memory.close()
         self.cards.close()
+        if self.stickers is not None:
+            self.stickers.close()
 
     async def handle(self, event: MessageEvent) -> None:
         text = event.text[: self.config.bot.max_input_chars]
@@ -467,6 +506,8 @@ class Bot:
         if event.message_type == "group":
             if event.group_id is None:
                 return
+            if event.stickers:
+                self._spawn(self._collect_stickers(event))
             conversation_id = f"group:{event.group_id}"
             # The card (and therefore its names) may have been switched by
             # /card use or --use-card since the last message.
@@ -504,6 +545,60 @@ class Bot:
         if event.reply_to is not None and event.group_id is not None:
             return event.reply_to in self._own_messages.get(event.group_id, ())
         return False
+
+    # ---------------------------------------------------------- stickers
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _sticker_budget_ok(self, group_id: int) -> bool:
+        limit = self.config.stickers.max_per_hour
+        if limit <= 0:
+            return False
+        now = time.time()
+        window = self._sticker_budget.setdefault(group_id, deque())
+        while window and now - window[0] > 3600:
+            window.popleft()
+        if len(window) >= limit:
+            return False
+        window.append(now)
+        return True
+
+    async def _collect_stickers(self, event: MessageEvent) -> None:
+        """Download a group's stickers into the library; never blocks a reply."""
+        store = self.stickers
+        if store is None or not self.config.stickers.collect:
+            return
+        if event.message_type != "group" or event.group_id is None:
+            return
+        for url in event.stickers[:2]:
+            if not self._sticker_budget_ok(event.group_id):
+                return
+            try:
+                data, mime = await download_image(
+                    url, max_bytes=self.config.stickers.max_bytes
+                )
+                record, created = await asyncio.to_thread(
+                    store.add_bytes,
+                    data,
+                    mime=mime,
+                    source=f"group:{event.group_id}",
+                    source_kind="chat",
+                    max_bytes=self.config.stickers.max_bytes,
+                )
+            except (StickerError, OSError, sqlite3.Error) as exc:
+                log.warning("sticker collect failed: %s", exc)
+                continue
+            except Exception:  # noqa: BLE001 - a sticker must not break chat
+                log.exception("sticker collect crashed")
+                return
+            if created:
+                log.info(
+                    "sticker #%s collected from group %s (%d bytes)",
+                    record.id, event.group_id, record.size,
+                )
 
     def _remember_own_message(self, group_id: int, message_id: int) -> None:
         if message_id <= 0:
@@ -1075,7 +1170,14 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
     client = make_llm_client(config, record)
     dsh_client = make_dsh_client(config, record) if config.dsh.enabled else None
     conversations = ConversationStore(config.paths.profile_db) if dsh_client is not None else None
-    bot = Bot(config, cards, memory, client, dsh_client, conversations)
+    stickers: StickerStore | None
+    try:
+        stickers = StickerStore(config.stickers.database, config.stickers.directory)
+        log.info("sticker library loaded: %d stored", stickers.count())
+    except (OSError, sqlite3.Error) as exc:
+        log.error("cannot open the sticker library: %s", exc)
+        stickers = None
+    bot = Bot(config, cards, memory, client, dsh_client, conversations, stickers)
     if not bot.refresh_card(force=True):
         log.error("cannot load the active character card")
         return None

@@ -12,13 +12,15 @@ from typing import Any
 
 from card_fetch import CardFetchError, fetch_card_bytes
 from models import ModelRecord, ModelRegistry
+from onebot import OneBotError
+from stickers import StickerError, download_image
 
 from cards import CardError, CardRecord
 
 log = logging.getLogger(__name__)
 
 # Bot.handle receives text with "[图片]" etc. appended for non-text segments.
-_MARKER_RE = re.compile(r"\[(?:图片|表情|语音|视频|文件|动画表情)\]")
+_MARKER_RE = re.compile(r"\[(?:图片|表情包|表情|语音|视频|文件|动画表情)\]")
 
 
 def strip_message_markers(text: str) -> str:
@@ -43,6 +45,7 @@ HELP = """可用命令:
 /card delete <id|名称>   删除角色卡
 /card alias [add|remove] <名称>  管理别名（叫到别名也算直接找它）
 /proactive [on|off|status|test]        群聊主动回复
+/sticker        表情库管理与导入
 /help           显示帮助"""
 
 CARD_HELP = """/card                     列出角色卡
@@ -56,6 +59,17 @@ CARD_HELP = """/card                     列出角色卡
 /card alias add <名称>     添加别名，群里直接叫它就会被当成在找它
 /card alias remove <名称>  删除别名
 /card alias list <id|名称> 查看别的卡的别名"""
+
+
+STICKER_HELP = """/sticker                     列出最近收藏的表情包
+/sticker list [数量]          同上
+/sticker search <关键词>      按描述/标签/来源搜索
+/sticker show <id>            查看详情（文件路径、大小、来源）
+/sticker add                  把附带的图片收藏进库
+/sticker import               导入 QQ 账号的收藏表情
+/sticker delete <id>          删除（同时删文件）
+/sticker ban|unban <id>       禁用/恢复，禁用的不会被发送
+/sticker stats                数量与占用空间"""
 
 
 class CommandRouter:
@@ -80,6 +94,8 @@ class CommandRouter:
             await self._card(event, parts[1:])
         elif name == "/proactive":
             await self._proactive(event, parts[1:])
+        elif name in ("/sticker", "/stickers"):
+            await self._sticker(event, parts[1:])
         else:
             await self.bot.send_text(event, f"未知命令: {name}\n{HELP}")
 
@@ -390,6 +406,195 @@ class CommandRouter:
                 f"{status['day_count']}/{status['max_per_day']} 今天"
             )
         await self.bot.send_text(event, "\n".join(lines))
+
+    # ----------------------------------------------------------- stickers
+
+    async def _sticker(self, event: Any, args: list[str]) -> None:
+        store = getattr(self.bot, "stickers", None)
+        if store is None:
+            await self.bot.send_text(event, "表情库没有启用（[stickers] 未配置或打开失败）。")
+            return
+        action = args[0].lower() if args else "list"
+        rest = args[1:]
+
+        if action in ("list", "ls"):
+            limit = int(rest[0]) if rest and rest[0].isdigit() else 20
+            rows = store.list(limit=limit)
+            stats = store.stats()
+            await self.bot.send_text(
+                event,
+                self._render_stickers(
+                    rows,
+                    f"表情库（共 {stats['count']} 张，{stats['banned']} 张禁用，"
+                    f"{stats['bytes'] / 1024 / 1024:.1f} MB）:",
+                ),
+            )
+            return
+
+        if action in ("search", "find"):
+            query = " ".join(rest).strip()
+            if not query:
+                await self.bot.send_text(event, "用法: /sticker search <关键词>")
+                return
+            rows = store.search(query, limit=20)
+            await self.bot.send_text(
+                event,
+                self._render_stickers(rows, f"搜索「{query}」:", empty="没有匹配的表情。"),
+            )
+            return
+
+        if action in ("show", "info"):
+            record = store.get(int(rest[0])) if rest and rest[0].isdigit() else None
+            if record is None:
+                await self.bot.send_text(event, "用法: /sticker show <id>")
+                return
+            await self.bot.send_text(
+                event,
+                f"#{record.id}  {'禁用' if record.status == 'banned' else '可用'}\n"
+                f"描述: {record.description or '-'}\n"
+                f"标签: {', '.join(record.tags) or '-'}\n"
+                f"大小: {record.size / 1024:.0f} KB  {record.mime or '-'}\n"
+                f"来源: {record.source_kind} {record.source or '-'}\n"
+                f"使用: {record.uses} 次\n"
+                f"文件: {record.path}",
+            )
+            return
+
+        if action in ("delete", "rm", "remove"):
+            record = store.get(int(rest[0])) if rest and rest[0].isdigit() else None
+            if record is None:
+                await self.bot.send_text(event, "用法: /sticker delete <id>")
+                return
+            store.delete(record.id)
+            await self.bot.send_text(
+                event, f"已删除 #{record.id}（剩 {store.count()} 张）"
+            )
+            return
+
+        if action in ("ban", "unban"):
+            record = store.get(int(rest[0])) if rest and rest[0].isdigit() else None
+            if record is None:
+                await self.bot.send_text(event, f"用法: /sticker {action} <id>")
+                return
+            status = "banned" if action == "ban" else "ok"
+            try:
+                store.set_status(record.id, status)
+            except ValueError as exc:
+                await self.bot.send_text(event, str(exc))
+                return
+            await self.bot.send_text(
+                event, f"#{record.id} 已{'禁用' if status == 'banned' else '恢复'}"
+            )
+            return
+
+        if action == "stats":
+            stats = store.stats()
+            await self.bot.send_text(
+                event,
+                f"表情库: {stats['count']} 张，禁用 {stats['banned']} 张，"
+                f"占用 {stats['bytes'] / 1024 / 1024:.1f} MB",
+            )
+            return
+
+        if action == "import":
+            await self._import_stickers(event)
+            return
+
+        if action == "add":
+            await self._add_sticker(event)
+            return
+
+        if action in ("help", "?"):
+            await self.bot.send_text(event, STICKER_HELP)
+            return
+
+        await self.bot.send_text(event, f"未知表情库命令: {action}\n{STICKER_HELP}")
+
+    async def _add_sticker(self, event: Any) -> None:
+        store = self.bot.stickers
+        images = getattr(event, "images", ())
+        if not images:
+            await self.bot.send_text(
+                event, "用法：把表情图片作为图片发给机器人，并附上 /sticker add"
+            )
+            return
+        try:
+            data, mime = await download_image(
+                images[0], max_bytes=self.bot.config.stickers.max_bytes
+            )
+            record, created = await asyncio.to_thread(
+                store.add_bytes,
+                data,
+                mime=mime,
+                source=f"admin:{event.user_id}",
+                source_kind="admin",
+                max_bytes=self.bot.config.stickers.max_bytes,
+            )
+        except (StickerError, OSError, sqlite3.Error) as exc:
+            await self.bot.send_text(event, f"收藏失败: {exc}")
+            return
+        state = "已收藏" if created else "库里已经有这张"
+        await self.bot.send_text(event, f"{state}: #{record.id}（共 {store.count()} 张）")
+
+    async def _import_stickers(self, event: Any) -> None:
+        store = self.bot.stickers
+        try:
+            data = await self.bot.onebot.call("fetch_custom_face", {"count": 50})
+        except OneBotError as exc:
+            await self.bot.send_text(event, f"读取 QQ 收藏表情失败: {exc}")
+            return
+        urls = (
+            [url for url in data if isinstance(url, str) and url.startswith("http")]
+            if isinstance(data, list)
+            else []
+        )
+        if not urls:
+            await self.bot.send_text(event, "QQ 收藏里没有表情。")
+            return
+        added = skipped = failed = 0
+        for url in urls[:50]:
+            try:
+                raw, mime = await download_image(
+                    url, max_bytes=self.bot.config.stickers.max_bytes
+                )
+                _record, created = await asyncio.to_thread(
+                    store.add_bytes,
+                    raw,
+                    mime=mime,
+                    source="qq-favorites",
+                    source_kind="custom_face",
+                    max_bytes=self.bot.config.stickers.max_bytes,
+                )
+            except (StickerError, OSError, sqlite3.Error):
+                failed += 1
+                continue
+            if created:
+                added += 1
+            else:
+                skipped += 1
+        await self.bot.send_text(
+            event,
+            f"导入完成：新增 {added}，已存在 {skipped}，失败 {failed}。"
+            f"库中共 {store.count()} 张。",
+        )
+
+    @staticmethod
+    def _render_stickers(
+        rows: list[Any],
+        title: str,
+        empty: str = "表情库是空的。群里发表情会自动收藏，或用 /sticker import。",
+    ) -> str:
+        if not rows:
+            return empty
+        lines = [title]
+        for record in rows:
+            state = " [禁用]" if record.status == "banned" else ""
+            desc = f" {record.description}" if record.description else ""
+            lines.append(
+                f"#{record.id} {record.size / 1024:.0f}KB "
+                f"{record.source_kind}{state}{desc}"
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _render(rows: list[ModelRecord]) -> str:

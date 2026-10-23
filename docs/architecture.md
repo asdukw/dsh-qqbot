@@ -166,6 +166,14 @@ CREATE TABLE group_facts (
 - `bootstrap` 兼容：库为空时导入 `[cards] bootstrap`；只要这张卡仍然激活，就按 mtime 重新导入，保留原来「改文件即热加载」的行为。
 - 命令行：`--list-cards`、`--search-cards <query>`、`--install-card <url|path>`、`--use-card <id|name>`、`--show-card`、`--add-card-alias <name>`、`--remove-card-alias <name>`。
 
+## 表情包库（`bot/stickers.py`）
+
+- SQLite `/var/lib/qqbot/stickers.db` + 文件目录 `/var/lib/qqbot/stickers/`；一行一张图，`sha1` 唯一，按内容去重。
+- 入站判定：OneBot `image` 段带 `summary="[动画表情]"` 或 `sub_type=1` 时视为表情包；解析器同时把它标成 `[表情包]` 写进文本，`MessageEvent.stickers` 单独带出 URL。
+- 只收群聊，私聊不收；下载异步执行，不阻塞回复；每个群每小时有收藏上限（`[stickers] max_per_hour`），单张上限 `max_bytes`，只接受 PNG/JPEG/GIF/WebP（按魔数判断，不信任 Content-Type）。
+- 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。
+- 表里预留 `description` / `tags` / `uses` / `last_used` / `status`，供后续打标签和发送阶段使用；`status='banned'` 的不会进入候选。
+
 ## 上下文与压缩
 
 - 上下文长度来自模型注册表的 `context_window`（付费 Flash 1M，free 200k），经渲染后成为 DSH route 的 `contextWindow`。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。

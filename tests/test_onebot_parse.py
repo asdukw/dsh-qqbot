@@ -75,6 +75,37 @@ class MessageParserTests(unittest.TestCase):
         assert parsed is not None
         self.assertEqual(parsed.text, "/card install[图片]")
         self.assertEqual(parsed.images, ("https://example.com/card.png",))
+        self.assertEqual(parsed.stickers, ())
+
+    def test_sticker_segment_is_flagged_and_labelled(self) -> None:
+        parsed = self.parser.parse(event([
+            {"type": "image", "data": {
+                "url": "https://example.com/s.jpg",
+                "summary": "[动画表情]",
+                "sub_type": 1,
+            }},
+        ]))
+        assert parsed is not None
+        self.assertEqual(parsed.text, "[表情包]")
+        self.assertEqual(parsed.images, ("https://example.com/s.jpg",))
+        self.assertEqual(parsed.stickers, ("https://example.com/s.jpg",))
+
+    def test_sub_type_alone_marks_a_sticker(self) -> None:
+        parsed = self.parser.parse(event([
+            {"type": "image", "data": {"url": "https://example.com/s.png", "sub_type": "1"}},
+        ]))
+        assert parsed is not None
+        self.assertEqual(parsed.stickers, ("https://example.com/s.png",))
+
+    def test_a_normal_image_is_not_a_sticker(self) -> None:
+        parsed = self.parser.parse(event([
+            {"type": "image", "data": {
+                "url": "https://example.com/p.jpg", "summary": "[图片]", "sub_type": 0,
+            }},
+        ]))
+        assert parsed is not None
+        self.assertEqual(parsed.stickers, ())
+        self.assertEqual(parsed.text, "[图片]")
 
 
 if __name__ == "__main__":

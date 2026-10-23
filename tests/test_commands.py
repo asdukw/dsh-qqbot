@@ -27,6 +27,7 @@ class FakeBot:
     def __init__(self, db: Path, cards_db: Path):
         self.config = SimpleNamespace(models=SimpleNamespace(database=str(db)))
         self.cards = CardRegistry(cards_db)
+        self.stickers = None
         self.sent: list[str] = []
         self.reloads = 0
         self.card_reloads = 0
@@ -66,6 +67,8 @@ class CommandRouterTests(unittest.TestCase):
         self.event = SimpleNamespace(user_id=1)
 
     def tearDown(self) -> None:
+        if self.bot.stickers is not None:
+            self.bot.stickers.close()
         self.bot.cards.close()
         self.tmp.cleanup()
 
@@ -131,6 +134,25 @@ class CommandRouterTests(unittest.TestCase):
         self.bot.cards.add_alias(self.a.id, "小杜")
         self.run_command("/card show 小杜")
         self.assertIn("阿杜", self.bot.sent[-1])
+
+    def test_sticker_add_and_list(self) -> None:
+        from stickers import StickerStore
+
+        root = Path(self.tmp.name)
+        self.bot.stickers = StickerStore(root / "stickers.db", root / "sticker-files")
+        self.bot.config.stickers = SimpleNamespace(max_bytes=8 * 1024 * 1024)
+        png = bytes.fromhex("89504e470d0a1a0a") + b"fake"
+        uri = "data:image/png;base64," + base64.b64encode(png).decode()
+        self.run_command("/sticker add", images=(uri,))
+        self.assertIn("已收藏", self.bot.sent[-1])
+        self.run_command("/sticker list")
+        self.assertIn("共 1 张", self.bot.sent[-1])
+        self.run_command("/sticker stats")
+        self.assertIn("表情库: 1 张", self.bot.sent[-1])
+
+    def test_sticker_without_library(self) -> None:
+        self.run_command("/sticker")
+        self.assertIn("表情库没有启用", self.bot.sent[-1])
 
     def test_card_list_marks_active(self) -> None:
         self.run_command("/card")

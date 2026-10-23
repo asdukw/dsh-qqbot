@@ -137,6 +137,12 @@ sudo journalctl -u qqbot -f
 | `/card alias` | 查看当前卡的名称与别名 |
 | `/card alias add <名称>` | 添加别名：群里直接叫它（至少 2 个字）也会被当成在找它 |
 | `/card alias remove <名称>` | 删除别名 |
+| `/sticker` | 列出最近收藏的表情包（群里收到的表情会自动入库） |
+| `/sticker search <关键词>` | 按描述/标签/来源搜索 |
+| `/sticker add`（附图） | 把管理员发的图片收藏进表情库 |
+| `/sticker import` | 导入 QQ 账号里的收藏表情 |
+| `/sticker delete <id>` / `ban` / `unban` | 删除或禁用/恢复 |
+| `/sticker stats` | 数量与占用空间 |
 
 命令行等价操作：
 

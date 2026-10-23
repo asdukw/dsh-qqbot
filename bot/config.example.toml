@@ -40,6 +40,15 @@ database = "/var/lib/qqbot/characters.db"
 # stays active its mtime is watched, so editing the file still hot-reloads.
 bootstrap = "/etc/qqbot/character.json"
 
+[stickers]
+# Sticker (表情包) library. Images QQ marks as stickers are collected from
+# group chats only, deduplicated by content, and stored next to SQLite.
+collect = true
+max_per_hour = 20          # per group
+max_bytes = 8388608        # 8 MB per sticker
+database = "/var/lib/qqbot/stickers.db"
+directory = "/var/lib/qqbot/stickers"
+
 [bot]
 # Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;
 # this list is the fallback for local runs.
