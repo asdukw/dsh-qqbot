@@ -56,9 +56,19 @@
 
 # ── search + observation policy + model routes + profile ────────
 - insert:
-    # Official model-free pruner: compaction-basic calls it at pressure or
-    # context overflow, replacing an oversized tool result's middle with a
-    # marker while keeping the head and tail.
+    # Tool results are bounded by default. The full text is written under the
+    # workspace and the model gets a head/tail preview plus a read/grep path.
+    - id: spill-local
+      name: '@deepseek-ai/dsh-spill-local'
+      config:
+        root: /var/lib/qqbot/dsh-workspace/spill
+        cleanupPeriodDays: 14
+    - id: spill-policy
+      name: '@deepseek-ai/dsh-spill-policy'
+      config:
+        maxInlineTokens: 3000
+    # Secondary, model-free fallback for results that reached compaction:
+    # compaction-basic keeps the head and tail and replaces the middle.
     - id: tool-result-pruner
       name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
       config:

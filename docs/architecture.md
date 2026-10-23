@@ -229,7 +229,8 @@ auto: true
 
 - 有效阈值 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`；1M 窗口约 800k，200k 窗口约 160k。
 - 超过阈值时，较旧历史被总结成摘要，保留最近约 16% 的上下文；完整 session 仍以 JSONL 持久化。
-- 工具结果裁剪：官方 `compaction-tool-result-pruner` 已挂载（`thresholdChars: 8192` / `headChars: 4096` / `tailChars: 1024`）。`compaction-basic` 在压力压缩或 context overflow 时调用它，保留工具结果的头部和尾部、中间替换为 marker；该过程不额外调用模型。
+- 工具结果默认裁剪：官方 `spill-local` + `spill-policy` 已挂载（`maxInlineTokens: 3000`）。超过预算的工具结果会把完整文本写到 `/var/lib/qqbot/dsh-workspace/spill/`，模型只看到头尾预览和 notice 里的 `read`/`grep` 路径；`read` 自身不会再被 spill，避免循环。文件默认保留 14 天。
+- 二级兜底：官方 `compaction-tool-result-pruner`（`thresholdChars: 8192` / `headChars: 4096` / `tailChars: 1024`）在 `compaction-basic` 压力压缩或 context overflow 时继续裁剪中间段；该过程不额外调用模型。
 - 激活模型的 `max_output_tokens`（默认 2048）限制单次输出，也作为压缩时的输出预留。
 - `DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
 

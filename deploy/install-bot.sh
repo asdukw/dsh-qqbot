@@ -39,6 +39,7 @@ python3 -m venv /opt/qqbot/bot/venv
 DSH_SDK=/opt/qqbot/bot/venv/bin/dsh
 DSH_HOME=/var/lib/qqbot/dsh-home
 install -d -o qqbot -g qqbot -m 750 "$DSH_HOME" /var/lib/qqbot/dsh-workspace /var/lib/qqbot/dsh-state /opt/qqbot/dsh/plugins
+install -d -o qqbot -g qqbot -m 700 /var/lib/qqbot/dsh-workspace/spill
 if [ ! -d "$DSH_HOME/profiles/qqbot" ]; then
     if command -v sudo >/dev/null 2>&1; then
         sudo -u qqbot env HOME=/var/lib/qqbot DSH_HOME="$DSH_HOME" "$DSH_SDK" --profile qqbot --from-default-profile sdk-minimal --dump-default-config >/dev/null
