@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from card_fetch import CardFetchError, fetch_card_bytes
+from feeds import FeedError
 from llm import LLMError
 from models import ModelRecord, ModelRegistry
 from onebot import OneBotError
@@ -51,6 +52,7 @@ HELP = """可用命令:
 /proactive [on|off|status|test]        群聊主动回复
 /sticker        表情库管理与导入
 /task           定时任务（仅管理员）
+/sub            RSS / B 站订阅（仅管理员）
 /help           显示帮助"""
 
 CARD_HELP = """/card                     列出角色卡
@@ -71,6 +73,12 @@ TASK_HELP = """/task                     列出定时任务
 /task delete <id>         删除任务
 /task pause|resume <id>   暂停 / 恢复
 /task run <id>            立即执行一次（不改动排期）"""
+
+
+SUB_HELP = """/sub add <uid|空间链接|RSS>  订阅；B 站 UID 走 RSSHub
+/sub list                    当前会话的订阅
+/sub del <id>                删除订阅
+/sub check                   立即检查一次所有订阅"""
 
 
 STICKER_HELP = """/sticker                     列出最近收藏的表情包
@@ -112,6 +120,8 @@ class CommandRouter:
             await self._sticker(event, parts[1:])
         elif name in ("/task", "/tasks", "/remind"):
             await self._task(event, parts[1:])
+        elif name in ("/sub", "/subs", "/subscribe"):
+            await self._sub(event, parts[1:])
         else:
             await self.bot.send_text(event, f"未知命令: {name}\n{HELP}")
 
@@ -515,6 +525,87 @@ class CommandRouter:
     @staticmethod
     def _render_tasks(rows: list[Any]) -> str:
         return render_task_list(rows)
+
+    # --------------------------------------------------------------- feeds
+
+    @staticmethod
+    def _chat_target(event: Any) -> tuple[str, int]:
+        if (
+            getattr(event, "message_type", "private") == "group"
+            and getattr(event, "group_id", None) is not None
+        ):
+            return "group", int(event.group_id)
+        return "private", int(event.user_id)
+
+    async def _sub(self, event: Any, args: list[str]) -> None:
+        store = getattr(self.bot, "feeds", None)
+        if store is None:
+            await self.bot.send_text(event, "订阅没有启用（[feeds] enabled = false）。")
+            return
+        action = args[0].lower() if args else "list"
+
+        if action in ("add", "create", "+"):
+            target = " ".join(args[1:]).strip()
+            if not target:
+                await self.bot.send_text(
+                    event,
+                    "用法: /sub add <UID|空间链接|RSS 地址>\n"
+                    "例如: /sub add 546195",
+                )
+                return
+            try:
+                record, created = await self.bot.add_feed(event, target)
+            except (ValueError, FeedError, OSError) as exc:
+                await self.bot.send_text(event, f"订阅失败: {exc}")
+                return
+            state = "已订阅" if created else "已经订阅过"
+            await self.bot.send_text(
+                event,
+                f"{state} #{record.id}：{record.title}\n{record.feed_url}",
+            )
+            return
+
+        if action in ("list", "ls"):
+            chat_type, chat_id = self._chat_target(event)
+            rows = store.list_for(chat_type, chat_id)
+            if not rows:
+                await self.bot.send_text(event, "当前会话还没有订阅。用 /sub add <UID|RSS> 添加。")
+                return
+            lines = [f"订阅（共 {len(rows)} 个）:"]
+            for record in rows:
+                state = f"  ⚠ {record.last_error[:60]}" if record.last_error else ""
+                lines.append(f"#{record.id} {record.title}{state}\n  {record.feed_url}")
+            await self.bot.send_text(event, "\n".join(lines))
+            return
+
+        if action in ("del", "delete", "rm", "remove"):
+            feed_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+            if feed_id is None:
+                await self.bot.send_text(event, "用法: /sub del <id>")
+                return
+            record = store.get(feed_id)
+            chat_type, chat_id = self._chat_target(event)
+            if record is None or (record.chat_type, record.chat_id) != (chat_type, chat_id):
+                await self.bot.send_text(event, f"当前会话没有订阅 #{feed_id}")
+                return
+            store.delete(feed_id)
+            await self.bot.send_text(event, f"已删除订阅 #{feed_id}（{record.title}）")
+            return
+
+        if action == "check":
+            poller = getattr(self.bot, "_feed_poller", None)
+            if poller is None:
+                await self.bot.send_text(event, "订阅轮询器没有启动。")
+                return
+            sent = await poller.tick()
+            await self.bot.send_text(event, f"检查完成，转发了 {sent} 条更新。")
+            return
+
+        if action in ("help", "?"):
+            await self.bot.send_text(event, SUB_HELP)
+            return
+
+        await self.bot.send_text(event, f"未知订阅命令: {action}\n{SUB_HELP}")
 
     # ----------------------------------------------------------- stickers
 

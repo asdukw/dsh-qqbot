@@ -179,6 +179,12 @@ CREATE TABLE group_facts (
 - 图片输入走 DSH 官方 content block（ACP 形状 `{"type":"image","data":<base64>,"mimeType":...}`），不再先转文字描述；只有 thin client 路径和打标用 `image_url`。
 - 表里的 `status='banned'` 不会进入候选；`uses` / `last_used` 记录发送情况。
 
+## 订阅转发（`bot/feeds.py`）
+
+- `feeds.db` 存 `(chat_type, chat_id, feed_url)` 唯一订阅；`/sub add` 支持 B 站 UID/空间链接（拼成 RSSHub 动态路由）或任意 RSS/Atom 地址，首次添加时把当前条目记入 `seen` 作为基线，避免补发历史。
+- `FeedPoller` 每 `[feeds] check_seconds`（默认 300s）按 URL 去重抓取一次，RSS/Atom 由标准库解析；新条目按时间顺序转发，单次最多 `max_new` 条；失败写入 `last_error` 并在 `/sub list` 里显示。
+- B 站对阿里云机房 IP 直接返回 `-412 request was banned`，因此默认 `rsshub_base = https://rsshub.liumingye.cn`（可换镜像）。
+
 ## 语音、梗图与记忆检索
 
 - 语音：`bot/voice.py` 调 edge-tts 生成 mp3，`record` 段以 base64 发送（NapCat 实测接受 mp3）；模型用 `[语音]` 标记，超长或合成失败退回文字，每会话 30 秒冷却。

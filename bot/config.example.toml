@@ -55,6 +55,16 @@ max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
+[feeds]
+# RSS/Atom subscriptions forwarded into the chat where they were added.
+# Bilibili is blocked for this host's IP (-412), so it goes through RSSHub.
+enabled = true
+database = "/var/lib/qqbot/feeds.db"
+rsshub_base = "https://rsshub.liumingye.cn"
+check_seconds = 300
+max_new = 5
+max_subs = 50
+
 [meme]
 # Text memes: the model marks a reply with "[梗图: 文字]"; a sticker is used as
 # the base image (or a gradient card when the library is empty).

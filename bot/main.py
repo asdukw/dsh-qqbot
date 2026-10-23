@@ -46,6 +46,16 @@ from tasks import (
     resolve_target,
     spec_of,
 )
+from feeds import (
+    FeedError,
+    FeedPoller,
+    FeedStore,
+    bilibili_feed_url,
+    fetch_feed,
+    feed_title,
+    format_entry,
+    parse_feed,
+)
 from meme import (
     MemeError,
     available as meme_available,
@@ -164,6 +174,17 @@ class StickersSection:
 
 
 @dataclass
+class FeedsSection:
+    # RSS/Atom subscriptions (Bilibili via a configurable RSSHub mirror).
+    enabled: bool = True
+    database: str = "/var/lib/qqbot/feeds.db"
+    rsshub_base: str = "https://rsshub.liumingye.cn"
+    check_seconds: int = 300
+    max_new: int = 5
+    max_subs: int = 50
+
+
+@dataclass
 class MemeSection:
     # Text memes rendered onto a sticker (or a gradient card).
     enabled: bool = True
@@ -203,6 +224,7 @@ class AppConfig:
     tasks: TasksSection = field(default_factory=TasksSection)
     voice: VoiceSection = field(default_factory=VoiceSection)
     meme: MemeSection = field(default_factory=MemeSection)
+    feeds: FeedsSection = field(default_factory=FeedsSection)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -320,6 +342,16 @@ def load_config(path: str | Path) -> AppConfig:
         max_sends_per_hour=max(0, int(stickers_raw.get("max_sends_per_hour", 10))),
     )
 
+    feeds_raw = _section(table, "feeds")
+    feeds = FeedsSection(
+        enabled=bool(feeds_raw.get("enabled", True)),
+        database=str(feeds_raw.get("database", "/var/lib/qqbot/feeds.db")),
+        rsshub_base=str(feeds_raw.get("rsshub_base", "https://rsshub.liumingye.cn")),
+        check_seconds=max(60, int(feeds_raw.get("check_seconds", 300))),
+        max_new=max(1, int(feeds_raw.get("max_new", 5))),
+        max_subs=max(0, int(feeds_raw.get("max_subs", 50))),
+    )
+
     meme_raw = _section(table, "meme")
     meme = MemeSection(
         enabled=bool(meme_raw.get("enabled", True)),
@@ -372,6 +404,7 @@ def load_config(path: str | Path) -> AppConfig:
         tasks=tasks,
         voice=voice,
         meme=meme,
+        feeds=feeds,
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -566,11 +599,13 @@ class Bot:
         conversations: ConversationStore | None = None,
         stickers: StickerStore | None = None,
         tasks: TaskStore | None = None,
+        feeds: FeedStore | None = None,
     ):
         self.config = config
         self.cards = cards
         self.stickers = stickers
         self.tasks = tasks
+        self.feeds = feeds
         self.memory = memory
         self.client = client
         self.dsh = dsh
@@ -603,6 +638,7 @@ class Bot:
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
         self._scheduler: TaskScheduler | None = None
+        self._feed_poller: FeedPoller | None = None
         # Sticker collection runs off the message path, one task per message.
         self._tasks: set[asyncio.Task] = set()
         self._sticker_budget: dict[int, deque[float]] = {}
@@ -631,6 +667,8 @@ class Bot:
         self._tasks.clear()
         if self._scheduler is not None:
             await self._scheduler.stop()
+        if self._feed_poller is not None:
+            await self._feed_poller.stop()
         await self.onebot.close()
         if self.dsh is not None:
             self.dsh.close()
@@ -643,6 +681,8 @@ class Bot:
             self.stickers.close()
         if self.tasks is not None:
             self.tasks.close()
+        if self.feeds is not None:
+            self.feeds.close()
 
     async def handle(self, event: MessageEvent) -> None:
         if event.sender_name:
@@ -870,16 +910,69 @@ class Bot:
         self._scheduler.start()
         log.info("task scheduler started (%d task(s))", self.tasks.count())
 
+    async def _send_to_chat(self, chat_type: str, chat_id: int, text: str) -> None:
+        if chat_type == "group":
+            data = await self.onebot.send_group(chat_id, text)
+            self._remember_own_message(chat_id, int(data.get("message_id") or 0))
+            self.proactive.note_speaking(chat_id, time.time())
+        else:
+            await self.onebot.send_private(chat_id, text)
+
     async def _send_scheduled(self, task: Any) -> None:
         text = task.message
         if getattr(task, "mode", "fixed") == "generate":
             text = await self._compose_task_message(task)
-        if task.chat_type == "group":
-            data = await self.onebot.send_group(task.chat_id, text)
-            self._remember_own_message(task.chat_id, int(data.get("message_id") or 0))
-            self.proactive.note_speaking(task.chat_id, time.time())
+        await self._send_to_chat(task.chat_type, task.chat_id, text)
+
+    def start_feeds(self) -> None:
+        if self.feeds is None or not self.config.feeds.enabled:
+            return
+        self._feed_poller = FeedPoller(
+            self.feeds,
+            self._send_feed,
+            check_seconds=self.config.feeds.check_seconds,
+            max_new=self.config.feeds.max_new,
+        )
+        self._feed_poller.start()
+        log.info("feed poller started (%d subscription(s))", self.feeds.count())
+
+    async def _send_feed(self, record: Any, entry: Any) -> None:
+        await self._send_to_chat(
+            record.chat_type, record.chat_id, format_entry(record.title, entry)
+        )
+
+    async def add_feed(
+        self, event: MessageEvent, target: str
+    ) -> tuple[Any, bool]:
+        store = self.feeds
+        if store is None or not self.config.feeds.enabled:
+            raise ValueError("订阅没有启用")
+        if self.config.feeds.max_subs and store.count() >= self.config.feeds.max_subs:
+            raise ValueError(f"订阅数已达上限（{self.config.feeds.max_subs}）")
+        target = target.strip()
+        source = "rss"
+        if target.isdigit() or "bilibili.com" in target:
+            url = bilibili_feed_url(target, self.config.feeds.rsshub_base)
+            source = "bilibili"
+        elif target.startswith(("http://", "https://")):
+            url = target
         else:
-            await self.onebot.send_private(task.chat_id, text)
+            raise ValueError("请给 B 站 UID、空间链接或 RSS 地址")
+        data = await fetch_feed(url)
+        entries = parse_feed(data)
+        title = feed_title(data) or url
+        chat_type, chat_id = resolve_target(
+            "here", event.message_type, event.user_id, event.group_id
+        )
+        record, created = store.add(
+            chat_type=chat_type,
+            chat_id=chat_id,
+            feed_url=url,
+            title=title,
+            source=source,
+            seen=tuple(entry.id for entry in entries),
+        )
+        return record, created
 
     async def _compose_task_message(self, task: Any) -> str:
         """Let DSH (tools included) or the card write the scheduled line."""
@@ -1882,7 +1975,17 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
     except (OSError, sqlite3.Error) as exc:
         log.error("cannot open the task store: %s", exc)
         tasks = None
-    bot = Bot(config, cards, memory, client, dsh_client, conversations, stickers, tasks)
+    feeds: FeedStore | None
+    try:
+        feeds = FeedStore(config.feeds.database) if config.feeds.enabled else None
+        if feeds is not None:
+            log.info("feed store loaded: %d subscription(s)", feeds.count())
+    except (OSError, sqlite3.Error) as exc:
+        log.error("cannot open the feed store: %s", exc)
+        feeds = None
+    bot = Bot(
+        config, cards, memory, client, dsh_client, conversations, stickers, tasks, feeds
+    )
     if not bot.refresh_card(force=True):
         log.error("cannot load the active character card")
         return None
@@ -1911,6 +2014,7 @@ async def run_ws(config: AppConfig) -> int:
 
     runner = asyncio.create_task(bot.onebot.run())
     bot.start_scheduler()
+    bot.start_feeds()
     log.info("bot started (%s via WebSocket)", record.key)
     try:
         await stop.wait()
