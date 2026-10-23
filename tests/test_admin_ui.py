@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -14,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
+from usage import UsageStore  # noqa: E402
 from admin_ui import (  # noqa: E402
     AdminHandler,
     db_rows,
@@ -86,7 +88,10 @@ class HttpTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.dbs = {}
         for name, schema in {
-            "memory": "CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, created_at INTEGER)",
+            "memory": (
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, created_at INTEGER); "
+                "CREATE TABLE chat_events (id INTEGER PRIMARY KEY, conversation_id TEXT, chat_type TEXT, chat_id INTEGER, user_id INTEGER, sender_name TEXT, text TEXT, created_at INTEGER)"
+            ),
             "models": "CREATE TABLE models (provider TEXT, model_id TEXT, context_window INTEGER, is_active INTEGER, enabled INTEGER)",
             "cards": "CREATE TABLE cards (id INTEGER, name TEXT, nickname TEXT, aliases TEXT, is_active INTEGER)",
             "tasks": "CREATE TABLE tasks (id INTEGER, kind TEXT, time_of_day TEXT, weekday INTEGER, every_minutes INTEGER, mode TEXT, enabled INTEGER, next_run INTEGER, message TEXT)",
@@ -117,6 +122,36 @@ class HttpTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+        now = int(time.time())
+        conn = sqlite3.connect(self.dbs["memory"])
+        conn.execute(
+            "INSERT INTO chat_events "
+            "(conversation_id, chat_type, chat_id, user_id, sender_name, text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("group:42", "group", 42, 1, "小明", "hello hello 测试测试", now),
+        )
+        conn.execute(
+            "INSERT INTO chat_events "
+            "(conversation_id, chat_type, chat_id, user_id, sender_name, text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("group:42", "group", 42, 2, "小红", "hello 今天吃什么", now),
+        )
+        conn.commit()
+        conn.close()
+
+        usage = UsageStore(root / "usage.db")
+        usage.record(
+            source="dsh", purpose="chat", conversation_id="group:42",
+            input_tokens=100, output_tokens=10, cache_read_tokens=900,
+            created_at=now,
+        )
+        usage.record(
+            source="thin", purpose="image_caption", conversation_id="private:7",
+            input_tokens=20, output_tokens=5, cache_read_tokens=0,
+            created_at=now,
+        )
+        usage.close()
+
         dist = root / "dist"
         (dist / "assets").mkdir(parents=True)
         (dist / "index.html").write_text(
@@ -131,6 +166,7 @@ class HttpTests(unittest.TestCase):
             "tasks": {"database": self.dbs["tasks"]},
             "feeds": {"database": self.dbs["feeds"]},
             "stickers": {"database": self.dbs["stickers"]},
+            "usage": {"database": str(root / "usage.db")},
             "admin": {"session_hours": 1, "static_dir": str(dist)},
         }
         self.old_env = {k: os.environ.get(k) for k in ("ADMIN_UI_PASSWORD", "ADMIN_UI_SECRET")}
@@ -213,6 +249,32 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(payload["feed_rows"][0]["title"], "央视新闻")
         self.assertEqual(payload["card_rows"][0]["aliases"], [])
         self.assertGreater(payload["generated_at"], 0)
+
+    def test_usage_and_fun_can_filter_conversation(self) -> None:
+        self.assertEqual(self.get("/api/usage?days=7").status, 401)
+        cookie, _ = self.login()
+
+        response = self.get("/api/usage?days=7", cookie)
+        self.assertEqual(response.status, 200)
+        usage = json.loads(response.read().decode())
+        self.assertEqual(usage["totals"]["total"], 1035)
+        self.assertEqual(
+            {row["id"] for row in usage["conversations"]},
+            {"group:42", "private:7"},
+        )
+
+        filtered = self.get("/api/usage?days=7&conversation=group:42", cookie)
+        self.assertEqual(filtered.status, 200)
+        payload = json.loads(filtered.read().decode())
+        self.assertEqual(payload["totals"]["total"], 1010)
+
+        fun = self.get("/api/fun?conversation=group:42", cookie)
+        self.assertEqual(fun.status, 200)
+        payload = json.loads(fun.read().decode())
+        self.assertEqual({row["name"] for row in payload["ranking"]}, {"小明", "小红"})
+        self.assertTrue(
+            any(word["text"] == "hello" and word["count"] >= 3 for word in payload["words"])
+        )
 
     def test_wrong_password_is_rejected(self) -> None:
         _, response = self.login("nope")

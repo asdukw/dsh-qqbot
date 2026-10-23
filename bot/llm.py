@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -96,6 +96,10 @@ class LLMClient:
             timeout=httpx.Timeout(config.timeout, connect=10.0),
             headers=headers,
         )
+        # Set by Bot: (purpose, conversation_id, usage, provider, model)
+        self.usage_sink: (
+            Callable[[str, str, dict[str, Any], str, str], None] | None
+        ) = None
 
     def _payload(self, messages: list[dict[str, Any]]) -> dict:
         payload: dict = {
@@ -111,7 +115,13 @@ class LLMClient:
             payload["reasoning_effort"] = self.config.reasoning_effort
         return payload
 
-    async def chat(self, messages: list[dict[str, Any]]) -> str:
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        purpose: str = "chat",
+        conversation_id: str = "",
+    ) -> str:
         payload = self._payload(messages)
         last_error: Exception | None = None
 
@@ -143,6 +153,16 @@ class LLMClient:
                 content = body["choices"][0]["message"].get("content") or ""
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise LLMError(f"unexpected LLM response: {response.text[:300]}") from exc
+
+            usage = body.get("usage") or {}
+            if usage and self.usage_sink is not None:
+                try:
+                    self.usage_sink(
+                        purpose, conversation_id, usage,
+                        self.config.provider, self.config.model,
+                    )
+                except Exception:  # noqa: BLE001 - usage must not break chat
+                    log.exception("usage sink failed")
 
             content = content.strip()
             if not content:

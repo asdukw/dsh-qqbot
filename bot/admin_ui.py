@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from admin_insights import clean_conversation, fun_data, usage_data
+
 log = logging.getLogger("qqbot.admin")
 
 COOKIE = "qqbot_admin"
@@ -393,6 +395,27 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
             self._send_json(HTTPStatus.OK, dashboard_data(self.config))
+            return
+        if path in ("/api/usage", "/api/fun"):
+            if not self._valid_session():
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+            query = parse_qs(urlparse(self.path).query)
+            conversation = clean_conversation(
+                (query.get("conversation") or [""])[0]
+            )
+            if path == "/api/usage":
+                try:
+                    days = int((query.get("days") or ["7"])[0])
+                except (TypeError, ValueError):
+                    days = 7
+                self._send_json(
+                    HTTPStatus.OK, usage_data(self.config, days, conversation)
+                )
+            else:
+                self._send_json(
+                    HTTPStatus.OK, fun_data(self.config, conversation)
+                )
             return
         if path in ("/logout", "/api/logout"):
             self._send_raw(

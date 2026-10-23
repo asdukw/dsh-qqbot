@@ -34,6 +34,20 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages (conversation_id, id);
+CREATE TABLE IF NOT EXISTS chat_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    chat_type       TEXT NOT NULL,
+    chat_id         INTEGER NOT NULL,
+    user_id         INTEGER NOT NULL,
+    sender_name     TEXT NOT NULL DEFAULT '',
+    text            TEXT NOT NULL DEFAULT '',
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_events_conversation
+    ON chat_events (conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_events_created
+    ON chat_events (created_at);
 CREATE TABLE IF NOT EXISTS image_captions (
     hash TEXT PRIMARY KEY,
     description TEXT NOT NULL,
@@ -82,7 +96,7 @@ def format_recall(rows: list[tuple[str, str, int]], max_chars: int = 600) -> str
 
 
 class Memory:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, event_retention_days: int = 90):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -90,6 +104,9 @@ class Memory:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        if event_retention_days > 0:
+            cutoff = int(time.time()) - int(event_retention_days) * 86400
+            self._db.execute("DELETE FROM chat_events WHERE created_at < ?", (cutoff,))
         existed = self._db.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()
@@ -109,6 +126,55 @@ class Memory:
 
     async def add(self, conversation_id: str, role: str, content: str) -> None:
         await asyncio.to_thread(self._add_sync, conversation_id, role, content)
+
+    def _add_event_sync(
+        self,
+        conversation_id: str,
+        chat_type: str,
+        chat_id: int,
+        user_id: int,
+        sender_name: str,
+        text: str,
+        created_at: int,
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO chat_events "
+                "(conversation_id, chat_type, chat_id, user_id, sender_name, text, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    conversation_id,
+                    chat_type,
+                    int(chat_id),
+                    int(user_id),
+                    str(sender_name or "")[:200],
+                    str(text or "")[:4000],
+                    int(created_at),
+                ),
+            )
+            self._db.commit()
+
+    async def add_event(
+        self,
+        conversation_id: str,
+        chat_type: str,
+        chat_id: int,
+        user_id: int,
+        sender_name: str,
+        text: str,
+        created_at: int | None = None,
+    ) -> None:
+        """Append one inbound chat message for rankings and word clouds."""
+        await asyncio.to_thread(
+            self._add_event_sync,
+            conversation_id,
+            chat_type,
+            chat_id,
+            user_id,
+            sender_name,
+            text,
+            int(created_at if created_at is not None else time.time()),
+        )
 
     def _history_sync(self, conversation_id: str, limit: int) -> list[dict[str, str]]:
         with self._lock:

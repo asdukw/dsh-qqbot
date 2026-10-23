@@ -153,7 +153,19 @@ class DSHClient:
         self._sessions.add(session_id)
         return result
 
-    def run(self, session_id: str, text: str, images: Any = ()) -> str:
+    @staticmethod
+    def _reply_from_result(result: Any) -> str:
+        reply = (getattr(result, "final_response", "") or "").strip()
+        if reply:
+            return reply
+        reason = _turn_error(getattr(result, "events", None))
+        finish = getattr(result, "finish_reason", None)
+        raise DSHError(reason or f"DSH turn ended without a reply ({finish or 'no reason'})")
+
+    def run_with_events(
+        self, session_id: str, text: str, images: Any = ()
+    ) -> tuple[str, list[Any]]:
+        """Run one turn and also return its SDK events for usage accounting."""
         with self._lock:
             harness = self._ensure_locked()
             try:
@@ -162,13 +174,11 @@ class DSHClient:
                 log.exception("DSH run failed")
                 self._reset_locked()
                 raise DSHError(f"DSH run failed: {exc}") from exc
+            reply = self._reply_from_result(result)
+            return reply, list(getattr(result, "events", None) or [])
 
-        reply = (getattr(result, "final_response", "") or "").strip()
-        if reply:
-            return reply
-        reason = _turn_error(getattr(result, "events", None))
-        finish = getattr(result, "finish_reason", None)
-        raise DSHError(reason or f"DSH turn ended without a reply ({finish or 'no reason'})")
+    def run(self, session_id: str, text: str, images: Any = ()) -> str:
+        return self.run_with_events(session_id, text, images)[0]
 
     def close(self) -> None:
         with self._lock:

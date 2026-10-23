@@ -22,6 +22,8 @@ import {
   Waves,
 } from "lucide-react";
 
+import FunPanel from "@/components/FunPanel";
+import UsagePanel from "@/components/UsagePanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,6 +43,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { conversationLabel, type FunData, type UsageData } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 
 type ModelRow = {
@@ -299,12 +302,28 @@ function DashboardView({
   error,
   onRefresh,
   onLogout,
+  usage,
+  fun,
+  insightsLoading,
+  usageDays,
+  conversation,
+  conversationOptions,
+  onUsageDaysChange,
+  onConversationChange,
 }: {
   data: Dashboard;
   refreshing: boolean;
   error: string;
   onRefresh: () => void;
   onLogout: () => void;
+  usage: UsageData | null;
+  fun: FunData | null;
+  insightsLoading: boolean;
+  usageDays: number;
+  conversation: string;
+  conversationOptions: Array<{ id: string; label: string }>;
+  onUsageDaysChange: (days: number) => void;
+  onConversationChange: (id: string) => void;
 }) {
   const unavailableFeeds = useMemo(
     () => data.feed_rows.filter((feed) => Boolean(feed.last_error)).length,
@@ -379,6 +398,18 @@ function DashboardView({
             hint={`${formatNumber(data.stickers.banned)} 张禁用`}
           />
         </div>
+
+        <UsagePanel
+          data={usage}
+          conversations={conversationOptions}
+          days={usageDays}
+          onDaysChange={onUsageDaysChange}
+          conversation={conversation}
+          onConversationChange={onConversationChange}
+          loading={insightsLoading}
+        />
+
+        <FunPanel data={fun} loading={insightsLoading} />
 
         <div className="grid gap-6 xl:grid-cols-[1.45fr_1fr]">
           <SectionCard
@@ -569,6 +600,11 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [loginError, setLoginError] = useState("");
+  const [usageDays, setUsageDays] = useState(7);
+  const [conversation, setConversation] = useState("");
+  const [usage, setUsage] = useState<UsageData | null>(null);
+  const [fun, setFun] = useState<FunData | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
 
   const loadDashboard = useCallback(async () => {
     setRefreshing(true);
@@ -592,6 +628,44 @@ export default function App() {
       setRefreshing(false);
     }
   }, []);
+
+  const loadInsights = useCallback(async () => {
+    setInsightsLoading(true);
+    try {
+      const params = new URLSearchParams({ days: String(usageDays) });
+      if (conversation) params.set("conversation", conversation);
+      const funQuery = conversation
+        ? `?conversation=${encodeURIComponent(conversation)}`
+        : "";
+      const [nextUsage, nextFun] = await Promise.all([
+        requestJson<UsageData>(`/api/usage?${params.toString()}`),
+        requestJson<FunData>(`/api/fun${funQuery}`),
+      ]);
+      setUsage(nextUsage);
+      setFun(nextFun);
+    } catch (err) {
+      if (err instanceof Unauthorized) {
+        setView("login");
+        setData(null);
+      } else {
+        setError(err instanceof Error ? err.message : "用量数据加载失败");
+      }
+    } finally {
+      setInsightsLoading(false);
+    }
+  }, [usageDays, conversation]);
+
+  const conversationOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of usage?.conversations ?? []) map.set(item.id, item.label);
+    for (const item of fun?.conversations ?? []) {
+      if (!map.has(item.id)) map.set(item.id, item.label);
+    }
+    if (conversation && !map.has(conversation)) {
+      map.set(conversation, conversationLabel(conversation));
+    }
+    return [...map.entries()].map(([id, label]) => ({ id, label }));
+  }, [usage, fun, conversation]);
 
   useEffect(() => {
     let active = true;
@@ -622,6 +696,11 @@ export default function App() {
     }, 60_000);
     return () => window.clearInterval(timer);
   }, [view, loadDashboard]);
+
+  useEffect(() => {
+    if (view !== "dashboard") return;
+    void loadInsights();
+  }, [view, loadInsights]);
 
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
@@ -680,6 +759,14 @@ export default function App() {
       error={error}
       onRefresh={() => void loadDashboard()}
       onLogout={() => void handleLogout()}
+      usage={usage}
+      fun={fun}
+      insightsLoading={insightsLoading}
+      usageDays={usageDays}
+      conversation={conversation}
+      conversationOptions={conversationOptions}
+      onUsageDaysChange={setUsageDays}
+      onConversationChange={setConversation}
     />
   );
 }

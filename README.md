@@ -139,6 +139,13 @@ sudo journalctl -u qqbot -f
 - 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
 - 页面包含模型、角色卡、定时任务、RSS 订阅、表情库计数，只读，每 60 秒自动刷新。
 
+## Token 审计与今日趣味数据
+
+- `usage.db` 记录每次模型调用的非缓存输入、缓存输入和输出：DSH 的每个 assistant step、compaction summary，以及图片描述、表情打标、任务解析/文案等 thin client 调用。
+- Admin UI 的「Token 用量」支持 7/30/90 天和按群聊/好友筛选，展示缓存命中率、按用途、按 session 的排行。
+- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息；Admin UI 的「今日发言排行」「今日词云」按当天数据生成（词云优先用 jieba，未安装时回退到正则分词）。
+- 配置在 `[usage]`：`database`、`retention_days`、`event_retention_days`。
+
 ## 角色卡
 
 角色卡统一入库到 SQLite `/var/lib/qqbot/characters.db`，内部一律存为 V3 结构（V1 平铺字段和 V2 的 `chara_card_v2` 都会自动升级）。管理员可以直接在聊天里管理：

@@ -76,6 +76,12 @@ max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
+[usage]
+# Token ledger and per-message analytics for the admin UI.
+database = "/var/lib/qqbot/usage.db"
+retention_days = 90
+event_retention_days = 90
+
 [admin]
 # Read-only admin UI. Bind localhost and reach it through Workbench port
 # forwarding: workbench forward start --remote-port 8080 --local-port 8080.

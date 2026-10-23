@@ -37,6 +37,7 @@ from onebot import EMPTY_REPLY, MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
 from schedule import extract_schedule, render_schedule
 from sessions import SessionStore
+from usage import UsageStore
 from tasks import (
     TZ as TASK_TZ,
     TaskScheduler,
@@ -268,10 +269,19 @@ class TasksSection:
 
 
 @dataclass
+class UsageSection:
+    # Token ledger + per-message analytics used by the admin UI.
+    database: str = "/var/lib/qqbot/usage.db"
+    retention_days: int = 90
+    event_retention_days: int = 90
+
+
+@dataclass
 class AppConfig:
     onebot: OneBotSection = field(default_factory=OneBotSection)
     llm: LLMSection = field(default_factory=LLMSection)
     dsh: DSHSection = field(default_factory=DSHSection)
+    usage: UsageSection = field(default_factory=UsageSection)
     models: ModelsSection = field(default_factory=ModelsSection)
     cards: CardsSection = field(default_factory=CardsSection)
     stickers: StickersSection = field(default_factory=StickersSection)
@@ -457,6 +467,16 @@ def load_config(path: str | Path) -> AppConfig:
         max_per_chat=max(0, int(tasks_raw.get("max_per_chat", 10))),
     )
 
+    usage_raw = _section(table, "usage")
+    usage = UsageSection(
+        database=(
+            os.environ.get("USAGE_DB", "").strip()
+            or str(usage_raw.get("database", "/var/lib/qqbot/usage.db"))
+        ),
+        retention_days=max(0, int(usage_raw.get("retention_days", 90))),
+        event_retention_days=max(0, int(usage_raw.get("event_retention_days", 90))),
+    )
+
     models_raw = _section(table, "models")
     models = ModelsSection(
         database=os.environ.get("MODEL_DB", "").strip() or str(models_raw.get("database", "/var/lib/qqbot/models.db")),
@@ -474,6 +494,7 @@ def load_config(path: str | Path) -> AppConfig:
             timeout=float(llm_raw.get("timeout", 60.0)),
         ),
         dsh=dsh,
+        usage=usage,
         models=models,
         cards=cards,
         stickers=stickers,
@@ -676,6 +697,7 @@ class Bot:
         stickers: StickerStore | None = None,
         tasks: TaskStore | None = None,
         feeds: FeedStore | None = None,
+        usage: UsageStore | None = None,
     ):
         self.config = config
         self.cards = cards
@@ -686,6 +708,10 @@ class Bot:
         self.client = client
         self.dsh = dsh
         self.image_store: ImageStore | None = None
+        self._usage = usage
+        self._usage_path = config.usage.database
+        self._usage_retention = config.usage.retention_days
+        self.client.usage_sink = self._record_client_usage
         self.sessions = SessionStore(
             config.paths.database,
             idle_hours=config.dsh.session_rotate_idle_hours,
@@ -770,6 +796,8 @@ class Bot:
         if self.conversations is not None:
             self.conversations.close()
         await self.client.close()
+        if self._usage is not None:
+            self._usage.close()
         self.memory.close()
         self.sessions.close()
         self.cards.close()
@@ -787,6 +815,7 @@ class Bot:
         if not text and not event.images:
             return
 
+        self._log_chat_event(event, text)
         command_text = strip_leading_mention(strip_message_markers(text))
         if self.commands.is_command(command_text):
             await self.commands.handle(event, command_text)
@@ -1109,7 +1138,7 @@ class Bot:
                     "role": "user",
                     "content": f"任务：{task.message}。只输出要发送的那一句话。",
                 },
-            ])
+            ], purpose="task_generate", conversation_id=target_conversation)
         except LLMError as exc:
             log.warning("task #%s generation failed: %s", task.id, exc)
             return task.message
@@ -1125,7 +1154,15 @@ class Bot:
         if self.config.tasks.max_tasks and store.count() >= self.config.tasks.max_tasks:
             raise ValueError(f"任务数已达上限（{self.config.tasks.max_tasks}）")
         now = datetime.now(TASK_TZ)
-        spec, _ = await parse_task(self.client, description, now)
+        if event.message_type == "group" and event.group_id is not None:
+            origin_conversation = f"group:{event.group_id}"
+        elif event.message_type == "private":
+            origin_conversation = f"private:{event.user_id}"
+        else:
+            origin_conversation = ""
+        spec, _ = await parse_task(
+            self.client, description, now, conversation_id=origin_conversation
+        )
         # Parsing takes time; schedule from the moment the task is created.
         next_run = next_run_for(spec, datetime.now(TASK_TZ))
         if self.config.tasks.max_tasks and store.count() >= self.config.tasks.max_tasks:
@@ -1211,10 +1248,10 @@ class Bot:
                     "sticker #%s collected from group %s (%d bytes)",
                     record.id, event.group_id, record.size,
                 )
-                await self._tag_sticker(record)
+                await self._tag_sticker(record, f"group:{event.group_id}")
                 await asyncio.to_thread(store.evict, self.config.stickers.max_stored)
 
-    async def _tag_sticker(self, record: Any) -> None:
+    async def _tag_sticker(self, record: Any, conversation_id: str = "") -> None:
         """Ask the vision model for a description and a few emotion tags."""
         store = self.stickers
         if store is None:
@@ -1247,7 +1284,7 @@ class Bot:
                         {"type": "image_url", "image_url": {"url": uri}},
                     ],
                 },
-            ])
+            ], purpose="sticker_tag", conversation_id=conversation_id)
         except LLMError as exc:
             log.warning("sticker tagging failed: %s", exc)
             return
@@ -1703,7 +1740,9 @@ class Bot:
             if self.config.dsh.image_mode == "inline":
                 images = await self._image_urls(image_urls)
             else:
-                prepared = await self._prepare_images(image_urls)
+                prepared = await self._prepare_images(
+                    image_urls, conversation_id=conversation_id
+                )
                 prompt += self._image_hint(prepared)
         image_count = len(prepared) if prepared else len(images)
         await self.memory.add(conversation_id, "user", f"{event.sender_name}: {event.text}")
@@ -1713,10 +1752,13 @@ class Bot:
         )
         started = time.time()
         try:
-            reply = await asyncio.to_thread(dsh.run, session_id, prompt, images)
+            reply, events = await asyncio.to_thread(
+                self._dsh_turn, dsh, session_id, prompt, images
+            )
         except DSHError as exc:
             log.error("proactive DSH failed after %.1fs: %s", time.time() - started, exc)
             return
+        self._record_dsh_usage(conversation_id, session_id, "proactive", events)
         log.info("proactive DSH turn took %.1fs", time.time() - started)
         self._touch_session(conversation_id)
 
@@ -1816,6 +1858,88 @@ class Bot:
                 seen.add(url)
                 unique.append(url)
         return unique
+
+    def _usage_store(self) -> UsageStore | None:
+        store = getattr(self, "_usage", None)
+        if store is not None:
+            return store
+        try:
+            path = getattr(self, "_usage_path", "") or self.config.usage.database
+            retention = getattr(
+                self, "_usage_retention", self.config.usage.retention_days
+            )
+            store = UsageStore(path, retention_days=retention)
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("cannot open usage ledger: %s", exc)
+            return None
+        self._usage = store
+        return store
+
+    def _record_client_usage(
+        self,
+        purpose: str,
+        conversation_id: str,
+        usage: dict,
+        provider: str,
+        model: str,
+    ) -> None:
+        store = self._usage_store()
+        if store is not None:
+            store.record_client(
+                purpose, conversation_id, usage, provider=provider, model=model
+            )
+
+    def _record_dsh_usage(
+        self, conversation_id: str, session_id: str, purpose: str, events: list
+    ) -> None:
+        if not events:
+            return
+        store = self._usage_store()
+        if store is not None:
+            store.record_dsh(conversation_id, session_id, purpose, events)
+
+    @staticmethod
+    def _dsh_turn(dsh: Any, session_id: str, prompt: str, images: Any = ()) -> tuple[str, list]:
+        runner = getattr(dsh, "run_with_events", None)
+        if runner is not None:
+            return runner(session_id, prompt, images)
+        return dsh.run(session_id, prompt, images), []
+
+    def _log_chat_event(self, event: MessageEvent, text: str) -> None:
+        if event.message_type == "group" and event.group_id is not None:
+            conversation_id = f"group:{event.group_id}"
+            chat_id = event.group_id
+        elif event.message_type == "private":
+            conversation_id = f"private:{event.user_id}"
+            chat_id = event.user_id
+        else:
+            return
+        self._spawn(
+            self._record_chat_event(
+                conversation_id, event.message_type, chat_id, event, text
+            )
+        )
+
+    async def _record_chat_event(
+        self,
+        conversation_id: str,
+        chat_type: str,
+        chat_id: int,
+        event: MessageEvent,
+        text: str,
+    ) -> None:
+        try:
+            await self.memory.add_event(
+                conversation_id,
+                chat_type,
+                chat_id,
+                event.user_id,
+                event.sender_name,
+                text,
+                created_at=int(time.time()),
+            )
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("cannot record chat event: %s", exc)
 
     def _session_for(self, conversation_id: str, *, is_group: bool) -> tuple[str, bool]:
         store = getattr(self, "sessions", None)
@@ -1955,7 +2079,14 @@ class Bot:
             log.warning("image download failed: %s", exc)
             return None
 
-    async def _caption_image(self, stored: StoredImage, data: bytes, mime: str) -> str:
+    async def _caption_image(
+        self,
+        stored: StoredImage,
+        data: bytes,
+        mime: str,
+        *,
+        conversation_id: str = "",
+    ) -> str:
         """Return a cached one-off description, generating it on first sight."""
         cached = await self.memory.caption_get(stored.sha1)
         if cached:
@@ -1971,7 +2102,7 @@ class Bot:
                         {"type": "image_url", "image_url": {"url": uri}},
                     ],
                 },
-            ])
+            ], purpose="image_caption", conversation_id=conversation_id)
         except LLMError as exc:
             log.warning("image caption failed: %s", exc)
             return ""
@@ -1988,7 +2119,11 @@ class Bot:
         return caption
 
     async def _prepare_images(
-        self, urls: list[str], *, limit: int = 4
+        self,
+        urls: list[str],
+        *,
+        limit: int = 4,
+        conversation_id: str = "",
     ) -> list[PreparedImage]:
         """Store each image once and return its path plus description."""
         prepared: list[PreparedImage] = []
@@ -2006,7 +2141,9 @@ class Bot:
                 continue
             description = ""
             if self.config.dsh.image_caption:
-                description = await self._caption_image(stored, data, mime)
+                description = await self._caption_image(
+                    stored, data, mime, conversation_id=conversation_id
+                )
             prepared.append(PreparedImage(
                 sha1=stored.sha1,
                 relative=stored.relative,
@@ -2082,7 +2219,7 @@ class Bot:
                             {"type": "image_url", "image_url": {"url": uri}},
                         ],
                     },
-                ])
+                ], purpose="image_caption")
             except LLMError as exc:
                 log.warning("image caption failed: %s", exc)
                 continue
@@ -2124,7 +2261,9 @@ class Bot:
             if self.config.dsh.image_mode == "inline":
                 images = await self._image_urls(image_urls)
             else:
-                prepared = await self._prepare_images(image_urls)
+                prepared = await self._prepare_images(
+                    image_urls, conversation_id=conversation_id
+                )
                 prompt += self._image_hint(prepared)
         image_count = len(prepared) if prepared else len(images)
 
@@ -2136,12 +2275,15 @@ class Bot:
         )
         started = time.time()
         try:
-            reply = await asyncio.to_thread(dsh.run, session_id, prompt, images)
+            reply, events = await asyncio.to_thread(
+                self._dsh_turn, dsh, session_id, prompt, images
+            )
         except DSHError as exc:
             log.error("DSH failed after %.1fs: %s", time.time() - started, exc)
             if self.config.bot.notify_errors:
                 await self._send(event, self.config.bot.error_message)
             return
+        self._record_dsh_usage(conversation_id, session_id, "chat", events)
         elapsed = time.time() - started
         self._touch_session(conversation_id)
         log.info("DSH turn took %.1fs (images=%d, prompt=%d chars)", elapsed, image_count, len(prompt))
@@ -2207,7 +2349,9 @@ class Bot:
 
         started = time.time()
         try:
-            reply = await self.client.chat(messages)
+            reply = await self.client.chat(
+                messages, purpose="chat", conversation_id=conversation_id
+            )
         except LLMError as exc:
             log.error("LLM failed after %.1fs: %s", time.time() - started, exc)
             if self.config.bot.notify_errors:
@@ -2337,7 +2481,10 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
         cards.close()
         return None
 
-    memory = Memory(config.paths.database)
+    memory = Memory(
+        config.paths.database,
+        event_retention_days=config.usage.event_retention_days,
+    )
     client = make_llm_client(config, record)
     dsh_client = make_dsh_client(config, record) if config.dsh.enabled else None
     conversations = ConversationStore(config.paths.profile_db) if dsh_client is not None else None
@@ -2364,8 +2511,23 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
     except (OSError, sqlite3.Error) as exc:
         log.error("cannot open the feed store: %s", exc)
         feeds = None
+    usage: UsageStore | None
+    try:
+        usage = UsageStore(
+            config.usage.database, retention_days=config.usage.retention_days
+        )
+        processed = usage.backfill_dsh(Path(config.dsh.home) / "sessions")
+        if processed:
+            log.info(
+                "usage ledger backfilled from %d DSH usage event(s)", processed
+            )
+    except (OSError, sqlite3.Error) as exc:
+        log.warning("cannot initialize usage ledger: %s", exc)
+        usage = None
+
     bot = Bot(
-        config, cards, memory, client, dsh_client, conversations, stickers, tasks, feeds
+        config, cards, memory, client, dsh_client, conversations, stickers, tasks,
+        feeds, usage,
     )
     if not bot.refresh_card(force=True):
         log.error("cannot load the active character card")

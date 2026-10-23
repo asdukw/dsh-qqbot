@@ -215,6 +215,13 @@ CREATE TABLE group_facts (
 - `/reset`（管理员，`/new` 同义）强制新 generation；`memory.db` 的 FTS recall 按 `conversation_id` 保留，轮换不影响长期记忆。
 - 压缩仍保持 80% 兜底；先靠轮换降低历史重放，等 token 账本上线后再决定是否把阈值降到约 20%。
 
+## Token 审计与群聊统计
+
+- `usage.db` 的 `usage_events` 统一记录非缓存输入、缓存输入和输出。DSH 侧由 `DSHClient.run_with_events()` 返回本轮 events，`UsageStore.record_dsh()` 解析 `assistant/message` 和 `compaction/summary` 的 usage；thin client 侧由 `LLMClient.usage_sink` 上报图片描述、表情打标、任务解析/文案等调用。
+- 启动时 `UsageStore.backfill_dsh()` 从现有 DSH JSONL 回填历史 usage，按 session/seq 幂等去重；旧数据也能进入面板。
+- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息（发送者、文本、时间），供「今日发言排行」和「今日词云」使用；词云优先用 jieba，缺失时回退正则。
+- Admin UI 的 `/api/usage` 支持 `days` 和 `conversation`（群/好友）筛选，`/api/fun` 返回当天的排行、词云和会话列表。
+
 ## 上下文与压缩
 
 - 上下文长度来自模型注册表的 `context_window`（付费 Flash 1M，free 200k），经渲染后成为 DSH route 的 `contextWindow`。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。

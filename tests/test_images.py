@@ -30,7 +30,7 @@ class FakeClient:
         self.config = SimpleNamespace(model="fake-vision")
         self.calls: list[list[dict]] = []
 
-    async def chat(self, messages):
+    async def chat(self, messages, **kwargs):
         self.calls.append(messages)
         return self.reply
 
