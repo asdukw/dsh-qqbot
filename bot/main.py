@@ -31,6 +31,7 @@ from memory import Memory
 from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
 from onebot import EMPTY_REPLY, MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
+from schedule import extract_schedule, render_schedule
 from stickers import (
     StickerError,
     StickerStore,
@@ -392,7 +393,9 @@ def build_dsh_system_prompt(card) -> str:
         prompt
         + "\n\n[设定资料]\n角色设定资料保存在 memory/lore.md；需要时用 grep/read 查阅。"
         + "\n\n[上下文说明]\n每一轮消息开头会给出当前时间、会话和发言者；时间和说话人以那一行为准。"
-        + "\n\n[联网与赛程]\n有时效性的问题（赛事赛程、新闻、版本改动等）先用 web_search；需要网页正文再用 web_fetch。回答赛程/日程时按北京时间输出结构化列表：阶段 / 日期时间 / 对阵 / 赛制（BO几），不要附来源链接；其他话题不受此限制。"
+        + "\n\n[联网与赛程]\n有时效性的问题（赛事赛程、新闻、版本改动等）先用 web_search；需要网页正文再用 web_fetch。回答赛程/日程时不要写散文，改为只输出一个 ```schedule 代码块，内容是 JSON："
+          '{"event":"赛事名","matches":[{"stage":"瑞士轮","start_time":"2026-10-24T01:00:00+08:00","team_a":"GEN","team_b":"IG","best_of":1}]}'
+          "。start_time 用 ISO 8601 带时区（北京时间用 +08:00），best_of 可省略；不要附来源链接，代码块外最多一句话。其他话题不受此限制。"
     )
 
 
@@ -727,6 +730,10 @@ class Bot:
         self, event: MessageEvent, conversation_id: str, reply: str
     ) -> None:
         """Send the visible text, then an optional trailing sticker."""
+        outer, schedule = extract_schedule(reply)
+        if schedule is not None:
+            rendered = render_schedule(schedule)
+            reply = f"{outer}\n\n{rendered}".strip() if outer else rendered
         visible, hint = extract_sticker_marker(reply)
         for chunk in split_text(visible, self.config.bot.max_reply_chars):
             await self._send(event, chunk)

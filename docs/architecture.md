@@ -179,6 +179,12 @@ CREATE TABLE group_facts (
 - 图片输入走 DSH 官方 content block（ACP 形状 `{"type":"image","data":<base64>,"mimeType":...}`），不再先转文字描述；只有 thin client 路径和打标用 `image_url`。
 - 表里的 `status='banned'` 不会进入候选；`uses` / `last_used` 记录发送情况。
 
+## 赛程输出（`bot/schedule.py`）
+
+- 系统提示词要求模型把赛程问题写成 ```schedule 代码块，内容为 `{event, matches[{stage, start_time, team_a, team_b, best_of, note}]}`。
+- `extract_schedule()` 从回复里取出代码块，用 Pydantic 校验：`start_time` 必须是可解析时间（无时区按 +08:00 处理），队名不能为空，`best_of` 限定 1–9；按时间排序。
+- 校验通过后由 `render_schedule()` 渲染固定格式（北京时间、无来源链接），代码块本身不会出现在聊天里；校验失败的块会被剥掉并提示重试，不会泄露原始 JSON。
+
 ## 上下文与压缩
 
 - 上下文长度来自模型注册表的 `context_window`（付费 Flash 1M，free 200k），经渲染后成为 DSH route 的 `contextWindow`。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。
