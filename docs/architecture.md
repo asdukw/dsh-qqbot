@@ -229,6 +229,7 @@ auto: true
 
 - 有效阈值 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`；1M 窗口约 800k，200k 窗口约 160k。
 - 超过阈值时，较旧历史被总结成摘要，保留最近约 16% 的上下文；完整 session 仍以 JSONL 持久化。
+- 工具结果裁剪：官方 `compaction-tool-result-pruner` 已挂载（`thresholdChars: 8192` / `headChars: 4096` / `tailChars: 1024`）。`compaction-basic` 在压力压缩或 context overflow 时调用它，保留工具结果的头部和尾部、中间替换为 marker；该过程不额外调用模型。
 - 激活模型的 `max_output_tokens`（默认 2048）限制单次输出，也作为压缩时的输出预留。
 - `DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
 

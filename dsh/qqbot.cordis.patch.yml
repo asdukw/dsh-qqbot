@@ -56,6 +56,15 @@
 
 # ── search + observation policy + model routes + profile ────────
 - insert:
+    # Official model-free pruner: compaction-basic calls it at pressure or
+    # context overflow, replacing an oversized tool result's middle with a
+    # marker while keeping the head and tail.
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
     - id: fs-observation-policy
       name: '@deepseek-ai/dsh-fs-observation-policy'
     - id: tool-fs-search
