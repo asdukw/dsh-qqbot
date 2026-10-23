@@ -22,10 +22,17 @@ STEPFUN_INSTRUCTION_MODELS = ("stepaudio-2.5-tts", "stepaudio-3-tts")
 MAX_CHARS = 80
 
 _VOICE_RE = re.compile(r"\[语音\]")
+_STAGE_RE = re.compile(r"\*[^*]*\*|（[^）]*）|\([^)]*\)")
 
 
 class VoiceError(RuntimeError):
     pass
+
+
+def spoken_text(text: str) -> str:
+    """Drop stage directions (*...*, （...）) before reading text aloud."""
+    cleaned = _STAGE_RE.sub(" ", text or "")
+    return " ".join(cleaned.split())
 
 
 def extract_voice_marker(text: str) -> tuple[str, bool]:

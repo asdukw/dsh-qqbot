@@ -69,6 +69,7 @@ from voice import (
     synthesize,
     synthesize_fish,
     synthesize_stepfun,
+    spoken_text,
 )
 from stickers import (
     StickerError,
@@ -905,8 +906,10 @@ class Bot:
         if not self.config.voice.enabled:
             return ""
         return (
-            chr(10) + "（想用语音说时，在回复最后单独一行写 [语音]；"
-            f"内容不超过 {self.config.voice.max_chars} 字，超长会退回文字。）"
+            chr(10) + "（对方明确要求发语音/听语音/用语音说时，你必须使用 [语音]："
+            "在回复最后单独一行写 [语音]，并把要说的正文控制在 "
+            f"{self.config.voice.max_chars} 字以内；括号里的动作描写不会被读出来。"
+            "其他时候想用语音也可以用。）"
         )
 
     def _task_hint(self, event: MessageEvent) -> str:
@@ -1247,13 +1250,19 @@ class Bot:
     async def _send_voice(self, event: MessageEvent, text: str) -> bool:
         config = self.config.voice
         if not config.enabled:
+            log.info("voice skipped: disabled")
             return False
         text = " ".join(text.split())
-        if not text or len(text) > config.max_chars:
+        if not text:
+            log.info("voice skipped: empty spoken text")
+            return False
+        if len(text) > config.max_chars:
+            log.info("voice skipped: spoken text %d > %d chars", len(text), config.max_chars)
             return False
         key = event.group_id if event.group_id is not None else event.user_id
         now = time.time()
         if now - self._voice_last.get(key, 0.0) < config.cooldown_seconds:
+            log.info("voice skipped: cooldown (%ss)", config.cooldown_seconds)
             return False
         try:
             if config.provider == "fish":
@@ -1395,10 +1404,14 @@ class Bot:
         reply, meme_text = extract_meme_marker(reply)
         reply, wants_voice = extract_voice_marker(reply)
         visible, hint = extract_sticker_marker(reply)
-        if not wants_voice and proactive and self._voice_roll(visible):
+        spoken = spoken_text(visible)
+        if wants_voice:
+            log.info("voice marker found (spoken=%d chars)", len(spoken))
+        if not wants_voice and proactive and self._voice_roll(spoken):
             wants_voice = True
+            log.info("voice roll hit for a proactive reply")
         voice_sent = (
-            await self._send_voice(event, visible) if wants_voice and visible else False
+            await self._send_voice(event, spoken) if wants_voice and spoken else False
         )
         if not voice_sent:
             for chunk in split_text(visible, self.config.bot.max_reply_chars):

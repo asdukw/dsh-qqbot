@@ -19,6 +19,7 @@ from voice import (  # noqa: E402
     synthesize,
     synthesize_fish,
     synthesize_stepfun,
+    spoken_text,
 )
 
 
@@ -27,6 +28,17 @@ class VoiceMarkerTests(unittest.TestCase):
         self.assertEqual(extract_voice_marker("好呀\n[语音]"), ("好呀", True))
         self.assertEqual(extract_voice_marker("普通回复"), ("普通回复", False))
         self.assertEqual(extract_voice_marker("[语音]"), ("", True))
+
+
+class SpokenTextTests(unittest.TestCase):
+    def test_stage_directions_are_removed(self) -> None:
+        self.assertEqual(
+            spoken_text("哼，才没有！*（脸红）* 真的（小声）"),
+            "哼，才没有！ 真的",
+        )
+
+    def test_plain_text_is_unchanged(self) -> None:
+        self.assertEqual(spoken_text("晚安呀"), "晚安呀")
 
 
 class SynthesizeTests(unittest.TestCase):
