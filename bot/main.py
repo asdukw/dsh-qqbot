@@ -29,7 +29,7 @@ from group_context import GroupContextBuffer, format_group_turn, format_proactiv
 from llm import LLMClient, LLMConfig, LLMError
 from memory import Memory
 from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
-from onebot import MessageEvent, OneBotError, OneBotWSClient
+from onebot import EMPTY_REPLY, MessageEvent, OneBotError, OneBotWSClient
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
 from stickers import (
     StickerError,
@@ -520,6 +520,14 @@ class Bot:
 
         if event.message_type == "group":
             if event.group_id is None:
+                return
+            if (
+                event.text == EMPTY_REPLY
+                and event.reply_to is not None
+                and event.reply_to not in self._own_messages.get(event.group_id, ())
+            ):
+                # A quote with no text only addresses the bot when it quotes
+                # the bot; otherwise it is background chatter.
                 return
             if event.stickers:
                 self._spawn(self._collect_stickers(event))

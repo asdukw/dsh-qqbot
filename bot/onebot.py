@@ -59,6 +59,9 @@ def _is_sticker_segment(data: dict[str, Any]) -> bool:
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,([^\]]*)\]")
 _MAX_IMAGES = 4
 
+EMPTY_MENTION = "[空艾特]"
+EMPTY_REPLY = "[空引用]"
+
 
 class MessageParser:
     """Turn OneBot message events into MessageEvent, with id dedup."""
@@ -88,10 +91,14 @@ class MessageParser:
                 event.get("message")
             )
             if not text and not images:
-                if not at_me:
+                # Bare mentions/quotes carry no text of their own; keep them
+                # with an explicit marker so the turn is never a blank line.
+                if at_me:
+                    text = EMPTY_MENTION
+                elif reply_to is not None:
+                    text = EMPTY_REPLY
+                else:
                     return None
-                # A bare @bot carries no text; keep it so the bot can answer.
-                text = "[空艾特]"
             raw_sender = event.get("sender")
             sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
             sender_name = str(sender.get("card") or sender.get("nickname") or user_id)

@@ -75,6 +75,13 @@ class MessageParserTests(unittest.TestCase):
     def test_empty_message_without_at_is_dropped(self) -> None:
         self.assertIsNone(self.parser.parse(event([])))
 
+    def test_bare_quote_still_produces_an_event(self) -> None:
+        parsed = self.parser.parse(event([{"type": "reply", "data": {"id": "555"}}]))
+        assert parsed is not None
+        self.assertEqual(parsed.text, "[空引用]")
+        self.assertEqual(parsed.reply_to, 555)
+        self.assertFalse(parsed.at_me)
+
     def test_plain_message_has_no_reply_target(self) -> None:
         parsed = self.parser.parse(event("随便聊聊"))
         assert parsed is not None
