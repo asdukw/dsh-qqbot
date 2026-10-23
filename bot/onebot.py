@@ -88,7 +88,10 @@ class MessageParser:
                 event.get("message")
             )
             if not text and not images:
-                return None
+                if not at_me:
+                    return None
+                # A bare @bot carries no text; keep it so the bot can answer.
+                text = "[空艾特]"
             raw_sender = event.get("sender")
             sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
             sender_name = str(sender.get("card") or sender.get("nickname") or user_id)
