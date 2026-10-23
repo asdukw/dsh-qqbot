@@ -37,8 +37,8 @@ class ModelRegistryTests(unittest.TestCase):
         keys = [record.key for record in self.registry.list()]
         self.assertIn("opencode-go/deepseek-v4.1-flash", keys)
         self.assertEqual(
-            sorted(key for key in keys if key.startswith("opencode-go/")),
-            ["opencode-go/beam-free", "opencode-go/deepseek-v4.1-flash"],
+            [key for key in keys if key.startswith("opencode-go/")],
+            ["opencode-go/deepseek-v4.1-flash"],
         )
         self.registry.upsert("opencode-go", "deepseek-v4.1-flash", {"context_window": "123"})
         self.reopen()
@@ -54,9 +54,6 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(paid.reasoning_effort, "low")
         self.assertEqual(paid.effective_effort, "low")
         self.assertEqual(paid.max_output_tokens, 2048)
-        beam = self.registry.get("opencode-go", "beam-free")
-        assert beam is not None
-        self.assertEqual(beam.context_window, 1_048_576)
 
     def test_exactly_one_active_model(self) -> None:
         active = self.registry.active()

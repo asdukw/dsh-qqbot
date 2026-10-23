@@ -72,16 +72,10 @@ DEFAULTS: list[dict[str, Any]] = [
         "api_key_env": "OPENCODE_API_KEY", "context_window": 1_000_000,
         "max_output_tokens": 2048, "reasoning_effort": "low", "capabilities": _EFFORTS,
     },
-    {
-        "provider": "opencode-go", "model_id": "beam-free",
-        "display_name": "Beam Free",
-        "base_url": "https://opencode.ai/zen/go/v1",
-        "api_key_env": "OPENCODE_API_KEY", "context_window": 1_048_576,
-        "max_output_tokens": 8192, "capabilities": _EFFORTS,
-    },
-    # Only the paid Flash and Beam Free are seeded. The Flash free tier only
-    # works inside the OpenCode client (403 FreeTierError elsewhere), and local
-    # test routes such as the fake model are registered ad hoc with --set-model.
+    # Only the paid Flash is seeded. The Flash free tier only works inside the
+    # OpenCode client (403 FreeTierError elsewhere), beam-free is geo-blocked
+    # from cn-hangzhou (403 RegionError), and local test routes such as the fake
+    # model are registered ad hoc with --set-model.
 ]
 
 # Fields --set-model may change, with their parsers.
