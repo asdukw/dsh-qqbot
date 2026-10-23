@@ -62,7 +62,13 @@ from meme import (
     extract_meme_marker,
     render_meme,
 )
-from voice import VoiceError, extract_voice_marker, synthesize
+from voice import (
+    VoiceError,
+    extract_voice_marker,
+    synthesize,
+    synthesize_fish,
+    synthesize_stepfun,
+)
 from stickers import (
     StickerError,
     StickerStore,
@@ -195,10 +201,20 @@ class MemeSection:
 
 @dataclass
 class VoiceSection:
-    # edge-tts voice replies; the model asks with a trailing "[语音]".
+    # TTS voice replies; the model asks with a trailing "[语音]".
+    # provider=edge uses `voice` as an edge-tts name; provider=fish uses it as
+    # the Fish Audio reference_id (see /model on api.fish.audio).
     enabled: bool = True
+    provider: str = "edge"
     voice: str = "zh-CN-XiaoxiaoNeural"
     rate: str = "+0%"
+    # fish (s2.1-pro-free) and stepfun (stepaudio-2.5-tts) read `voice` as
+    # their own reference id / voice id.
+    model: str = "stepaudio-2.5-tts"
+    api_key_env: str = "STEPFUN_API_KEY"
+    base_url: str = "https://api.stepfun.com"
+    instruction: str = ""
+    speed: float = 1.0
     max_chars: int = 80
     cooldown_seconds: int = 30
 
@@ -363,8 +379,14 @@ def load_config(path: str | Path) -> AppConfig:
     voice_raw = _section(table, "voice")
     voice = VoiceSection(
         enabled=bool(voice_raw.get("enabled", True)),
+        provider=str(voice_raw.get("provider", "edge")).lower(),
         voice=str(voice_raw.get("voice", "zh-CN-XiaoxiaoNeural")),
         rate=str(voice_raw.get("rate", "+0%")),
+        model=str(voice_raw.get("model", "stepaudio-2.5-tts")),
+        api_key_env=str(voice_raw.get("api_key_env", "STEPFUN_API_KEY")),
+        base_url=str(voice_raw.get("base_url", "https://api.stepfun.com")),
+        instruction=str(voice_raw.get("instruction", "")),
+        speed=float(voice_raw.get("speed", 1.0)),
         max_chars=max(10, int(voice_raw.get("max_chars", 80))),
         cooldown_seconds=max(0, int(voice_raw.get("cooldown_seconds", 30))),
     )
@@ -1230,7 +1252,26 @@ class Bot:
         if now - self._voice_last.get(key, 0.0) < config.cooldown_seconds:
             return False
         try:
-            audio = await synthesize(text, voice=config.voice, rate=config.rate)
+            if config.provider == "fish":
+                audio = await synthesize_fish(
+                    text,
+                    reference_id=config.voice,
+                    model=config.model,
+                    api_key_env=config.api_key_env,
+                    base_url=config.base_url,
+                )
+            elif config.provider == "stepfun":
+                audio = await synthesize_stepfun(
+                    text,
+                    voice=config.voice,
+                    model=config.model,
+                    api_key_env=config.api_key_env,
+                    base_url=config.base_url,
+                    instruction=config.instruction,
+                    speed=config.speed,
+                )
+            else:
+                audio = await synthesize(text, voice=config.voice, rate=config.rate)
         except VoiceError as exc:
             log.warning("voice synthesis failed: %s", exc)
             return False

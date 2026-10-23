@@ -22,6 +22,8 @@ KEY_VARS = (
     "DASHSCOPE_API_KEY",
     "MOONSHOT_API_KEY",
     "ZHIPU_API_KEY",
+    "FISH_API_KEY",
+    "STEPFUN_API_KEY",
 )
 
 values: dict[str, str] = {}

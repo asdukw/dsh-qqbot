@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 import unittest
@@ -11,7 +12,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
 import main  # noqa: E402
 from main import AppConfig, Bot  # noqa: E402
-from voice import MAX_CHARS, extract_voice_marker, synthesize  # noqa: E402
+from voice import (  # noqa: E402
+    MAX_CHARS,
+    VoiceError,
+    extract_voice_marker,
+    synthesize,
+    synthesize_fish,
+    synthesize_stepfun,
+)
 
 
 class VoiceMarkerTests(unittest.TestCase):
@@ -49,6 +57,115 @@ class SynthesizeTests(unittest.TestCase):
                 sys.modules.pop("edge_tts", None)
             else:
                 sys.modules["edge_tts"] = original
+
+
+class FishSynthTests(unittest.TestCase):
+    def test_missing_key_raises(self) -> None:
+        with self.assertRaises(VoiceError):
+            asyncio.run(
+                synthesize_fish("你好", reference_id="rid", api_key_env="MISSING_FISH_KEY")
+            )
+
+    def test_posts_expected_payload(self) -> None:
+        import voice
+
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured["headers"] = kwargs.get("headers")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, path, json):
+                captured["path"] = path
+                captured["json"] = json
+                return SimpleNamespace(status_code=200, content=b"mp3", text="")
+
+        original = voice.httpx.AsyncClient
+        original_env = os.environ.get("TEST_FISH_KEY")
+        os.environ["TEST_FISH_KEY"] = "secret"
+        voice.httpx.AsyncClient = FakeClient
+        try:
+            data = asyncio.run(
+                synthesize_fish(
+                    "你好呀",
+                    reference_id="rid",
+                    model="s2.1-pro-free",
+                    api_key_env="TEST_FISH_KEY",
+                )
+            )
+        finally:
+            voice.httpx.AsyncClient = original
+            if original_env is None:
+                os.environ.pop("TEST_FISH_KEY", None)
+            else:
+                os.environ["TEST_FISH_KEY"] = original_env
+        self.assertEqual(data, b"mp3")
+        self.assertEqual(captured["path"], "/v1/tts")
+        self.assertEqual(captured["json"]["reference_id"], "rid")
+        self.assertEqual(captured["json"]["format"], "mp3")
+        self.assertEqual(captured["headers"]["model"], "s2.1-pro-free")
+
+
+class StepFunSynthTests(unittest.TestCase):
+    def _run(self, **kwargs):
+        import voice
+
+        captured = {}
+        original = voice.httpx.AsyncClient
+
+        class Bound:
+            def __init__(inner, **kw):
+                captured["headers"] = kw.get("headers")
+
+            async def __aenter__(inner):
+                return inner
+
+            async def __aexit__(inner, *args):
+                return False
+
+            async def post(inner, path, json):
+                captured["path"] = path
+                captured["json"] = json
+                return SimpleNamespace(status_code=200, content=b"mp3", text="")
+
+        voice.httpx.AsyncClient = Bound
+        os.environ["TEST_STEPFUN_KEY"] = "secret"
+        try:
+            data = asyncio.run(
+                synthesize_stepfun(
+                    "你好呀",
+                    voice="ruanmengnvsheng",
+                    api_key_env="TEST_STEPFUN_KEY",
+                    **kwargs,
+                )
+            )
+        finally:
+            voice.httpx.AsyncClient = original
+            os.environ.pop("TEST_STEPFUN_KEY", None)
+        return data, captured
+
+    def test_instruction_is_sent_for_25_tts(self) -> None:
+        data, captured = self._run(model="stepaudio-2.5-tts", instruction="傲娇一点")
+        self.assertEqual(data, b"mp3")
+        self.assertEqual(captured["path"], "/v1/audio/speech")
+        self.assertEqual(captured["json"]["voice"], "ruanmengnvsheng")
+        self.assertEqual(captured["json"]["instruction"], "傲娇一点")
+
+    def test_instruction_is_omitted_for_mini(self) -> None:
+        _data, captured = self._run(model="step-tts-mini", instruction="傲娇一点")
+        self.assertNotIn("instruction", captured["json"])
+
+    def test_missing_key_raises(self) -> None:
+        with self.assertRaises(VoiceError):
+            asyncio.run(
+                synthesize_stepfun("你好", voice="x", api_key_env="MISSING_STEPFUN_KEY")
+            )
 
 
 class SendVoiceTests(unittest.TestCase):

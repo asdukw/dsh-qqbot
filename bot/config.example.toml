@@ -74,10 +74,21 @@ cooldown_seconds = 30
 directory = "/var/lib/qqbot/memes"
 
 [voice]
-# edge-tts voice replies; the model marks a short reply with "[语音]".
+# TTS voice replies; the model marks a short reply with "[语音]".
+# provider: edge (free) | stepfun (Chinese voices) | fish (unreachable here)
 enabled = true
+provider = "edge"
 voice = "zh-CN-XiaoxiaoNeural"
 rate = "+0%"
+# Provider-specific settings (voice is an edge name / StepFun voice id /
+# Fish reference_id). StepFun voices: ruanmengnvsheng, yuanqishaonv,
+# tianmeinvsheng, lengyanyujie, ...
+model = "stepaudio-2.5-tts"
+api_key_env = "STEPFUN_API_KEY"
+base_url = "https://api.stepfun.com"
+# Only stepaudio-2.5/3-tts read this; e.g. "傲娇、带点撒娇，语速稍快".
+instruction = ""
+speed = 1.0
 max_chars = 80
 cooldown_seconds = 30
 
