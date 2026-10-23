@@ -46,6 +46,12 @@ from tasks import (
     resolve_target,
     spec_of,
 )
+from meme import (
+    MemeError,
+    available as meme_available,
+    extract_meme_marker,
+    render_meme,
+)
 from voice import VoiceError, extract_voice_marker, synthesize
 from stickers import (
     StickerError,
@@ -158,6 +164,15 @@ class StickersSection:
 
 
 @dataclass
+class MemeSection:
+    # Text memes rendered onto a sticker (or a gradient card).
+    enabled: bool = True
+    max_chars: int = 24
+    cooldown_seconds: int = 30
+    directory: str = "/var/lib/qqbot/memes"
+
+
+@dataclass
 class VoiceSection:
     # edge-tts voice replies; the model asks with a trailing "[语音]".
     enabled: bool = True
@@ -187,6 +202,7 @@ class AppConfig:
     stickers: StickersSection = field(default_factory=StickersSection)
     tasks: TasksSection = field(default_factory=TasksSection)
     voice: VoiceSection = field(default_factory=VoiceSection)
+    meme: MemeSection = field(default_factory=MemeSection)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -304,6 +320,14 @@ def load_config(path: str | Path) -> AppConfig:
         max_sends_per_hour=max(0, int(stickers_raw.get("max_sends_per_hour", 10))),
     )
 
+    meme_raw = _section(table, "meme")
+    meme = MemeSection(
+        enabled=bool(meme_raw.get("enabled", True)),
+        max_chars=max(4, int(meme_raw.get("max_chars", 24))),
+        cooldown_seconds=max(0, int(meme_raw.get("cooldown_seconds", 30))),
+        directory=str(meme_raw.get("directory", "/var/lib/qqbot/memes")),
+    )
+
     voice_raw = _section(table, "voice")
     voice = VoiceSection(
         enabled=bool(voice_raw.get("enabled", True)),
@@ -347,6 +371,7 @@ def load_config(path: str | Path) -> AppConfig:
         stickers=stickers,
         tasks=tasks,
         voice=voice,
+        meme=meme,
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -545,6 +570,7 @@ class Bot:
         self._poke_cooldown = 8.0
         # Voice replies are rate limited per chat as well.
         self._voice_last: dict[int, float] = {}
+        self._meme_last: dict[int, float] = {}
         self._system_prompt = ""
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
@@ -772,6 +798,14 @@ class Bot:
             f"下次 {next_run.strftime('%m-%d %H:%M')}，内容：{record.message}）"
         )
         return f"{reply}\n{line}" if reply else line
+
+    def _meme_hint(self) -> str:
+        if not self.config.meme.enabled or not meme_available():
+            return ""
+        return (
+            chr(10) + "（想发梗图时，在回复最后单独一行写 "
+            f"[梗图: 不超过{self.config.meme.max_chars}字的文字]，会挑一张表情包当底图。）"
+        )
 
     def _voice_hint(self) -> str:
         if not self.config.voice.enabled:
@@ -1095,6 +1129,56 @@ class Bot:
         log.info("voice reply sent to %s (%d bytes)", key, len(audio))
         return True
 
+    async def _send_meme(self, event: MessageEvent, text: str) -> bool:
+        config = self.config.meme
+        if not config.enabled:
+            return False
+        text = " ".join(text.split())[: config.max_chars]
+        if not text:
+            return False
+        key = event.group_id if event.group_id is not None else event.user_id
+        now = time.time()
+        if now - self._meme_last.get(key, 0.0) < config.cooldown_seconds:
+            return False
+        base: str | None = None
+        base_record = None
+        if self.stickers is not None:
+            base_record = self.stickers.pick("")
+            base = base_record.path if base_record is not None else None
+        path = None
+        try:
+            path = await asyncio.to_thread(
+                render_meme,
+                text,
+                base_image=base,
+                output_dir=config.directory,
+            )
+            data = await asyncio.to_thread(Path(path).read_bytes)
+        except (MemeError, OSError) as exc:
+            log.warning("meme render failed: %s", exc)
+            if path is not None:
+                Path(path).unlink(missing_ok=True)
+            return False
+        file = "base64://" + base64.b64encode(data).decode("ascii")
+        try:
+            if event.message_type == "group" and event.group_id is not None:
+                sent = await self.onebot.send_group_image(event.group_id, file)
+                self._remember_own_message(
+                    event.group_id, int(sent.get("message_id") or 0)
+                )
+            else:
+                await self.onebot.send_private_image(event.user_id, file)
+        except (OneBotError, TypeError, ValueError) as exc:
+            log.error("failed to send meme: %s", exc)
+            return False
+        finally:
+            Path(path).unlink(missing_ok=True)
+        self._meme_last[key] = now
+        if base_record is not None and self.stickers is not None:
+            self.stickers.mark_used(base_record.id)
+        log.info("meme sent to %s: %s", key, text)
+        return True
+
     async def _recall_block(self, event: MessageEvent, text: str) -> str:
         """Related older messages from this conversation, for the prompt."""
         if len(text.strip()) < 3:
@@ -1127,6 +1211,7 @@ class Bot:
         reply, management = extract_task_management(reply)
         if management is not None:
             reply = await self._handle_task_management(event, reply, *management)
+        reply, meme_text = extract_meme_marker(reply)
         reply, wants_voice = extract_voice_marker(reply)
         visible, hint = extract_sticker_marker(reply)
         voice_sent = (
@@ -1136,7 +1221,10 @@ class Bot:
             for chunk in split_text(visible, self.config.bot.max_reply_chars):
                 await self._send(event, chunk)
                 await asyncio.sleep(0.35)
-        if hint is not None:
+        meme_sent = (
+            await self._send_meme(event, meme_text) if meme_text is not None else False
+        )
+        if hint is not None and not meme_sent:
             await self._send_sticker(event, hint)
 
     def _remember_own_message(self, group_id: int, message_id: int) -> None:
@@ -1175,7 +1263,8 @@ class Bot:
                 + body
                 + self._sticker_hint()
                 + self._task_hint(event)
-                + self._voice_hint(),
+                + self._voice_hint()
+                + self._meme_hint(),
                 len(lines),
             )
         return (
@@ -1184,7 +1273,8 @@ class Bot:
             + text
             + self._sticker_hint()
             + self._task_hint(event)
-            + self._voice_hint(),
+            + self._voice_hint()
+            + self._meme_hint(),
             0,
         )
 

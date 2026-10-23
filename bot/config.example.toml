@@ -55,6 +55,14 @@ max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
+[meme]
+# Text memes: the model marks a reply with "[梗图: 文字]"; a sticker is used as
+# the base image (or a gradient card when the library is empty).
+enabled = true
+max_chars = 24
+cooldown_seconds = 30
+directory = "/var/lib/qqbot/memes"
+
 [voice]
 # edge-tts voice replies; the model marks a short reply with "[语音]".
 enabled = true

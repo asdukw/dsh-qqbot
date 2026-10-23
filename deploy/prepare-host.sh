@@ -27,7 +27,7 @@ done
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq docker.io docker-compose-v2 python3-venv openssl curl ca-certificates
+apt-get install -y -qq docker.io docker-compose-v2 python3-venv openssl curl ca-certificates fonts-noto-cjk
 systemctl enable --now docker >/dev/null
 if ! docker compose version >/dev/null 2>&1; then
     echo "Docker Compose v2 is required (the 'docker compose' command)." >&2

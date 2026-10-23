@@ -179,6 +179,12 @@ CREATE TABLE group_facts (
 - 图片输入走 DSH 官方 content block（ACP 形状 `{"type":"image","data":<base64>,"mimeType":...}`），不再先转文字描述；只有 thin client 路径和打标用 `image_url`。
 - 表里的 `status='banned'` 不会进入候选；`uses` / `last_used` 记录发送情况。
 
+## 语音、梗图与记忆检索
+
+- 语音：`bot/voice.py` 调 edge-tts 生成 mp3，`record` 段以 base64 发送（NapCat 实测接受 mp3）；模型用 `[语音]` 标记，超长或合成失败退回文字，每会话 30 秒冷却。
+- 梗图：`bot/meme.py` 用 Pillow 把 `[梗图: 文字]` 画到一张收藏表情（或渐变底卡）上，再走图片消息发送；每会话 30 秒冷却。
+- 记忆：`memory.db` 增加 external-content FTS5（trigram，中文子串可用）和增删触发器；回复前用当前文本的 3-gram 检索同会话历史，取前 3 条注入 `[相关历史]`，短词回退 LIKE。
+
 ## 定时任务（`bot/tasks.py`）
 
 - 仅管理员：两条创建路径——直接说话（模型在回复里输出 `[定时: 原始描述]`）或 `/task add <自然语言>`。模型只在发言者被标注为“管理员”时收到这句提示；adapter 在 `_handle_task_request` 里再次校验 `is_admin`，非管理员的标记会被静默剥掉、不创建任务。
