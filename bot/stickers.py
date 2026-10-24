@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +125,42 @@ def sniff_mime(data: bytes) -> tuple[str, str]:
     return "", ""
 
 
+def dhash_hex(data: bytes, size: int = 8) -> str:
+    """64-bit difference hash of the first frame; "" when it cannot decode."""
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - Pillow ships with the bot
+        return ""
+    try:
+        with Image.open(BytesIO(data)) as opened:
+            opened.seek(0)
+            if opened.mode in ("RGBA", "LA", "P", "PA"):
+                rgba = opened.convert("RGBA")
+                image = Image.new("RGB", rgba.size, (255, 255, 255))
+                image.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                image = opened.convert("RGB")
+            gray = image.convert("L").resize(
+                (size + 1, size), Image.Resampling.LANCZOS
+            )
+            pixels = gray.tobytes()
+    except Exception:  # noqa: BLE001 - dedupe must not break collection
+        return ""
+    bits = 0
+    for row in range(size):
+        base = row * (size + 1)
+        for col in range(size):
+            bits = (bits << 1) | (pixels[base + col] > pixels[base + col + 1])
+    return f"{bits:0{size * size // 4}x}"
+
+
+def hamming_distance(left: str, right: str) -> int:
+    try:
+        return (int(left, 16) ^ int(right, 16)).bit_count()
+    except (TypeError, ValueError):
+        return 64
+
+
 async def download_image(url: str, max_bytes: int = MAX_BYTES) -> tuple[bytes, str]:
     """Fetch an image from http(s) or a data URI; return (bytes, mime)."""
     if url.startswith("data:"):
@@ -166,7 +203,8 @@ CREATE TABLE IF NOT EXISTS stickers (
     status      TEXT NOT NULL DEFAULT 'ok',
     uses        INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL,
-    last_used   INTEGER NOT NULL DEFAULT 0
+    last_used   INTEGER NOT NULL DEFAULT 0,
+    phash       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_stickers_created ON stickers (created_at);
 CREATE INDEX IF NOT EXISTS idx_stickers_status ON stickers (status);
@@ -188,6 +226,7 @@ class StickerRecord:
     uses: int
     created_at: int
     last_used: int
+    phash: str
 
 
 def _record(row: sqlite3.Row) -> StickerRecord:
@@ -214,25 +253,73 @@ def _record(row: sqlite3.Row) -> StickerRecord:
         uses=int(row["uses"] or 0),
         created_at=int(row["created_at"]),
         last_used=int(row["last_used"] or 0),
+        phash=str(row["phash"] or ""),
     )
 
 
 class StickerStore:
     """Files on disk plus one SQLite row per unique image."""
 
-    def __init__(self, database: str | Path, directory: str | Path):
+    def __init__(
+        self,
+        database: str | Path,
+        directory: str | Path,
+        *,
+        phash_distance: int = 4,
+    ):
         self.path = Path(database)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
+        self.phash_distance = max(0, min(64, int(phash_distance)))
+        self._phashes_ready = False
         self._lock = threading.Lock()
         self._db = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA)
+        columns = {
+            str(row["name"])
+            for row in self._db.execute("PRAGMA table_info(stickers)").fetchall()
+        }
+        if "phash" not in columns:
+            self._db.execute(
+                "ALTER TABLE stickers ADD COLUMN phash TEXT NOT NULL DEFAULT ''"
+            )
         self._db.commit()
 
     # --------------------------------------------------------------- reads
+
+    def backfill_phashes(self) -> int:
+        """Hash rows stored before perceptual dedupe existed (idempotent)."""
+        with self._lock:
+            if self._phashes_ready:
+                return 0
+            self._phashes_ready = True
+            rows = self._db.execute(
+                "SELECT id, path FROM stickers WHERE phash = ''"
+            ).fetchall()
+        updated = 0
+        for row in rows:
+            path = Path(row["path"]) if row["path"] else None
+            if path is None or not path.is_file():
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            phash = dhash_hex(data)
+            if not phash:
+                continue
+            with self._lock, self._db:
+                self._db.execute(
+                    "UPDATE stickers SET phash = ? WHERE id = ?",
+                    (phash, int(row["id"])),
+                )
+            updated += 1
+        if updated:
+            log.info("backfilled %d sticker perceptual hash(es)", updated)
+        return updated
 
     def count(self) -> int:
         with self._lock:
@@ -353,8 +440,6 @@ class StickerStore:
         if len(data) > max_bytes:
             raise StickerError(f"image too large ({len(data)} bytes > {max_bytes})")
         digest = hashlib.sha1(data).hexdigest()
-        # TODO: compare a perceptual hash (dHash) here as well, so re-encoded
-        # copies of the same picture dedupe instead of creating a second row.
         with self._lock:
             row = self._db.execute(
                 "SELECT * FROM stickers WHERE sha1 = ?", (digest,)
@@ -365,6 +450,30 @@ class StickerStore:
         sniffed, suffix = sniff_mime(data)
         if not suffix:
             raise StickerError("unsupported image format (want png/jpeg/gif/webp)")
+
+        phash = dhash_hex(data)
+        self.backfill_phashes()
+        if phash:
+            with self._lock:
+                candidates = self._db.execute(
+                    "SELECT id, phash FROM stickers WHERE phash != ''"
+                ).fetchall()
+            nearest: tuple[int, int] | None = None
+            for candidate in candidates:
+                distance = hamming_distance(phash, str(candidate["phash"]))
+                if distance <= self.phash_distance and (
+                    nearest is None or distance < nearest[0]
+                ):
+                    nearest = (distance, int(candidate["id"]))
+            if nearest is not None:
+                record = self.get(nearest[1])
+                if record is not None:
+                    log.info(
+                        "sticker near-duplicate of #%s (hamming=%d); reusing it",
+                        record.id,
+                        nearest[0],
+                    )
+                    return record, False
 
         target = self.directory / f"{digest}{suffix}"
         if not target.exists():
@@ -377,8 +486,8 @@ class StickerStore:
             self._db.execute(
                 """
                 INSERT INTO stickers
-                    (sha1, path, mime, size, source, source_kind, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (sha1, path, mime, size, source, source_kind, created_at, phash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sha1) DO NOTHING
                 """,
                 (
@@ -389,6 +498,7 @@ class StickerStore:
                     source[:200],
                     source_kind[:40],
                     now,
+                    phash,
                 ),
             )
             row = self._db.execute(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -10,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 from stickers import (  # noqa: E402
     StickerError,
     StickerStore,
+    dhash_hex,
     extract_sticker_marker,
+    hamming_distance,
     parse_tags,
     preview_jpeg,
     sniff_mime,
@@ -49,6 +52,65 @@ class PreviewTests(unittest.TestCase):
 
     def test_corrupt_bytes_return_none(self) -> None:
         self.assertIsNone(preview_jpeg(b"not an image"))
+
+
+def patterned_image(fmt: str = "PNG", **save: object) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (256, 256), (30, 120, 200))
+    ImageDraw.Draw(image).rectangle([64, 64, 192, 192], fill=(240, 40, 40))
+    out = BytesIO()
+    image.save(out, format=fmt, **save)
+    return out.getvalue()
+
+
+def striped_image(vertical: bool = True) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    image = Image.new("L", (256, 256), 0)
+    draw = ImageDraw.Draw(image)
+    for offset in range(0, 256, 32):
+        if vertical:
+            draw.rectangle([offset, 0, offset + 15, 255], fill=255)
+        else:
+            draw.rectangle([0, offset, 255, offset + 15], fill=255)
+    out = BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+class DHashTests(unittest.TestCase):
+    def test_hash_is_stable_and_64_bits(self) -> None:
+        data = patterned_image()
+        digest = dhash_hex(data)
+        self.assertEqual(len(digest), 16)
+        self.assertEqual(digest, dhash_hex(data))
+        self.assertEqual(hamming_distance(digest, digest), 0)
+
+    def test_reencoded_image_is_close(self) -> None:
+        self.assertLessEqual(
+            hamming_distance(
+                dhash_hex(patterned_image()),
+                dhash_hex(patterned_image("JPEG", quality=50)),
+            ),
+            4,
+        )
+
+    def test_different_structures_are_far(self) -> None:
+        self.assertGreater(
+            hamming_distance(
+                dhash_hex(striped_image(vertical=True)),
+                dhash_hex(striped_image(vertical=False)),
+            ),
+            4,
+        )
+
+    def test_corrupt_bytes_return_empty(self) -> None:
+        self.assertEqual(dhash_hex(b"not an image"), "")
 
 
 class MarkerTests(unittest.TestCase):
@@ -106,6 +168,40 @@ class StickerStoreTests(unittest.TestCase):
         self.assertFalse(created_again)
         self.assertEqual(again.id, record.id)
         self.assertEqual(self.store.count(), 1)
+
+    def test_near_duplicate_reencoded_image_is_merged(self) -> None:
+        png = patterned_image()
+        jpg = patterned_image("JPEG", quality=50)
+        first, created = self.store.add_bytes(png)
+        self.assertTrue(created)
+        self.assertEqual(len(first.phash), 16)
+        second, created_again = self.store.add_bytes(jpg)
+        self.assertFalse(created_again)
+        self.assertEqual(second.id, first.id)
+        self.assertEqual(self.store.count(), 1)
+
+    def test_different_images_are_kept(self) -> None:
+        first, created = self.store.add_bytes(striped_image(vertical=True))
+        self.assertTrue(created)
+        second, created_again = self.store.add_bytes(striped_image(vertical=False))
+        self.assertTrue(created_again)
+        self.assertNotEqual(second.id, first.id)
+        self.assertEqual(self.store.count(), 2)
+
+    def test_backfill_hashes_existing_rows(self) -> None:
+        png = patterned_image()
+        jpg = patterned_image("JPEG", quality=50)
+        first, created = self.store.add_bytes(png)
+        self.assertTrue(created)
+        conn = sqlite3.connect(self.store.path)
+        conn.execute("UPDATE stickers SET phash = '' WHERE id = ?", (first.id,))
+        conn.commit()
+        conn.close()
+        self.store.close()
+        self.store = StickerStore(self.store.path, self.store.directory)
+        second, created_again = self.store.add_bytes(jpg)
+        self.assertFalse(created_again)
+        self.assertEqual(second.id, first.id)
 
     def test_rejects_unknown_and_oversized(self) -> None:
         with self.assertRaises(StickerError):

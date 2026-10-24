@@ -222,6 +222,8 @@ class StickersSection:
     max_bytes: int = 8 * 1024 * 1024
     # Oldest/least-used stickers are dropped beyond this many.
     max_stored: int = 500
+    # Hamming distance at which a 64-bit dHash counts as the same picture.
+    phash_distance: int = 4
     # Sending: the model asks with a trailing "[表情: ...]" line.
     send: bool = True
     send_cooldown_seconds: int = 60
@@ -440,6 +442,7 @@ def load_config(path: str | Path) -> AppConfig:
         max_per_hour=max(0, int(stickers_raw.get("max_per_hour", 20))),
         max_bytes=max(1024, int(stickers_raw.get("max_bytes", 8 * 1024 * 1024))),
         max_stored=max(0, int(stickers_raw.get("max_stored", 500))),
+        phash_distance=max(0, min(64, int(stickers_raw.get("phash_distance", 4)))),
         send=bool(stickers_raw.get("send", True)),
         send_cooldown_seconds=max(0, int(stickers_raw.get("send_cooldown_seconds", 60))),
         max_sends_per_hour=max(0, int(stickers_raw.get("max_sends_per_hour", 10))),
@@ -2618,7 +2621,11 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
         relations = None
     stickers: StickerStore | None
     try:
-        stickers = StickerStore(config.stickers.database, config.stickers.directory)
+        stickers = StickerStore(
+            config.stickers.database,
+            config.stickers.directory,
+            phash_distance=config.stickers.phash_distance,
+        )
         log.info("sticker library loaded: %d stored", stickers.count())
     except (OSError, sqlite3.Error) as exc:
         log.error("cannot open the sticker library: %s", exc)
