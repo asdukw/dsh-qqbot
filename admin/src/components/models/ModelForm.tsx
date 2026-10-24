@@ -68,7 +68,7 @@ export function ModelForm({
   });
   const [imageInput, setImageInput] = useState(false);
   const [extras, setExtras] = useState<Record<string, unknown>>({});
-  const [reasoningEffort, setReasoningEffort] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState("none");
   const [enabled, setEnabled] = useState(true);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [modelsBusy, setModelsBusy] = useState(false);
@@ -99,7 +99,7 @@ export function ModelForm({
           )
         )
       );
-      setReasoningEffort(model.reasoning_effort || "");
+      setReasoningEffort(model.reasoning_effort || "none");
       setEnabled(model.enabled);
     } else {
       setValues({
@@ -109,7 +109,7 @@ export function ModelForm({
       });
       setImageInput(false);
       setExtras({});
-      setReasoningEffort("");
+      setReasoningEffort("none");
       setEnabled(true);
     }
     // Initialize on open / target change, not on every background refresh.
@@ -202,7 +202,7 @@ export function ModelForm({
           : values.model_id.trim(),
       context_window: values.context_window.trim(),
       max_output_tokens: values.max_output_tokens.trim(),
-      reasoning_effort: reasoningEffort,
+      reasoning_effort: reasoningEffort === "none" ? "" : reasoningEffort,
       capabilities,
       enabled,
     });
@@ -350,10 +350,9 @@ export function ModelForm({
 
           <Field
             label="默认推理强度"
-            hint="发送给上游的 reasoning_effort；模型默认表示不发送。"
+            hint="发送给上游的 reasoning_effort；选 none 表示不发送这个参数。"
           >
             <Select value={reasoningEffort} onChange={setReasoningEffort}>
-              <option value="">模型默认（不发送）</option>
               {effortOptions.map((effort) => (
                 <option key={effort} value={effort}>
                   {effort}
