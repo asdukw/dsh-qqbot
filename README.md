@@ -276,7 +276,7 @@ DSH SDK 的 prompt 接口只有 session id 和消息内容，没有元数据字�
 | `provider` + `model_id` | 所属供应商，以及对应 DSH 的模型 id |
 | `display_name` | 展示名 |
 | `context_window` | 上下文长度，DSH 的 token meter 和压缩用它 |
-| `max_output_tokens` | 单次输出上限，直接作为请求的 `max_tokens` |
+| `max_output_tokens` | 单次输出上限；`0`（默认）表示不发送 `max_tokens`，使用提供商/模型默认 |
 | `reasoning_effort` | 推理强度，留空表示用模型自己的默认值 |
 | `capabilities` | JSON；`reasoning_efforts` 列出该模型接受的推理强度，`input` 声明图片输入 |
 | `enabled` | 是否参与渲染 |
@@ -286,7 +286,7 @@ Admin UI 的「模型」页按**供应商 → 模型**组织：先添加供应�
 
 首次启动写入默认供应商 `opencode-go` 和模型 `opencode-go/deepseek-v4.1-flash`（1M，默认激活）。默认数据只在首次初始化时写入，之后不会覆盖你的修改，删空模型也不会在下次重启时复活。旧版本的库会自动把每行重复的 `api` / `base_url` / `api_key_env` 拆分到 `providers`，并把旧的 `opencode/*` 默认行迁移到 `opencode-go/*`。
 
-启动时机器人读取激活行，把它的 `max_output_tokens` / `reasoning_effort` 作为请求参数，并把所有启用的供应商和模型渲染成 DSH `llm-pi-ai` 的 patch（`/var/lib/qqbot/dsh-state/models.patch.json`），通过 SDK 的 `patches` 传给 DSH。数据库里的密钥不会写进 patch：机器人启动 DSH runtime 前把它放进一个按供应商生成的 `QQBOT_PK_*` 环境变量，patch 只引用这个名字；DSH 的 credentials 层按请求解析 `apiKeyEnv`。`reasoning_effort` 必须出现在该行的 `capabilities.reasoning_efforts` 里，否则写入时直接拒绝。内置 provider（`opencode` / `opencode-go`）只覆盖 `apiKeyEnv`、`baseURL` 和模型参数，**不写 `api`**，以免替换 DSH 自带的 adapter 包装（OpenCode Go 依赖它加 `x-opencode-session`）。
+启动时机器人读取激活行，把它的 `max_output_tokens`（`0` 时省略）/ `reasoning_effort` 作为请求参数，并把所有启用的供应商和模型渲染成 DSH `llm-pi-ai` 的 patch（`/var/lib/qqbot/dsh-state/models.patch.json`），通过 SDK 的 `patches` 传给 DSH。数据库里的密钥不会写进 patch：机器人启动 DSH runtime 前把它放进一个按供应商生成的 `QQBOT_PK_*` 环境变量，patch 只引用这个名字；DSH 的 credentials 层按请求解析 `apiKeyEnv`。`reasoning_effort` 必须出现在该行的 `capabilities.reasoning_efforts` 里，否则写入时直接拒绝。内置 provider（`opencode` / `opencode-go`）只覆盖 `apiKeyEnv`、`baseURL` 和模型参数，**不写 `api`**，以免替换 DSH 自带的 adapter 包装（OpenCode Go 依赖它加 `x-opencode-session`）。
 
 ```bash
 M="sudo -u qqbot /opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/main.py"
@@ -316,10 +316,10 @@ retainRatio: 0.16          # 压缩后保留约 16% 的最近上下文
 auto: true
 ```
 
-- 实际触发点 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`。默认 `max_output_tokens = 2048` 时，1M 窗口下约为 800k，200k 窗口下约为 160k，都是 80%。
+- 实际触发点 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`。显式设置 `max_output_tokens` 时用它作为输出预留；默认 `0` 时交给 DSH/提供商默认。1M / 200k 窗口按 80% 阈值约为 800k / 160k。
 - 压缩会把较旧的历史总结成摘要，保留最近的上下文；完整 session 仍以 JSONL 存在 `/var/lib/qqbot/dsh-home/sessions`。
 - 摘要默认使用同一个 provider/model；需要的话可以在 `compaction-basic` 里用 `summarizationProvider` / `summarizationModel` 单独指定。
-- 激活模型的 `max_output_tokens` 是单次输出上限，也会影响压缩时的输出预留。
+- 非 0 的 `max_output_tokens` 是单次输出上限，也会影响压缩时的输出预留；`0` 表示使用提供商默认。
 
 ## 安全
 

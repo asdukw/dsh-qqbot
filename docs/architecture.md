@@ -159,7 +159,7 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 
 - SQLite `/var/lib/qqbot/models.db` 分两张表：
   - `providers`：主键 `provider`，字段 `display_name`、`api`、`base_url`、`api_key`、`enabled`、`created_at`、`updated_at`；一个供应商的模型共享这些连接信息。`api_key` 是面板里直接保存的密钥（DB 文件 0600）。旧记录仍保留一个内部 `api_key_env` 兼容字段，界面不再暴露，新供应商默认不依赖它。
-  - `models`：主键 `(provider, model_id)`，字段 `display_name`、`context_window`、`max_output_tokens`、`reasoning_effort`（默认空，表示模型默认值）、`capabilities`（JSON，含 `reasoning_efforts` / `input`）、`enabled`、`is_active`。
+  - `models`：主键 `(provider, model_id)`，字段 `display_name`、`context_window`、`max_output_tokens`（默认 0，表示不发送 `max_tokens`）、`reasoning_effort`（默认空，表示模型默认值）、`capabilities`（JSON，含 `reasoning_efforts` / `input`）、`enabled`、`is_active`。
 - `is_active` 上有部分唯一索引，保证全表最多一行激活；`use()` 在一个事务里切换。
 - 空库时写入默认供应商 `opencode-go` 和模型 `opencode-go/deepseek-v4.1-flash`（1M 激活）；`meta.seeded` 保证只 seed 一次，之后不覆盖用户修改，删空模型也不会重新写入。
 - 旧库迁移：`_migrate()` 补列、把旧的 `opencode/*` 默认行迁移到 `opencode-go/*`，并把每行重复的 `api` / `base_url` / `api_key_env` 拆分到 `providers`，然后重建 `models` 表（去掉旧的连接字段）。
@@ -167,7 +167,7 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 - 启动时：
   1. `load_active_model()` 读取激活行；
   2. 遍历启用的供应商及其启用的模型，渲染成 `llm-pi-ai` 的 `providers` 覆盖配置，写到 `/var/lib/qqbot/dsh-state/models.patch.json`；profile 里的 `llm-pi-ai` 只挂载 adapter，`providers` 为空。若供应商保存了 API Key，渲染时把它放进按供应商生成的 `QQBOT_PK_<slug>_<hash>` 环境变量，patch 的 `apiKeyEnv` 引用该变量（密钥不落 patch 文件）；DSH runtime 作为 Python 子进程启动，继承这个环境变量，再由 credentials 层按请求解析。内置 provider（`opencode` / `opencode-go`）只覆盖 `apiKeyEnv`、`baseURL` 和模型参数，**不写 `api`**——否则会替换掉 DSH 内置的 adapter 包装，丢掉 `x-opencode-session`；自定义 provider 仍写完整定义；
-  3. `make_dsh_client()` 用激活行的 `provider` / `model_id` / `max_output_tokens` / `reasoning_effort` 构造 `DeepSeekHarness`，并通过 `patches=` 传入上面的 patch；
+  3. `make_dsh_client()` 用激活行的 `provider` / `model_id` / `max_output_tokens`（0 时传 `None`，SDK 会省略该参数）/ `reasoning_effort` 构造 `DeepSeekHarness`，并通过 `patches=` 传入上面的 patch；
   4. 回退客户端（`[dsh] enabled = false`）同样从激活行（JOIN 供应商）取 `base_url`、key、`max_tokens`、`reasoning_effort`。
 - 管理入口：Admin UI 的「模型」页（`POST /api/models/*`，登录 + JSON + 同源）按供应商 → 模型两级管理，API Key 在表单里直接填写并存入 `providers.api_key`；CLI 保留 `--list-models`、`--use-model p/m`、`--set-model p/m field=value ...`。修改后机器人在下一轮消息自动热切换。
 
@@ -270,7 +270,7 @@ auto: true
 - 超过阈值时，较旧历史被总结成摘要，保留最近约 16% 的上下文；完整 session 仍以 JSONL 持久化。
 - 工具结果默认裁剪：官方 `spill-local` + `spill-policy` 已挂载（`maxInlineTokens: 3000`）。超过预算的工具结果会把完整文本写到 `/var/lib/qqbot/dsh-workspace/spill/`，模型只看到头尾预览和 notice 里的 `read`/`grep` 路径；`read` 自身不会再被 spill，避免循环。文件默认保留 14 天。
 - 二级兜底：官方 `compaction-tool-result-pruner`（`thresholdChars: 8192` / `headChars: 4096` / `tailChars: 1024`）在 `compaction-basic` 压力压缩或 context overflow 时继续裁剪中间段；该过程不额外调用模型。
-- 激活模型的 `max_output_tokens`（默认 2048）限制单次输出，也作为压缩时的输出预留。
+- 激活模型的 `max_output_tokens` 默认为 0：不发送 `max_tokens`，由提供商/模型决定单次输出上限；非 0 时限制单次输出并作为压缩时的输出预留。
 - `DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
 
 ## 文件记忆

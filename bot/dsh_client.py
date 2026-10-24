@@ -33,7 +33,7 @@ class DSHConfig:
     profile: str = "qqbot"
     provider: str = "opencode"
     model: str = "deepseek-v4.1-flash"
-    max_tokens: int = 2048
+    max_tokens: int | None = None
     reasoning_effort: str = ""  # empty = model default
     request_timeout: float = 120.0
     # Extra Cordis patch files applied at launch (e.g. the model-registry patch).
