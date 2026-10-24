@@ -97,27 +97,42 @@ class RelationCommandTests(unittest.TestCase):
         self.assertIn("有礼貌", text)
         self.assertIn("损友", text)
 
-    def test_self_in_group_does_not_show_private_facts(self) -> None:
+    def test_self_in_group_does_not_show_private_or_other_group_facts(self) -> None:
         self.store.touch(2, "小明")
+        self.store.apply(
+            2,
+            RelationMarkers(impression="公开印象", relationship="损友"),
+            now=1000,
+            scope="group",
+        )
+        self.store.apply(2, RelationMarkers(impression="私下印象"), now=1100)
         conn = sqlite3.connect(self.profile_db)
         conn.execute(
-            "CREATE TABLE user_facts (user_id TEXT, key TEXT, value TEXT, "
-            "visibility TEXT, updated_at INTEGER)"
+            "CREATE TABLE user_facts (user_id TEXT, group_id TEXT NOT NULL DEFAULT '', "
+            "key TEXT, value TEXT, visibility TEXT, updated_at INTEGER, "
+            "PRIMARY KEY (user_id, group_id, key))"
         )
         conn.executemany(
-            "INSERT INTO user_facts VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO user_facts VALUES (?, ?, ?, ?, ?, ?)",
             [
-                ("2", "city", "杭州", "public", 2),
-                ("2", "secret", "怕黑", "private", 1),
+                ("2", "42", "city", "长春", "public", 3),
+                ("2", "43", "city", "北京", "public", 4),
+                ("2", "", "secret", "怕黑", "private", 1),
             ],
         )
         conn.commit()
         conn.close()
-        event = SimpleNamespace(user_id=2, message_type="group", sender_name="小明")
+        event = SimpleNamespace(
+            user_id=2, message_type="group", group_id=42, sender_name="小明"
+        )
         asyncio.run(self.router.handle(event, "/relation"))
         text = self.bot.sent[-1]
-        self.assertIn("杭州", text)
+        self.assertIn("长春", text)
+        self.assertNotIn("北京", text)
         self.assertNotIn("怕黑", text)
+        self.assertIn("公开印象", text)
+        self.assertNotIn("私下印象", text)
+        self.assertNotIn("损友", text)
 
     def test_others_only_see_public_fields(self) -> None:
         self.store.touch(2, "小明")
@@ -126,15 +141,18 @@ class RelationCommandTests(unittest.TestCase):
         )
         conn = sqlite3.connect(self.profile_db)
         conn.execute(
-            "CREATE TABLE user_facts (user_id TEXT, key TEXT, value TEXT, "
-            "visibility TEXT, updated_at INTEGER)"
+            "CREATE TABLE user_facts (user_id TEXT, group_id TEXT NOT NULL DEFAULT '', "
+            "key TEXT, value TEXT, visibility TEXT, updated_at INTEGER, "
+            "PRIMARY KEY (user_id, group_id, key))"
         )
         conn.execute(
-            "INSERT INTO user_facts VALUES ('2', 'city', '杭州', 'public', 1)"
+            "INSERT INTO user_facts VALUES ('2', '42', 'city', '杭州', 'public', 1)"
         )
         conn.commit()
         conn.close()
-        event = SimpleNamespace(user_id=3, message_type="group", sender_name="小红")
+        event = SimpleNamespace(
+            user_id=3, message_type="group", group_id=42, sender_name="小红"
+        )
         asyncio.run(self.router.handle(event, "/relation 2"))
         text = self.bot.sent[-1]
         self.assertIn("好感度 22/100", text)

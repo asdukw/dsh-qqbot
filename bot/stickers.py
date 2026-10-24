@@ -353,6 +353,8 @@ class StickerStore:
         if len(data) > max_bytes:
             raise StickerError(f"image too large ({len(data)} bytes > {max_bytes})")
         digest = hashlib.sha1(data).hexdigest()
+        # TODO: compare a perceptual hash (dHash) here as well, so re-encoded
+        # copies of the same picture dedupe instead of creating a second row.
         with self._lock:
             row = self._db.execute(
                 "SELECT * FROM stickers WHERE sha1 = ?", (digest,)
