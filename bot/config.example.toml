@@ -16,6 +16,27 @@ home = "/var/lib/qqbot/dsh-home"
 workspace = "/var/lib/qqbot/dsh-workspace"
 profile = "qqbot"
 request_timeout = 120.0
+# Image handling for the persistent DSH session.
+# placeholder: save the original under workspace/<image_dir>/<sha1>.<ext> and
+#   send only a short description + relative path; the model can read the
+#   original on demand (tool-fs.readImage must be true).
+# inline: old behavior, send image blocks and let DSH replay them.
+image_mode = "placeholder"
+image_dir = "images"
+image_caption = true
+caption_prompt = "用一两句中文客观描述这张图片；其中有文字就照抄关键文字。只输出描述。"
+image_max_bytes = 8388608
+image_keep_days = 14
+image_max_files = 1000
+# DSH session rotation. Generation 0 keeps the historical id; later
+# generations append -gN. Old JSONL files are kept on disk.
+# Groups rotate after this much idle time, or at the first message after
+# session_rotate_daily_hour (local time); private chats use the private idle.
+session_rotate_idle_hours = 24
+session_rotate_idle_hours_private = 168
+session_rotate_max_hours = 0
+session_rotate_max_messages = 0
+session_rotate_daily_hour = 4
 # Compaction thresholds (thresholdRatio/headroom/retainRatio) live in
 # dsh/qqbot.cordis.patch.yml.
 
@@ -54,6 +75,65 @@ send_cooldown_seconds = 60
 max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
+
+[usage]
+# Token ledger and per-message analytics for the admin UI.
+database = "/var/lib/qqbot/usage.db"
+retention_days = 90
+event_retention_days = 90
+
+[admin]
+# Read-only admin UI. Bind localhost and reach it through Workbench port
+# forwarding: workbench forward start --remote-port 8080 --local-port 8080.
+enabled = true
+host = "127.0.0.1"     # 0.0.0.0 only if the port is restricted in the security group
+port = 8080
+session_hours = 12
+# Optional second gate: only these source IPs/CIDRs may reach the panel.
+# Behind Cloudflare Tunnel the source is 127.0.0.1, so leave this empty there.
+allow_cidrs = []
+# React/shadcn bundle served by bot/admin_ui.py.
+static_dir = "/opt/qqbot/admin/dist"
+
+[feeds]
+# RSS/Atom subscriptions forwarded into the chat where they were added.
+# Bilibili is blocked for this host's IP (-412), so it goes through RSSHub.
+enabled = true
+database = "/var/lib/qqbot/feeds.db"
+rsshub_base = "https://rsshub.liumingye.cn"
+check_seconds = 300
+max_new = 5
+max_subs = 50
+
+[meme]
+# Text memes: the model marks a reply with "[梗图: 文字]"; a sticker is used as
+# the base image (or a gradient card when the library is empty).
+enabled = true
+max_chars = 24
+cooldown_seconds = 30
+directory = "/var/lib/qqbot/memes"
+
+[voice]
+# TTS voice replies; the model marks a short reply with "[语音]".
+# provider: edge (free) | stepfun (Chinese voices) | fish (unreachable here)
+enabled = true
+provider = "edge"
+voice = "zh-CN-XiaoxiaoNeural"
+rate = "+0%"
+# Provider-specific settings (voice is an edge name / StepFun voice id /
+# Fish reference_id). StepFun voices: ruanmengnvsheng, yuanqishaonv,
+# tianmeinvsheng, lengyanyujie, ...
+model = "stepaudio-3-tts"
+api_key_env = "STEPFUN_API_KEY"
+base_url = "https://api.stepfun.com"
+# Only stepaudio-2.5/3-tts read this; e.g. "傲娇、带点撒娇，语速稍快".
+instruction = ""
+speed = 1.0
+# Chance to voice a proactive group reply the model did not mark [语音].
+probability = 0.4
+# 0 = no extra cap (provider limit is 1000); set e.g. 300 to keep voice replies short.
+max_chars = 0
+cooldown_seconds = 30
 
 [tasks]
 # Admin-only scheduled messages. Creation is semantic: one thin-client call

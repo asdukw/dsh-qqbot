@@ -54,7 +54,12 @@ PROVIDER_DISPLAY = {
     "fake": "Fake (local test)",
 }
 
-_EFFORTS = {"reasoning_efforts": ["low", "medium", "high"]}
+_EFFORTS = {
+    "reasoning_efforts": ["low", "medium", "high"],
+    # The active OpenCode model accepts images; declaring it also enables the
+    # DSH read_image tool for on-demand reads of stored originals.
+    "input": ["text", "image"],
+}
 
 DEFAULT_ACTIVE = ("opencode-go", "deepseek-v4.1-flash")
 
@@ -198,6 +203,23 @@ class ModelRegistry:
                     "UPDATE models SET capabilities = ? "
                     "WHERE provider = ? AND model_id = ? AND capabilities IN ('', '{}')",
                     (json.dumps(row["capabilities"]), row["provider"], row["model_id"]),
+                )
+        # The seeded model gained image input after the first release; keep
+        # existing registries in sync without touching the user's other edits.
+        seed = self._db.execute(
+            "SELECT capabilities FROM models WHERE provider = ? AND model_id = ?",
+            DEFAULT_ACTIVE,
+        ).fetchone()
+        if seed is not None:
+            try:
+                capabilities = json.loads(seed["capabilities"] or "{}")
+            except json.JSONDecodeError:
+                capabilities = {}
+            if isinstance(capabilities, dict) and "input" not in capabilities:
+                capabilities["input"] = ["text", "image"]
+                self._db.execute(
+                    "UPDATE models SET capabilities = ? WHERE provider = ? AND model_id = ?",
+                    (json.dumps(capabilities), *DEFAULT_ACTIVE),
                 )
         self._db.commit()
 
@@ -380,6 +402,11 @@ class ModelRegistry:
             }
             if row.reasoning_efforts:
                 entry["reasoningEfforts"] = {effort: effort for effort in row.reasoning_efforts}
+            declared_input = row.capabilities.get("input")
+            if isinstance(declared_input, list):
+                modalities = [str(value).strip() for value in declared_input if str(value).strip()]
+                if modalities:
+                    entry["input"] = modalities
             route["models"].append(entry)
 
         patch = [{"id": "llm-pi-ai", "config": {"providers": providers}}]

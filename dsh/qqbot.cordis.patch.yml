@@ -28,7 +28,9 @@
 - id: tool-fs
   config:
     read: true
-    readImage: false
+    # Let the model open an original image on demand (the placeholder path
+    # only carries a description; details stay in the file).
+    readImage: true
     write: true
     edit: true
     readLimit: 2000
@@ -37,9 +39,11 @@
     mode: workspace-write
     workspaceRoot: /var/lib/qqbot/dsh-workspace
 
-# ── context pressure: compact at ~80% of the window ────────────
+# ── context pressure: DSH default (80% threshold, 16% retained) ─
 - id: compaction-basic
   config:
+    # Image history is now stored as text placeholders, so keep the stock
+    # 1M-window policy while evaluating the change.
     thresholdRatio: 0.8
     headroomTokens: 16384
     retainRatio: 0.16
@@ -52,6 +56,25 @@
 
 # ── search + observation policy + model routes + profile ────────
 - insert:
+    # Tool results are bounded by default. The full text is written under the
+    # workspace and the model gets a head/tail preview plus a read/grep path.
+    - id: spill-local
+      name: '@deepseek-ai/dsh-spill-local'
+      config:
+        root: /var/lib/qqbot/dsh-workspace/spill
+        cleanupPeriodDays: 14
+    - id: spill-policy
+      name: '@deepseek-ai/dsh-spill-policy'
+      config:
+        maxInlineTokens: 3000
+    # Secondary, model-free fallback for results that reached compaction:
+    # compaction-basic keeps the head and tail and replaces the middle.
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
     - id: fs-observation-policy
       name: '@deepseek-ai/dsh-fs-observation-policy'
     - id: tool-fs-search

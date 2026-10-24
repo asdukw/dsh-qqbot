@@ -22,6 +22,8 @@ KEY_VARS = (
     "DASHSCOPE_API_KEY",
     "MOONSHOT_API_KEY",
     "ZHIPU_API_KEY",
+    "FISH_API_KEY",
+    "STEPFUN_API_KEY",
 )
 
 values: dict[str, str] = {}
@@ -41,6 +43,19 @@ lines = [
 ]
 for name in KEY_VARS:
     lines.append(f"{name}={values.get(name, '')}")
+lines += [
+    "",
+    "# ── Admin UI (localhost + Workbench port forwarding) ──────────",
+    f"ADMIN_UI_PASSWORD={values.get('ADMIN_UI_PASSWORD', '')}",
+    f"ADMIN_UI_SECRET={values.get('ADMIN_UI_SECRET', '')}",
+    "",
+    "# ── Outbound proxy (optional mihomo mixed port) ───────────────",
+    f"HTTP_PROXY={values.get('HTTP_PROXY', '')}",
+    f"HTTPS_PROXY={values.get('HTTPS_PROXY', '')}",
+    f"ALL_PROXY={values.get('ALL_PROXY', '')}",
+    f"NO_PROXY={values.get('NO_PROXY', '')}",
+    f"NODE_USE_ENV_PROXY={values.get('NODE_USE_ENV_PROXY', '')}",
+]
 lines += [
     "",
     "# ── Model registry (SQLite, keyed by provider + model_id) ──────",

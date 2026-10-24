@@ -23,6 +23,14 @@ cp -a "$SRC/cards/." /opt/qqbot/cards/
 chown -R root:qqbot /opt/qqbot/cards
 chmod -R g+r /opt/qqbot/cards
 
+if [ -d "$SRC/admin/dist" ]; then
+    install -d -o root -g qqbot -m 750 /opt/qqbot/admin
+    install -d -o root -g qqbot -m 750 /opt/qqbot/admin/dist
+    cp -a "$SRC/admin/dist/." /opt/qqbot/admin/dist/
+    chown -R root:qqbot /opt/qqbot/admin
+    chmod -R g+rX /opt/qqbot/admin
+fi
+
 python3 -m venv /opt/qqbot/bot/venv
 /opt/qqbot/bot/venv/bin/pip install -q --upgrade pip -i "$PIP_INDEX"
 /opt/qqbot/bot/venv/bin/pip install -q -r /opt/qqbot/bot/requirements.txt -i "$PIP_INDEX"
@@ -31,6 +39,7 @@ python3 -m venv /opt/qqbot/bot/venv
 DSH_SDK=/opt/qqbot/bot/venv/bin/dsh
 DSH_HOME=/var/lib/qqbot/dsh-home
 install -d -o qqbot -g qqbot -m 750 "$DSH_HOME" /var/lib/qqbot/dsh-workspace /var/lib/qqbot/dsh-state /opt/qqbot/dsh/plugins
+install -d -o qqbot -g qqbot -m 700 /var/lib/qqbot/dsh-workspace/spill
 if [ ! -d "$DSH_HOME/profiles/qqbot" ]; then
     if command -v sudo >/dev/null 2>&1; then
         sudo -u qqbot env HOME=/var/lib/qqbot DSH_HOME="$DSH_HOME" "$DSH_SDK" --profile qqbot --from-default-profile sdk-minimal --dump-default-config >/dev/null
@@ -85,8 +94,10 @@ install -m 644 "$SRC/deploy/qqbot.service" /etc/systemd/system/qqbot.service
 install -m 644 "$SRC/deploy/qqbot-alert.service" /etc/systemd/system/qqbot-alert.service
 install -m 644 "$SRC/deploy/qqbot-backup.service" /etc/systemd/system/qqbot-backup.service
 install -m 644 "$SRC/deploy/qqbot-backup.timer" /etc/systemd/system/qqbot-backup.timer
+install -m 644 "$SRC/deploy/qqbot-admin.service" /etc/systemd/system/qqbot-admin.service
 systemctl daemon-reload
 systemctl enable qqbot >/dev/null
+systemctl enable qqbot-admin >/dev/null
 systemctl enable --now qqbot-backup.timer >/dev/null
 
 echo "bot installed."

@@ -153,7 +153,7 @@ class SpecTests(unittest.TestCase):
 
     def test_parse_task_uses_the_client(self) -> None:
         class FakeClient:
-            async def chat(self, messages):
+            async def chat(self, messages, **kwargs):
                 return '{"kind":"weekly","weekday":0,"time":"09:00","message":"新的一周"}'
 
         parsed, when = asyncio.run(parse_task(FakeClient(), "每周一早上9点", NOW))

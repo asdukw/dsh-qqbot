@@ -54,6 +54,7 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(paid.reasoning_effort, "low")
         self.assertEqual(paid.effective_effort, "low")
         self.assertEqual(paid.max_output_tokens, 2048)
+        self.assertIn("image", paid.capabilities.get("input", []))
 
     def test_exactly_one_active_model(self) -> None:
         active = self.registry.active()
@@ -122,6 +123,7 @@ class ModelRegistryTests(unittest.TestCase):
             models["deepseek-v4.1-flash"]["reasoningEfforts"],
             {"low": "low", "medium": "medium", "high": "high"},
         )
+        self.assertEqual(models["deepseek-v4.1-flash"]["input"], ["text", "image"])
 
     def test_active_signature_tracks_route_and_parameters(self) -> None:
         before = self.registry.active_signature()
@@ -177,6 +179,7 @@ class ModelRegistryTests(unittest.TestCase):
             assert record is not None
             self.assertEqual(record.key, "opencode-go/deepseek-v4.1-flash")
             self.assertEqual(record.effective_effort, "low")
+            self.assertIn("image", record.capabilities.get("input", []))
         finally:
             registry.close()
 

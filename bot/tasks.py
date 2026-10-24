@@ -284,7 +284,13 @@ def parse_task_json(raw: str) -> TaskSpec:
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
-async def parse_task(client: Any, description: str, now: datetime) -> tuple[TaskSpec, datetime]:
+async def parse_task(
+    client: Any,
+    description: str,
+    now: datetime,
+    *,
+    conversation_id: str = "",
+) -> tuple[TaskSpec, datetime]:
     """Ask the thin client to structure a natural-language task."""
     prompt = _TASK_PROMPT.format(
         now=now.astimezone(TZ).strftime("%Y-%m-%d %H:%M"),
@@ -298,7 +304,7 @@ async def parse_task(client: Any, description: str, now: datetime) -> tuple[Task
             "content": "你是一个把自然语言转成定时任务的解析器，只输出 JSON。",
         },
         {"role": "user", "content": prompt},
-    ])
+    ], purpose="task_parse", conversation_id=conversation_id)
     spec = parse_task_json(raw)
     return spec, next_run_for(spec, now)
 

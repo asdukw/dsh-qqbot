@@ -19,6 +19,7 @@ DEFAULT_DATABASES = (
     "/var/lib/qqbot/memory.db",
     "/var/lib/qqbot/stickers.db",
     "/var/lib/qqbot/tasks.db",
+    "/var/lib/qqbot/usage.db",
     "/var/lib/qqbot/dsh-state/profile.db",
 )
 DEFAULT_OUTPUT = "/var/lib/qqbot/backups"

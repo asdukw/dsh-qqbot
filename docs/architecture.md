@@ -25,8 +25,8 @@
 职责：
 
 - 维护到 NapCat 的 OneBot 11 正向 WebSocket：token 鉴权、重连、心跳、echo 关联；
-- 解析消息段（text / at / image / face / record 等），去重；
-- 决定是否回复：私聊全回；群聊在被 @、叫当前角色名（卡片的 `name`/`nickname` 或 `aliases`）或引用机器人消息时回复，其余消息按主动策略参与；
+- 解析消息段（text / at / image / face / record / poke 等），去重；
+- 决定是否回复：私聊全回；群聊在被 @、叫当前角色名、引用机器人消息或被戳一戳时回复，其余消息按主动策略参与；第三方之间的戳一戳只记入群上下文；
 - 把 QQ 会话映射成稳定的 DSH `session_id`；
 - 角色卡库（SQLite）与热切换、系统提示词构建、世界书落盘；
 - 长回复拆分、发送失败日志；
@@ -82,7 +82,7 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 4. 读取角色卡库的 active signature（`id` / `updated_at` / `fingerprint`）；变化时重新生成系统提示词、原子写 `memory/lore.md`、重启 DSH runtime（session 保留）。`/card use` 会直接触发这次刷新；`[cards] bootstrap` 文件被修改时也会被检测到。
 5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
 6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称(QQ号): 内容`；每行都带发言者 QQ 号（群名片相同的人也能区分），消息头的发言者若还有不同的 QQ 昵称会额外注明。
-7. 图片：模型能直接读图，但只有 thin client 支持 `image_url` 内容块。被叫到的消息自带图片时走 `_reply_llm`，并把群里最近 `group_context_images`（默认 2）张图片一起以 data URI 附上；DSH 的 content-block 协议不支持图片，所以主动接话先用一次视觉调用把最近图片转成一两句文字描述，再拼进 prompt。
+7. 图片：进入 DSH 历史的内容只有文字。图片下载后按 SHA-1 存到 `<dsh.workspace>/images/<sha1>.<ext>`（`bot/images.py`），用当前模型生成一次描述并缓存到 `memory.db` 的 `image_captions` 表；prompt 里只放 `[图片附件] 描述 + 相对路径`，模型需要细节时用 `read_image` 工具按路径读取原图（`tool-fs.readImage = true`）。同一张图重复出现只调用一次视觉模型。`[dsh] image_mode = "inline"` 可回退到旧的图片块行为；thin client 路径仍然使用 `image_url`。
 8. `asyncio.to_thread(dsh.run, session_id, prompt)`：
    - DSH 启动/复用 runtime；
    - 加载或创建 `session_id` 的 JSONL 历史；
@@ -176,8 +176,20 @@ CREATE TABLE group_facts (
 - 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。
 - 收进来后用视觉模型打标：一次调用同时给描述和 1-3 个情绪标签，写进 `description` / `tags`；打标失败不影响入库。
 - 发送：prompt 里带一句约定，模型想发表情时在回复最后写 `[表情: 语气词]`；adapter 用 `extract_sticker_marker` 摘掉标记，按标签/描述匹配（`StickerStore.pick`）挑一张，以 `base64://` 图片段跟在文字后面发出，并受每会话冷却/小时上限约束。
-- 图片输入走 DSH 官方 content block（ACP 形状 `{"type":"image","data":<base64>,"mimeType":...}`），不再先转文字描述；只有 thin client 路径和打标用 `image_url`。
+- 图片输入默认走占位符（见“一条消息的路径”第 7 步）：原图存 workspace、描述缓存、prompt 只带描述和路径；`read_image` 按需读原图。`[dsh] image_mode = "inline"` 时才使用 DSH content block；thin client 路径和打标仍用 `image_url`。
 - 表里的 `status='banned'` 不会进入候选；`uses` / `last_used` 记录发送情况。
+
+## 订阅转发（`bot/feeds.py`）
+
+- `feeds.db` 存 `(chat_type, chat_id, feed_url)` 唯一订阅；`/sub add` 支持 B 站 UID/空间链接（拼成 RSSHub 动态路由）或任意 RSS/Atom 地址，首次添加时把当前条目记入 `seen` 作为基线，避免补发历史。
+- `FeedPoller` 每 `[feeds] check_seconds`（默认 300s）按 URL 去重抓取一次，RSS/Atom 由标准库解析；新条目按时间顺序转发，单次最多 `max_new` 条；失败写入 `last_error` 并在 `/sub list` 里显示。
+- B 站对阿里云机房 IP 直接返回 `-412 request was banned`，因此默认 `rsshub_base = https://rsshub.liumingye.cn`（可换镜像）。
+
+## 语音、梗图与记忆检索
+
+- 语音：`bot/voice.py` 调 edge-tts 生成 mp3，`record` 段以 base64 发送（NapCat 实测接受 mp3）；模型用 `[语音]` 标记，超长或合成失败退回文字，每会话 30 秒冷却。
+- 梗图：`bot/meme.py` 用 Pillow 把 `[梗图: 文字]` 画到一张收藏表情（或渐变底卡）上，再走图片消息发送；每会话 30 秒冷却。
+- 记忆：`memory.db` 增加 external-content FTS5（trigram，中文子串可用）和增删触发器；回复前用当前文本的 3-gram 检索同会话历史，取前 3 条注入 `[相关历史]`，短词回退 LIKE。
 
 ## 定时任务（`bot/tasks.py`）
 
@@ -195,6 +207,21 @@ CREATE TABLE group_facts (
 - `extract_schedule()` 从回复里取出代码块，用 Pydantic 校验：`start_time` 必须是可解析时间（无时区按 +08:00 处理），队名不能为空，`best_of` 限定 1–9；按时间排序。
 - 校验通过后由 `render_schedule()` 渲染固定格式（北京时间、无来源链接），代码块本身不会出现在聊天里；校验失败的块会被剥掉并提示重试，不会泄露原始 JSON。
 
+## 会话轮换（`bot/sessions.py`）
+
+- DSH session id 由 `conversation_id` 加 generation 组成：generation 0 保留历史 id（如 `group-123`），之后为 `group-123-gN`；旧 JSONL 不删除。
+- 默认策略：群聊空闲 24 小时、私聊空闲 168 小时、群聊每天 04:00 后第一条消息轮换；可选 `session_rotate_max_hours` / `session_rotate_max_messages`。配置在 `[dsh]`。
+- 启动时扫描现有 DSH JSONL，用最早/最晚事件时间和 `user/message` 数回填 `memory.db` 的 `session_state`，避免旧会话被误判为刚开始。
+- `/reset`（管理员，`/new` 同义）强制新 generation；`memory.db` 的 FTS recall 按 `conversation_id` 保留，轮换不影响长期记忆。
+- 压缩仍保持 80% 兜底；先靠轮换降低历史重放，等 token 账本上线后再决定是否把阈值降到约 20%。
+
+## Token 审计与群聊统计
+
+- `usage.db` 的 `usage_events` 统一记录非缓存输入、缓存输入和输出。DSH 侧由 `DSHClient.run_with_events()` 返回本轮 events，`UsageStore.record_dsh()` 解析 `assistant/message` 和 `compaction/summary` 的 usage；thin client 侧由 `LLMClient.usage_sink` 上报图片描述、表情打标、任务解析/文案等调用。
+- 启动时 `UsageStore.backfill_dsh()` 从现有 DSH JSONL 回填历史 usage，按 session/seq 幂等去重；旧数据也能进入面板。
+- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息（发送者、文本、时间），供「今日发言排行」和「今日词云」使用；词云优先用 jieba，缺失时回退正则。
+- Admin UI 的 `/api/usage` 支持 `days` 和 `conversation`（群/好友）筛选，`/api/fun` 返回当天的排行、词云和会话列表。
+
 ## 上下文与压缩
 
 - 上下文长度来自模型注册表的 `context_window`（付费 Flash 1M，free 200k），经渲染后成为 DSH route 的 `contextWindow`。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。
@@ -209,6 +236,8 @@ auto: true
 
 - 有效阈值 = `min(0.8 × contextWindow, contextWindow − 输出预留 − headroomTokens)`；1M 窗口约 800k，200k 窗口约 160k。
 - 超过阈值时，较旧历史被总结成摘要，保留最近约 16% 的上下文；完整 session 仍以 JSONL 持久化。
+- 工具结果默认裁剪：官方 `spill-local` + `spill-policy` 已挂载（`maxInlineTokens: 3000`）。超过预算的工具结果会把完整文本写到 `/var/lib/qqbot/dsh-workspace/spill/`，模型只看到头尾预览和 notice 里的 `read`/`grep` 路径；`read` 自身不会再被 spill，避免循环。文件默认保留 14 天。
+- 二级兜底：官方 `compaction-tool-result-pruner`（`thresholdChars: 8192` / `headChars: 4096` / `tailChars: 1024`）在 `compaction-basic` 压力压缩或 context overflow 时继续裁剪中间段；该过程不额外调用模型。
 - 激活模型的 `max_output_tokens`（默认 2048）限制单次输出，也作为压缩时的输出预留。
 - `DSH_CONTEXT_WINDOW` 只对直连 `llm-deepseek` adapter 有意义；自定义 `llm-pi-ai` route 不需要它。
 

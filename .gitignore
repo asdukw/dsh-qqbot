@@ -37,3 +37,10 @@ skills-lock.json
 .idea/
 .vscode/
 .DS_Store
+
+# Frontend dependencies
+node_modules/
+
+# Keep the admin bundle for the Python-only deploy
+!admin/dist/
+!admin/dist/**

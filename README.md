@@ -8,6 +8,11 @@
 
 - **QQ 私聊聊天**，群聊默认只回复 @ 消息（`reply_group_at = false` 可关闭）
 - **赛程**：赛程类回答由模型输出 ```schedule JSON，adapter 用 Pydantic 校验后渲染成固定格式（阶段/北京时间/对阵/BO），校验失败不会把半成品发出去；
+- **语音回复**：模型在短回复末尾写 `[语音]`，按 provider（edge / StepFun / Fish Audio）合成并发送 QQ 语音；主动接话按 `[voice] probability` 概率转语音。中文音色清单见 [`docs/voices.md`](docs/voices.md)（`scripts/export_fish_voices.py` 可重新导出）；
+- **梗图**：模型写 `[梗图: 文字]`，从表情库里挑一张当底图、加字幕后发出去；
+- **长期记忆**：`memory.db` 的 FTS5 trigram 索引会在回复前检索当前会话的相关历史，作为 `[相关历史]` 注入；
+- **订阅转发**：`/sub add <B站UID|空间链接|RSS>` 把 UP 动态或任意 RSS 转到当前群/私聊；B 站直连被机房 IP 风控，默认走可配置的 RSSHub 镜像；
+- **戳一戳**：被戳会像被叫到一样回应（8 秒冷却）；群里别人被戳会作为一条上下文 `[戳了戳 某人]` 记下来；
 - **定时任务**：管理员直接说"每天早上8点提醒我起床"即可创建，说"把喝水那个删了/暂停"也能管理（模型输出 `[定时: ...]` / `[定时列表|删除|暂停|恢复]`，adapter 解析 + Pydantic 校验）；任务绑定创建时的群/私聊，可显式选 here/private/group；支持 fixed/generate 两种文案（generate 到点按人设现写）；`/task list|delete|pause|resume|run`；
 - **联网搜索**：DSH 官方的 `web_search` / `web_fetch` 工具；搜索 provider 用免密钥后端（与 OpenCode 自带 websearch 同类），不需要额外 API key；
 - **角色卡**：SillyTavern Character Card V1 / V2 / V3，支持 `.json` 和 `.png`（读取 `ccv3` → `chara` → `iTXt`）；SQLite 角色库，`/card search/install/use` 热切换
@@ -120,9 +125,26 @@ sudo journalctl -u qqbot -f
 - `/model`：列出模型及其序号；
 - `/model <序号|model_id|provider/model>`：切换激活模型，立即热切换，无需重启；
 - `/card` 系列：角色卡库的搜索、安装、切换、删除（见[角色卡](#角色卡)）；
+- `/reset`（或 `/new`）：归档当前 DSH 会话，下一条消息开始新会话；
 - `/help`：显示帮助。
 
 命令不会写入对话历史，也不会送进模型。
+
+## Admin UI
+
+面板是 `admin/` 下的 Vite + React + Tailwind 应用，组件按 shadcn/ui 的方式直接放在 `src/components/ui/`，主题为蓝白。Python 端只提供 JSON API 和静态文件：
+
+- 本地构建：`cd admin && npm install && npm run build`；产物在 `admin/dist/`（已随仓库提交，便于纯 Python 部署）。
+- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面，接口为 `/api/session`、`/api/login`、`/api/logout`、`/api/dashboard`；登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
+- 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
+- 页面包含模型、角色卡、定时任务、RSS 订阅、表情库计数，只读，每 60 秒自动刷新。
+
+## Token 审计与今日趣味数据
+
+- `usage.db` 记录每次模型调用的非缓存输入、缓存输入和输出：DSH 的每个 assistant step、compaction summary，以及图片描述、表情打标、任务解析/文案等 thin client 调用。
+- Admin UI 的「Token 用量」支持 7/30/90 天和按群聊/好友筛选，展示缓存命中率、按用途、按 session 的排行。
+- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息；Admin UI 的「今日发言排行」「今日词云」按当天数据生成（词云优先用 jieba，未安装时回退到正则分词）。
+- 配置在 `[usage]`：`database`、`retention_days`、`event_retention_days`。
 
 ## 角色卡
 
