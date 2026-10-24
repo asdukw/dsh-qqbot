@@ -63,7 +63,7 @@ export function ModelForm({
 }) {
   const [values, setValues] = useState({
     model_id: "",
-    context_window: "",
+    context_window: "256000",
     max_output_tokens: "2048",
   });
   const [imageInput, setImageInput] = useState(false);
@@ -104,7 +104,7 @@ export function ModelForm({
     } else {
       setValues({
         model_id: "",
-        context_window: "",
+        context_window: "256000",
         max_output_tokens: "2048",
       });
       setImageInput(false);
@@ -129,7 +129,6 @@ export function ModelForm({
   const canSubmit =
     !busy &&
     values.model_id.trim().length > 0 &&
-    Number(values.context_window) > 0 &&
     Number(values.max_output_tokens) > 0;
 
   async function fetchModels() {
@@ -184,6 +183,11 @@ export function ModelForm({
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!canSubmit) return;
+    const contextWindow = Number(values.context_window);
+    const contextWindowValue =
+      Number.isFinite(contextWindow) && contextWindow > 0
+        ? values.context_window.trim()
+        : "256000";
     const declaredEfforts =
       reasoningEffort && !isKnownEffort(reasoningEffort)
         ? [reasoningEffort, ...EFFORTS]
@@ -200,7 +204,7 @@ export function ModelForm({
         mode === "edit" && model?.display_name
           ? model.display_name
           : values.model_id.trim(),
-      context_window: values.context_window.trim(),
+      context_window: contextWindowValue,
       max_output_tokens: values.max_output_tokens.trim(),
       reasoning_effort: reasoningEffort === "none" ? "" : reasoningEffort,
       capabilities,
@@ -309,7 +313,7 @@ export function ModelForm({
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="上下文窗口" hint="tokens；DSH 的 token meter 和自动压缩用它。">
+          <Field label="上下文窗口" hint="tokens；留空默认 256000。DSH 的 token meter 和自动压缩用它。">
             <Input
               type="number"
               min={1}
@@ -317,7 +321,7 @@ export function ModelForm({
               onChange={(event) =>
                 setValues((current) => ({ ...current, context_window: event.target.value }))
               }
-              placeholder="128000"
+              placeholder="256000"
             />
           </Field>
           <Field label="最大输出 tokens" hint="单次请求的 max_tokens，建议 2048–8192。">
