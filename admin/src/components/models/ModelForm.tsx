@@ -22,22 +22,23 @@ export type ModelFormValues = {
   enabled: boolean;
 };
 
-const EFFORTS = ["low", "medium", "high"] as const;
-type ReasoningMode = "none" | "low" | "medium" | "high" | "all" | "custom";
+const EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
 
 function declaredStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item)).filter((item) => item.length > 0);
 }
 
-function supportedEfforts(mode: ReasoningMode, custom: string[]): string[] {
-  if (mode === "none") return [];
-  if (mode === "all") return [...EFFORTS];
-  if (mode === "custom") return custom;
-  return [mode];
-}
-
-function isStandardEffort(value: string): value is (typeof EFFORTS)[number] {
+function isKnownEffort(value: string): boolean {
   return (EFFORTS as readonly string[]).includes(value);
 }
 
@@ -62,12 +63,9 @@ export function ModelForm({
 }) {
   const [values, setValues] = useState({
     model_id: "",
-    display_name: "",
     context_window: "",
     max_output_tokens: "2048",
   });
-  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>("none");
-  const [customEfforts, setCustomEfforts] = useState<string[]>([]);
   const [imageInput, setImageInput] = useState(false);
   const [extras, setExtras] = useState<Record<string, unknown>>({});
   const [reasoningEffort, setReasoningEffort] = useState("");
@@ -90,22 +88,9 @@ export function ModelForm({
     if (mode === "edit" && model) {
       setValues({
         model_id: model.model_id,
-        display_name: model.display_name,
         context_window: String(model.context_window),
         max_output_tokens: String(model.max_output_tokens),
       });
-      const declared = declaredStringList(model.capabilities.reasoning_efforts);
-      const known = declared.filter(isStandardEffort);
-      const extra = declared.filter((effort) => !isStandardEffort(effort));
-      let nextMode: ReasoningMode = "none";
-      if (declared.length) {
-        if (extra.length) nextMode = "custom";
-        else if (known.length === EFFORTS.length) nextMode = "all";
-        else if (known.length === 1) nextMode = known[0];
-        else nextMode = "custom";
-      }
-      setReasoningMode(nextMode);
-      setCustomEfforts(nextMode === "custom" ? declared : []);
       setImageInput(declaredStringList(model.capabilities.input).includes("image"));
       setExtras(
         Object.fromEntries(
@@ -114,19 +99,14 @@ export function ModelForm({
           )
         )
       );
-      setReasoningEffort(
-        declared.includes(model.reasoning_effort) ? model.reasoning_effort : ""
-      );
+      setReasoningEffort(model.reasoning_effort || "");
       setEnabled(model.enabled);
     } else {
       setValues({
         model_id: "",
-        display_name: "",
         context_window: "",
         max_output_tokens: "2048",
       });
-      setReasoningMode("none");
-      setCustomEfforts([]);
       setImageInput(false);
       setExtras({});
       setReasoningEffort("");
@@ -139,24 +119,18 @@ export function ModelForm({
   useEffect(() => () => fetchAbort.current?.abort(), []);
 
   const extraKeys = useMemo(() => Object.keys(extras), [extras]);
-  const supported = supportedEfforts(reasoningMode, customEfforts);
+  const effortOptions = useMemo(
+    () =>
+      reasoningEffort && !isKnownEffort(reasoningEffort)
+        ? [reasoningEffort, ...EFFORTS]
+        : [...EFFORTS],
+    [reasoningEffort]
+  );
   const canSubmit =
     !busy &&
     values.model_id.trim().length > 0 &&
     Number(values.context_window) > 0 &&
     Number(values.max_output_tokens) > 0;
-
-  function changeReasoningMode(next: ReasoningMode) {
-    setReasoningMode(next);
-    const nextSupported = supportedEfforts(next, customEfforts);
-    if (!nextSupported.length) {
-      setReasoningEffort("");
-      return;
-    }
-    if (!nextSupported.includes(reasoningEffort)) {
-      setReasoningEffort(next === "all" ? "low" : nextSupported[0]);
-    }
-  }
 
   async function fetchModels() {
     fetchAbort.current?.abort();
@@ -210,16 +184,25 @@ export function ModelForm({
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!canSubmit) return;
-    const capabilities: Record<string, unknown> = { ...extras };
-    if (supported.length) capabilities.reasoning_efforts = supported;
+    const declaredEfforts =
+      reasoningEffort && !isKnownEffort(reasoningEffort)
+        ? [reasoningEffort, ...EFFORTS]
+        : [...EFFORTS];
+    const capabilities: Record<string, unknown> = {
+      ...extras,
+      reasoning_efforts: declaredEfforts,
+    };
     capabilities.input = imageInput ? ["text", "image"] : ["text"];
     onSubmit({
       provider: provider.provider,
       model_id: values.model_id.trim(),
-      display_name: values.display_name.trim() || values.model_id.trim(),
+      display_name:
+        mode === "edit" && model?.display_name
+          ? model.display_name
+          : values.model_id.trim(),
       context_window: values.context_window.trim(),
       max_output_tokens: values.max_output_tokens.trim(),
-      reasoning_effort: supported.length ? reasoningEffort : "",
+      reasoning_effort: reasoningEffort,
       capabilities,
       enabled,
     });
@@ -255,8 +238,7 @@ export function ModelForm({
           </Badge>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
+        <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-2">
               <label
                 htmlFor="model-id"
@@ -324,16 +306,6 @@ export function ModelForm({
                 {modelsError}
               </p>
             ) : null}
-          </div>
-          <Field label="显示名称" hint="留空时使用模型 ID。">
-            <Input
-              value={values.display_name}
-              onChange={(event) =>
-                setValues((current) => ({ ...current, display_name: event.target.value }))
-              }
-              placeholder="DeepSeek Chat"
-            />
-          </Field>
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
@@ -376,46 +348,19 @@ export function ModelForm({
             ) : null}
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field
-              label="Reasoning 档位"
-              hint="声明模型支持的档位；不确定就选“不声明”。"
-            >
-              <Select
-                value={reasoningMode}
-                onChange={(value) => changeReasoningMode(value as ReasoningMode)}
-              >
-                <option value="none">不声明（模型默认）</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="all">low / medium / high</option>
-                {customEfforts.length ? (
-                  <option value="custom">自定义（保留原设置）</option>
-                ) : null}
-              </Select>
-            </Field>
-            <Field label="默认推理强度" hint="留空表示不发送 reasoning_effort，用模型自己的默认值。">
-              <Select
-                value={reasoningEffort}
-                onChange={setReasoningEffort}
-                disabled={!supported.length}
-              >
-                <option value="">模型默认</option>
-                {supported.map((effort) => (
-                  <option key={effort} value={effort}>
-                    {effort}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          </div>
-
-          {customEfforts.length && reasoningMode === "custom" ? (
-            <p className="text-[11px] text-slate-400">
-              保留已有自定义档位：{customEfforts.join(", ")}
-            </p>
-          ) : null}
+          <Field
+            label="默认推理强度"
+            hint="发送给上游的 reasoning_effort；模型默认表示不发送。"
+          >
+            <Select value={reasoningEffort} onChange={setReasoningEffort}>
+              <option value="">模型默认（不发送）</option>
+              {effortOptions.map((effort) => (
+                <option key={effort} value={effort}>
+                  {effort}
+                </option>
+              ))}
+            </Select>
+          </Field>
 
           <CheckboxRow
             label="支持图片输入"
