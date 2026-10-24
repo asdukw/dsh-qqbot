@@ -583,7 +583,7 @@ function ProviderDetail({
         }
       >
         {models.length ? (
-          <Table className="min-w-[680px]">
+          <Table className="table-auto">
             <TableHeader>
               <TableRow>
                 <TableHead>模型</TableHead>
@@ -596,7 +596,7 @@ function ProviderDetail({
               {models.map((model) => {
                 return (
                   <TableRow key={`${model.provider}/${model.model_id}`}>
-                    <TableCell className="max-w-[20rem]">
+                    <TableCell>
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="font-medium text-slate-800">{model.display_name}</span>
                         {model.is_active ? <Badge>当前</Badge> : null}
