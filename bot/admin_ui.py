@@ -723,18 +723,26 @@ def _provider_api_key(record: ProviderRecord) -> str:
 
 
 def _provider_models_url(base_url: str) -> str:
-    base = str(base_url or "").strip().rstrip("/")
+    base = str(base_url or "").strip()
     if not base:
         raise ValueError("供应商未配置 base_url")
-    if base.endswith("/chat/completions"):
-        base = base[: -len("/chat/completions")]
     try:
         parsed = httpx.URL(base)
     except httpx.InvalidURL as exc:
         raise ValueError(f"供应商 base_url 无效：{exc}") from exc
     if parsed.scheme not in ("http", "https"):
         raise ValueError("供应商 base_url 必须是 http(s) 地址")
-    return base if base.endswith("/models") else f"{base}/models"
+    if not parsed.host:
+        raise ValueError("供应商 base_url 缺少主机名")
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")]
+    if not path.endswith("/models"):
+        path = f"{path}/models"
+    if not path.startswith("/"):
+        path = "/" + path
+    # copy_with keeps a query string such as ?api-version=... intact.
+    return str(parsed.copy_with(path=path))
 
 
 def _model_list(payload: Any) -> list[dict[str, str]]:

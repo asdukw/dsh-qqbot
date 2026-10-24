@@ -129,10 +129,20 @@ class ProviderModelsUrlTests(unittest.TestCase):
             _provider_models_url("https://api.example/v1/models"),
             "https://api.example/v1/models",
         )
+        self.assertEqual(
+            _provider_models_url("https://api.example/v1?api-version=2024-01-01"),
+            "https://api.example/v1/models?api-version=2024-01-01",
+        )
+        self.assertEqual(
+            _provider_models_url("https://api.example/v1#frag"),
+            "https://api.example/v1/models#frag",
+        )
         with self.assertRaises(ValueError):
             _provider_models_url("")
         with self.assertRaises(ValueError):
             _provider_models_url("ftp://api.example/v1")
+        with self.assertRaises(ValueError):
+            _provider_models_url("https:///v1")
 
     def test_model_list_shapes(self) -> None:
         self.assertEqual(

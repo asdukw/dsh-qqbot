@@ -200,6 +200,13 @@ export function ModelForm({
     }
   }
 
+  function startManual() {
+    fetchAbort.current?.abort();
+    fetchAbort.current = null;
+    setModelsBusy(false);
+    setManualId(true);
+  }
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!canSubmit) return;
@@ -305,7 +312,7 @@ export function ModelForm({
               {modelOptions.length && !manualId && mode === "create" ? (
                 <button
                   type="button"
-                  onClick={() => setManualId(true)}
+                  onClick={startManual}
                   className="text-[11px] text-blue-600 hover:underline"
                 >
                   手动填写
