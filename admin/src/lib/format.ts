@@ -103,10 +103,3 @@ export function conversationLabel(id: string, fallback = "") {
   if (id.startsWith("task:")) return `任务 ${id.slice(5)}`;
   return fallback || id || "未知会话";
 }
-
-export function scopeLabel(scope: string) {
-  if (scope === "group") return "群聊";
-  if (scope === "private") return "私聊";
-  if (scope === "task") return "任务";
-  return "其他";
-}

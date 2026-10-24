@@ -10,8 +10,8 @@ Every page reads SQLite directly. The model page is the exception: it can add
 providers and models through authenticated ``POST /api/models/*`` endpoints,
 which write through ``ModelRegistry`` (the same code the bot uses). The
 overview aggregates counts, a day-by-day trend and alerts; ``/api/models``,
-``/api/cards``, ``/api/tasks``, ``/api/feeds``, ``/api/stickers``,
-``/api/conversations`` and ``/api/system`` each expose one page's data;
+``/api/cards``, ``/api/tasks``, ``/api/feeds``, ``/api/stickers`` and
+``/api/system`` each expose one page's data;
 ``/api/cards/<id>`` returns one card's full V3 payload for the detail view;
 ``/api/stickers/<id>/image`` streams a sticker file (``?thumb=1`` for a
 bounded JPEG thumbnail) so the panel can show the images themselves.
@@ -1423,7 +1423,6 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"authenticated": self._valid_session()})
             return
         resources = {
-            "/api/conversations": conversations_data,
             "/api/models": models_data,
             "/api/cards": cards_data,
             "/api/tasks": tasks_data,

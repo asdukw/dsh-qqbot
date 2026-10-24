@@ -5,7 +5,6 @@ import {
   CalendarClock,
   CreditCard,
   LayoutDashboard,
-  MessagesSquare,
   Rss,
   Server,
   Settings2,
@@ -15,7 +14,6 @@ import {
 
 export type RouteId =
   | "overview"
-  | "conversations"
   | "insights"
   | "tasks"
   | "feeds"
@@ -43,12 +41,6 @@ export const ROUTES: RouteMeta[] = [
     label: "仪表盘",
     description: "运行概览、今日趋势与需要关注的问题",
     icon: LayoutDashboard,
-  },
-  {
-    id: "conversations",
-    label: "会话",
-    description: "群聊与私聊的 session 状态、消息量和 token",
-    icon: MessagesSquare,
   },
   {
     id: "insights",
@@ -104,7 +96,7 @@ const ROUTE_MAP = new Map(ROUTES.map((route) => [route.id, route]));
 
 export const NAV_GROUPS: NavGroup[] = [
   { label: "概览", items: [ROUTE_MAP.get("overview")!] },
-  { label: "对话", items: [ROUTE_MAP.get("conversations")!, ROUTE_MAP.get("insights")!] },
+  { label: "对话", items: [ROUTE_MAP.get("insights")!] },
   { label: "自动化", items: [ROUTE_MAP.get("tasks")!, ROUTE_MAP.get("feeds")!] },
   { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("stickers")!] },
   { label: "用量", items: [ROUTE_MAP.get("usage")!] },

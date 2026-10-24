@@ -700,12 +700,9 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(payload["recent_messages"][0]["sender_name"], "小红")
 
     def test_conversations_merge_events_sessions_and_usage(self) -> None:
-        cookie, _ = self.login()
-        response = self.get("/api/conversations", cookie)
-        self.assertEqual(response.status, 200)
         rows = {
             row["id"]: row
-            for row in json.loads(response.read().decode())["conversations"]
+            for row in conversations_data(self.config)["conversations"]
         }
 
         group = rows["group:42"]

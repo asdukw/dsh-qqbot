@@ -114,27 +114,6 @@ export type OverviewData = {
   }>;
 };
 
-export type ConversationRow = {
-  id: string;
-  scope: string;
-  label: string;
-  chat_id: number | null;
-  sender_name: string;
-  messages: number;
-  last_at: number | null;
-  tokens: number;
-  generation: number | null;
-  session_id: string | null;
-  session_messages: number;
-  session_started_at: number | null;
-  session_last_active: number | null;
-};
-
-export type ConversationsData = {
-  generated_at: number;
-  conversations: ConversationRow[];
-};
-
 export type ModelRow = {
   provider: string;
   model_id: string;
