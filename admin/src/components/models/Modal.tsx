@@ -150,15 +150,18 @@ export function Select({
   value,
   onChange,
   disabled,
+  id,
   children,
 }: {
   value: string;
   onChange: (value: string) => void;
   disabled?: boolean;
+  id?: string;
   children: ReactNode;
 }) {
   return (
     <select
+      id={id}
       value={value}
       onChange={(event) => onChange(event.target.value)}
       disabled={disabled}
