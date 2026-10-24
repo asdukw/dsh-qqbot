@@ -229,6 +229,13 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 - `/reset`（管理员，`/new` 同义）强制新 generation；`memory.db` 的 FTS recall 按 `conversation_id` 保留，轮换不影响长期记忆。
 - 压缩仍保持 80% 兜底；先靠轮换降低历史重放，等 token 账本上线后再决定是否把阈值降到约 20%。
 
+## 关系 / 好感度（`bot/relations.py`）
+
+- 每个 QQ 一行，存在 `profile.db` 的 `user_relations` 表（与 DSH 用户画像同库）：好感度 `0~100`（默认 20）、关系标签、结构化印象、最近活动/更新时间、每日变更计数。
+- 主模型在回复末尾输出隐藏标记 `[好感+2]` / `[印象: …]` / `[关系: …]`；`Bot._send_reply` 在发送前剥离并写入 `RelationStore`。增量夹在 `±max_delta`，有冷却和每日变更上限；衰减暂不启用。
+- `/relation`（别名 `/关系`、`/好感度`、`/印象`）对所有人开放：默认查自己，`/relation <QQ>` 查他人；自己/管理员看完整印象，其他人只看分数/等级和公开 facts；私聊之外不展示 private facts。管理员可用 `/relation set|reset`。
+- `dsh/user-profile.mjs` 通过 `{{user_relation}}` 把压缩后的关系块注入 DSH 系统提示；thin 路径在 `_reply_llm` 的 system message 里追加同一块和标记说明。
+
 ## Token 审计与群聊统计
 
 - `usage.db` 的 `usage_events` 统一记录非缓存输入、缓存输入和输出。DSH 侧由 `DSHClient.run_with_events()` 返回本轮 events，`UsageStore.record_dsh()` 解析 `assistant/message` 和 `compaction/summary` 的 usage；thin client 侧由 `LLMClient.usage_sink` 上报图片描述、表情打标、任务解析/文案等调用。

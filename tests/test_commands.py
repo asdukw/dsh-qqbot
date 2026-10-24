@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from commands import (  # noqa: E402
     strip_message_markers,
 )
 from models import ModelRegistry  # noqa: E402
+from relations import RelationMarkers, RelationStore  # noqa: E402
 
 from cards import CardRegistry, normalise  # noqa: E402
 
@@ -32,6 +34,7 @@ class FakeBot:
         self.config = SimpleNamespace(models=SimpleNamespace(database=str(db)))
         self.cards = CardRegistry(cards_db)
         self.stickers = None
+        self.relations = None
         self.sent: list[str] = []
         self.reloads = 0
         self.card_reloads = 0
@@ -60,6 +63,98 @@ class StripMentionTests(unittest.TestCase):
     def test_chatter_is_untouched(self) -> None:
         self.assertEqual(strip_leading_mention("@嘻嘻 你好呀"), "@嘻嘻 你好呀")
         self.assertEqual(strip_leading_mention("你好 /sub"), "你好 /sub")
+
+
+class RelationCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.db = root / "models.db"
+        self.cards_db = root / "cards.db"
+        self.profile_db = root / "profile.db"
+        ModelRegistry(self.db).close()
+        self.bot = FakeBot(self.db, self.cards_db)
+        self.store = RelationStore(self.profile_db)
+        self.bot.relations = self.store
+        self.router = CommandRouter(self.bot)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.bot.cards.close()
+        self.tmp.cleanup()
+
+    def test_relation_is_public_for_self(self) -> None:
+        self.store.touch(2, "小明")
+        self.store.apply(
+            2,
+            RelationMarkers(delta=2, impression="有礼貌", relationship="损友"),
+            now=1000,
+        )
+        event = SimpleNamespace(user_id=2, message_type="private", sender_name="小明")
+        asyncio.run(self.router.handle(event, "/relation"))
+        text = self.bot.sent[-1]
+        self.assertIn("好感度 22/100", text)
+        self.assertIn("有礼貌", text)
+        self.assertIn("损友", text)
+
+    def test_self_in_group_does_not_show_private_facts(self) -> None:
+        self.store.touch(2, "小明")
+        conn = sqlite3.connect(self.profile_db)
+        conn.execute(
+            "CREATE TABLE user_facts (user_id TEXT, key TEXT, value TEXT, "
+            "visibility TEXT, updated_at INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO user_facts VALUES (?, ?, ?, ?, ?)",
+            [
+                ("2", "city", "杭州", "public", 2),
+                ("2", "secret", "怕黑", "private", 1),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        event = SimpleNamespace(user_id=2, message_type="group", sender_name="小明")
+        asyncio.run(self.router.handle(event, "/relation"))
+        text = self.bot.sent[-1]
+        self.assertIn("杭州", text)
+        self.assertNotIn("怕黑", text)
+
+    def test_others_only_see_public_fields(self) -> None:
+        self.store.touch(2, "小明")
+        self.store.apply(
+            2, RelationMarkers(delta=2, impression="私下的印象"), now=1000
+        )
+        conn = sqlite3.connect(self.profile_db)
+        conn.execute(
+            "CREATE TABLE user_facts (user_id TEXT, key TEXT, value TEXT, "
+            "visibility TEXT, updated_at INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO user_facts VALUES ('2', 'city', '杭州', 'public', 1)"
+        )
+        conn.commit()
+        conn.close()
+        event = SimpleNamespace(user_id=3, message_type="group", sender_name="小红")
+        asyncio.run(self.router.handle(event, "/relation 2"))
+        text = self.bot.sent[-1]
+        self.assertIn("好感度 22/100", text)
+        self.assertIn("杭州", text)
+        self.assertNotIn("私下的印象", text)
+
+    def test_admin_can_set_and_reset(self) -> None:
+        event = SimpleNamespace(user_id=1, message_type="private", sender_name="admin")
+        asyncio.run(self.router.handle(event, "/relation set 2 42"))
+        self.assertIn("42/100", self.bot.sent[-1])
+        record = self.store.get(2)
+        assert record is not None
+        self.assertEqual(record.affinity, 42)
+        asyncio.run(self.router.handle(event, "/relation reset 2"))
+        self.assertIsNone(self.store.get(2))
+
+    def test_non_admin_cannot_set(self) -> None:
+        event = SimpleNamespace(user_id=2, message_type="private", sender_name="小明")
+        asyncio.run(self.router.handle(event, "/relation set 3 42"))
+        self.assertIn("只有管理员", self.bot.sent[-1])
 
 
 class CommandRouterTests(unittest.TestCase):

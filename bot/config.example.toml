@@ -77,6 +77,15 @@ max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
+[relation]
+# Per-user affinity + impression. The main model updates it with hidden
+# markers ([好感+2] / [印象: ...] / [关系: ...]); /relation is public.
+enabled = true
+start_affinity = 20
+max_delta = 3
+cooldown_seconds = 60
+max_changes_per_day = 20
+
 [usage]
 # Token ledger and per-message analytics for the admin UI.
 database = "/var/lib/qqbot/usage.db"

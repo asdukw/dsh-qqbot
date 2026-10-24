@@ -53,6 +53,19 @@ function getDb() {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (group_id, key)
     );
+    -- Keep this column list in sync with bot/relations.py.
+    CREATE TABLE IF NOT EXISTS user_relations (
+      user_id       TEXT PRIMARY KEY,
+      display_name  TEXT NOT NULL DEFAULT '',
+      affinity      INTEGER NOT NULL DEFAULT 20,
+      impression    TEXT NOT NULL DEFAULT '',
+      relationship  TEXT NOT NULL DEFAULT '',
+      last_seen     INTEGER NOT NULL DEFAULT 0,
+      last_update   INTEGER NOT NULL DEFAULT 0,
+      update_day    TEXT NOT NULL DEFAULT '',
+      updates_today INTEGER NOT NULL DEFAULT 0,
+      updated_at    INTEGER NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_user_facts ON user_facts (user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_group_facts ON group_facts (group_id, updated_at DESC);
   `)
@@ -205,6 +218,47 @@ function renderGroupProfile(sessionId) {
   const rows = readGroupFacts(ctx.groupId)
   if (!rows.length) return `群 ${ctx.groupId}：暂无群画像。`
   return `群 ${ctx.groupId}：\n${formatFacts(rows)}`
+}
+
+const NL = String.fromCharCode(10)
+
+const RELATION_NOTE = `如果这轮聊天让你对对方的好感或印象有明显变化，在回复最后追加隐藏标记：
+- [好感+2] 或 [好感-1]（单次最多 ±3）
+- [印象: 一句话，最多 60 字]
+- [关系: 损友/朋友/…]
+印象只写适合在群聊里提起的稳定特点，不要写入私聊中的秘密或敏感信息。
+没有明显变化就不要加；这些标记会被系统移除，不会发到聊天里。`
+
+function relationEnabled() {
+  return process.env.QQBOT_RELATION_ENABLED !== '0'
+}
+
+function affinityTier(value) {
+  const affinity = Number(value) || 0
+  if (affinity >= 80) return '亲密'
+  if (affinity >= 60) return '亲近'
+  if (affinity >= 40) return '朋友'
+  if (affinity >= 20) return '认识'
+  return '陌生'
+}
+
+function renderUserRelation(sessionId) {
+  const ctx = contextOf(sessionId)
+  if (!ctx) return '（暂无）'
+  let row
+  try {
+    row = getDb().prepare(
+      'SELECT affinity, impression, relationship FROM user_relations WHERE user_id = ?'
+    ).get(ctx.userId)
+  } catch {
+    return '（关系记录暂不可用）'
+  }
+  if (!row) return '好感度：20/100（认识）；还没有特别的印象。'
+  const affinity = Number(row.affinity) || 0
+  const lines = [`好感度：${affinity}/100（${affinityTier(affinity)}）`]
+  if (row.relationship) lines.push(`关系：${row.relationship}`)
+  if (row.impression) lines.push(`你对对方的印象：${row.impression}`)
+  return lines.join(NL)
 }
 
 function text(value) {
@@ -394,5 +448,15 @@ export function apply(ctx) {
         '所在群的画像：\n{{group_profile}}\n\n' +
         MEMORY_NOTE,
     })
+    if (relationEnabled()) {
+      agent.ctx.systemPrompt.variable('user_relation', () => renderUserRelation(sessionId))
+      agent.ctx.systemPrompt.section({
+        name: 'user-relation',
+        order: 8001,
+        text:
+          `你与当前说话人的关系：
+{{user_relation}}` + `${NL}${NL}${RELATION_NOTE}`,
+      })
+    }
   })
 }
