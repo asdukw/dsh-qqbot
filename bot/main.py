@@ -610,8 +610,9 @@ def model_signature(config: AppConfig) -> tuple | None:
 
 def make_dsh_client(config: AppConfig, record: ModelRecord, system_prompt: str = "") -> DSHClient:
     log.info(
-        "model %s: context=%d max_output=%d effort=%s",
-        record.key, record.context_window, record.max_output_tokens,
+        "model %s: context=%d max_output=%s effort=%s",
+        record.key, record.context_window,
+        record.max_output_tokens or "default",
         record.effective_effort or "(model default)",
     )
     return DSHClient(
@@ -621,7 +622,7 @@ def make_dsh_client(config: AppConfig, record: ModelRecord, system_prompt: str =
             profile=config.dsh.profile,
             provider=record.provider,
             model=record.model_id,
-            max_tokens=record.max_output_tokens,
+            max_tokens=record.max_output_tokens or None,
             reasoning_effort=dsh_effort(record.effective_effort),
             request_timeout=config.dsh.request_timeout,
             patches=(config.models.patch,),
@@ -636,7 +637,7 @@ def make_llm_client(config: AppConfig, record: ModelRecord) -> LLMClient:
         base_url=record.base_url,
         model=record.model_id,
         provider=record.provider,
-        max_tokens=record.max_output_tokens,
+        max_tokens=record.max_output_tokens or None,
         temperature=config.llm.temperature,
         timeout=config.llm.timeout,
         reasoning_effort=record.effective_effort,

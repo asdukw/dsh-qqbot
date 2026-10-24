@@ -64,7 +64,6 @@ export function ModelForm({
   const [values, setValues] = useState({
     model_id: "",
     context_window: "256000",
-    max_output_tokens: "2048",
   });
   const [imageInput, setImageInput] = useState(false);
   const [extras, setExtras] = useState<Record<string, unknown>>({});
@@ -89,7 +88,6 @@ export function ModelForm({
       setValues({
         model_id: model.model_id,
         context_window: String(model.context_window),
-        max_output_tokens: String(model.max_output_tokens),
       });
       setImageInput(declaredStringList(model.capabilities.input).includes("image"));
       setExtras(
@@ -105,7 +103,6 @@ export function ModelForm({
       setValues({
         model_id: "",
         context_window: "256000",
-        max_output_tokens: "2048",
       });
       setImageInput(false);
       setExtras({});
@@ -185,11 +182,6 @@ export function ModelForm({
       Number.isFinite(contextWindow) && contextWindow > 0
         ? values.context_window.trim()
         : "256000";
-    const maxOutput = Number(values.max_output_tokens);
-    const maxOutputValue =
-      Number.isFinite(maxOutput) && maxOutput > 0
-        ? values.max_output_tokens.trim()
-        : "2048";
     const declaredEfforts =
       reasoningEffort && !isKnownEffort(reasoningEffort)
         ? [reasoningEffort, ...EFFORTS]
@@ -207,7 +199,7 @@ export function ModelForm({
           ? model.display_name
           : values.model_id.trim(),
       context_window: contextWindowValue,
-      max_output_tokens: maxOutputValue,
+      max_output_tokens: "0",
       reasoning_effort: reasoningEffort === "none" ? "" : reasoningEffort,
       capabilities,
       enabled,

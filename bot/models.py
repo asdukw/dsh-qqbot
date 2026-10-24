@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS models (
     model_id          TEXT NOT NULL,
     display_name      TEXT NOT NULL,
     context_window    INTEGER NOT NULL,
-    max_output_tokens INTEGER NOT NULL DEFAULT 2048,
+    max_output_tokens INTEGER NOT NULL DEFAULT 0,
     reasoning_effort  TEXT NOT NULL DEFAULT '',
     capabilities      TEXT NOT NULL DEFAULT '{}',
     enabled           INTEGER NOT NULL DEFAULT 1,
@@ -194,7 +194,7 @@ DEFAULTS: list[dict[str, Any]] = [
         "provider": "opencode-go", "model_id": "deepseek-v4.1-flash",
         "display_name": "DeepSeek V4.1 Flash",
         "context_window": 1_000_000,
-        "max_output_tokens": 2048, "reasoning_effort": "low", "capabilities": _EFFORTS,
+        "max_output_tokens": 0, "reasoning_effort": "low", "capabilities": _EFFORTS,
     },
     # Only the paid Flash is seeded. The Flash free tier only works inside the
     # OpenCode client (403 FreeTierError elsewhere), beam-free is geo-blocked
@@ -513,7 +513,7 @@ class ModelRegistry:
                 model_id          TEXT NOT NULL,
                 display_name      TEXT NOT NULL,
                 context_window    INTEGER NOT NULL,
-                max_output_tokens INTEGER NOT NULL DEFAULT 2048,
+                max_output_tokens INTEGER NOT NULL DEFAULT 0,
                 reasoning_effort  TEXT NOT NULL DEFAULT '',
                 capabilities      TEXT NOT NULL DEFAULT '{}',
                 enabled           INTEGER NOT NULL DEFAULT 1,
@@ -585,7 +585,7 @@ class ModelRegistry:
                     """,
                     (
                         row["provider"], row["model_id"], row["display_name"],
-                        row["context_window"], row.get("max_output_tokens", 2048),
+                        row["context_window"], row.get("max_output_tokens", 0),
                         row.get("reasoning_effort", ""),
                         json.dumps(row.get("capabilities", {})),
                         1 if (row["provider"], row["model_id"]) == DEFAULT_ACTIVE else 0,
@@ -833,9 +833,10 @@ class ModelRegistry:
             if not isinstance(values["capabilities"], dict):
                 raise ValueError("capabilities must be a JSON object")
             values["capabilities"] = json.dumps(values["capabilities"], ensure_ascii=False)
-        for name in ("context_window", "max_output_tokens"):
-            if name in values and values[name] <= 0:
-                raise ValueError(f"{name} must be positive")
+        if "context_window" in values and values["context_window"] <= 0:
+            raise ValueError("context_window must be positive")
+        if "max_output_tokens" in values and values["max_output_tokens"] < 0:
+            raise ValueError("max_output_tokens must not be negative")
         if "display_name" in values and not values["display_name"].strip():
             values["display_name"] = model_id
 
@@ -854,6 +855,7 @@ class ModelRegistry:
                 if "context_window" not in values:
                     raise ValueError("new model needs: context_window")
                 values.setdefault("display_name", model_id)
+                values.setdefault("max_output_tokens", 0)
                 if "reasoning_effort" not in values:
                     declared = json.loads(values.get("capabilities", "{}")).get(
                         "reasoning_efforts"

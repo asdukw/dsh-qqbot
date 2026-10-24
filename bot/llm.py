@@ -72,7 +72,7 @@ class LLMConfig:
     base_url: str = ""
     model: str = ""
     provider: str = "opencode"
-    max_tokens: int = 800
+    max_tokens: int | None = None
     temperature: float = 1.0
     timeout: float = 60.0
     thinking: str = ""          # "", "enabled", "disabled"
@@ -106,10 +106,11 @@ class LLMClient:
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
-            "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
             "stream": False,
         }
+        if self.config.max_tokens is not None:
+            payload["max_tokens"] = self.config.max_tokens
         if self.config.thinking in ("enabled", "disabled"):
             payload["thinking"] = {"type": self.config.thinking}
         if self.config.reasoning_effort:

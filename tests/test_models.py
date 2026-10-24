@@ -63,7 +63,7 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(paid.context_window, 1_000_000)
         self.assertEqual(paid.reasoning_effort, "low")
         self.assertEqual(paid.effective_effort, "low")
-        self.assertEqual(paid.max_output_tokens, 2048)
+        self.assertEqual(paid.max_output_tokens, 0)
         self.assertIn("image", paid.capabilities.get("input", []))
 
     def test_exactly_one_active_model(self) -> None:
@@ -96,6 +96,7 @@ class ModelRegistryTests(unittest.TestCase):
         })
         self.assertEqual(record.display_name, "deepseek-flash")
         self.assertEqual(record.effective_effort, "high")
+        self.assertEqual(record.max_output_tokens, 0)
         self.assertFalse(record.is_active)
 
     def test_upsert_requires_core_fields_for_new_rows(self) -> None:
@@ -109,6 +110,16 @@ class ModelRegistryTests(unittest.TestCase):
     def test_empty_effort_means_model_default(self) -> None:
         record = self.registry.upsert("opencode-go", "deepseek-v4.1-flash", {"reasoning_effort": ""})
         self.assertEqual(record.effective_effort, "")
+
+    def test_zero_max_output_means_provider_default(self) -> None:
+        record = self.registry.upsert(
+            "opencode-go", "deepseek-v4.1-flash", {"max_output_tokens": "0"}
+        )
+        self.assertEqual(record.max_output_tokens, 0)
+        with self.assertRaises(ValueError):
+            self.registry.upsert(
+                "opencode-go", "deepseek-v4.1-flash", {"max_output_tokens": "-1"}
+            )
 
     def test_unknown_field_rejected(self) -> None:
         with self.assertRaises(ValueError):
