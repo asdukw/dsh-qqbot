@@ -60,11 +60,15 @@ export type UsageData = {
 
 export type FunData = {
   date: string;
+  start: string;
+  end: string;
+  days: number;
   conversation_id: string;
   messages: number;
   ranking: Array<{ user_id: number; name: string; messages: number }>;
   words: Array<{ text: string; count: number }>;
   conversations: Array<{ id: string; label: string; messages: number }>;
+  conversation_total: number;
 };
 
 export type TrendPoint = {

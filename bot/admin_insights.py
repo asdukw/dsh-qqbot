@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -71,19 +71,40 @@ def usage_data(
         return empty_usage(days, conversation_id)
 
 
-def _today_start() -> int:
-    now = datetime.now(TZ)
-    return int(datetime(now.year, now.month, now.day, tzinfo=TZ).timestamp())
+def parse_day(value: Any) -> datetime | None:
+    """Parse a YYYY-MM-DD parameter as midnight in Asia/Shanghai."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=TZ)
+    except ValueError:
+        return None
 
 
-def empty_fun(conversation_id: str) -> dict[str, Any]:
+def _range_days(start_day: datetime, end_day: datetime) -> int:
+    return (end_day.date() - start_day.date()).days + 1
+
+
+def empty_fun(
+    conversation_id: str,
+    start_day: datetime | None = None,
+    end_day: datetime | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_day = start_day or now
+    end_day = end_day or now
     return {
-        "date": datetime.now(TZ).strftime("%Y-%m-%d"),
+        "date": end_day.strftime("%Y-%m-%d"),
+        "start": start_day.strftime("%Y-%m-%d"),
+        "end": end_day.strftime("%Y-%m-%d"),
+        "days": _range_days(start_day, end_day),
         "conversation_id": conversation_id,
         "messages": 0,
         "ranking": [],
         "words": [],
         "conversations": [],
+        "conversation_total": 0,
     }
 
 
@@ -94,16 +115,32 @@ def _tokens(text: str) -> list[str]:
 
 
 def fun_data(
-    config: dict[str, Any], conversation_id: str = ""
+    config: dict[str, Any],
+    conversation_id: str = "",
+    start: Any = None,
+    end: Any = None,
 ) -> dict[str, Any]:
+    """Message ranking and word cloud for an inclusive Asia/Shanghai date range."""
+    now = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_day = parse_day(start) or now
+    end_day = parse_day(end) or now
+    # There is no data in the future, and adding a day to 9999-12-31 would
+    # overflow datetime.max.
+    if end_day > now:
+        end_day = now
+    if start_day > now:
+        start_day = now
+    if end_day < start_day:
+        start_day, end_day = end_day, start_day
+    start_ts = int(start_day.timestamp())
+    end_ts = int((end_day + timedelta(days=1)).timestamp())
     path = str(
         (config.get("paths") or {}).get("database", "/var/lib/qqbot/memory.db")
     )
     if not Path(path).is_file():
-        return empty_fun(conversation_id)
-    start = _today_start()
-    where = "created_at >= ?"
-    params: list[Any] = [start]
+        return empty_fun(conversation_id, start_day, end_day)
+    where = "created_at >= ? AND created_at < ?"
+    params: list[Any] = [start_ts, end_ts]
     if conversation_id:
         where += " AND conversation_id = ?"
         params.append(conversation_id)
@@ -112,12 +149,19 @@ def fun_data(
             f"file:{path}?mode=ro", uri=True, timeout=5
         )
     except sqlite3.Error:
-        return empty_fun(conversation_id)
+        return empty_fun(conversation_id, start_day, end_day)
     try:
         conn.row_factory = sqlite3.Row
         total = int(
             conn.execute(
                 f"SELECT COUNT(*) FROM chat_events WHERE {where}", params
+            ).fetchone()[0]
+        )
+        conversation_total = int(
+            conn.execute(
+                "SELECT COUNT(DISTINCT conversation_id) FROM chat_events "
+                "WHERE created_at >= ? AND created_at < ?",
+                (start_ts, end_ts),
             ).fetchone()[0]
         )
         ranking = [
@@ -143,21 +187,21 @@ def fun_data(
             }
             for row in conn.execute(
                 "SELECT conversation_id, COUNT(*) AS messages "
-                "FROM chat_events WHERE created_at >= ? "
-                "GROUP BY conversation_id ORDER BY messages DESC LIMIT 50",
-                (start,),
+                "FROM chat_events WHERE created_at >= ? AND created_at < ? "
+                "GROUP BY conversation_id ORDER BY messages DESC LIMIT 200",
+                (start_ts, end_ts),
             ).fetchall()
         ]
         texts = [
             str(row[0] or "")
             for row in conn.execute(
                 f"SELECT text FROM chat_events WHERE {where} "
-                "ORDER BY id DESC LIMIT 2000",
+                "ORDER BY created_at DESC LIMIT 2000",
                 params,
             ).fetchall()
         ]
     except sqlite3.Error:
-        return empty_fun(conversation_id)
+        return empty_fun(conversation_id, start_day, end_day)
     finally:
         conn.close()
 
@@ -181,10 +225,14 @@ def fun_data(
         for token, count in counts.most_common(60)
     ]
     return {
-        "date": datetime.now(TZ).strftime("%Y-%m-%d"),
+        "date": end_day.strftime("%Y-%m-%d"),
+        "start": start_day.strftime("%Y-%m-%d"),
+        "end": end_day.strftime("%Y-%m-%d"),
+        "days": _range_days(start_day, end_day),
         "conversation_id": conversation_id,
         "messages": total,
         "ranking": ranking,
         "words": words,
         "conversations": conversations,
+        "conversation_total": conversation_total,
     }

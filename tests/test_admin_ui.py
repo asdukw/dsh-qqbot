@@ -11,9 +11,11 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
@@ -1259,6 +1261,83 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(
             any(word["text"] == "hello" and word["count"] >= 3 for word in payload["words"])
         )
+
+    def test_fun_date_range(self) -> None:
+        tz = ZoneInfo("Asia/Shanghai")
+        today = datetime.now(tz).date()
+        old_day = today - timedelta(days=10)
+        far_day = today - timedelta(days=20)
+
+        def noon(day) -> int:
+            return int(
+                datetime(day.year, day.month, day.day, 12, tzinfo=tz).timestamp()
+            )
+
+        conn = sqlite3.connect(self.dbs["memory"])
+        conn.executemany(
+            "INSERT INTO chat_events "
+            "(conversation_id, chat_type, chat_id, user_id, sender_name, text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("group:42", "group", 42, 99, "旧人", "旧消息", noon(old_day)),
+                ("group:42", "group", 42, 98, "远古人", "远古消息", noon(far_day)),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        cookie, _ = self.login()
+        day = old_day.isoformat()
+        response = self.get(f"/api/fun?start={day}&end={day}", cookie)
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        self.assertEqual(payload["start"], day)
+        self.assertEqual(payload["end"], day)
+        self.assertEqual(payload["days"], 1)
+        self.assertEqual(payload["messages"], 1)
+        self.assertEqual([row["name"] for row in payload["ranking"]], ["旧人"])
+        self.assertEqual(payload["conversations"][0]["id"], "group:42")
+        self.assertEqual(payload["conversations"][0]["messages"], 1)
+        self.assertEqual(payload["conversation_total"], 1)
+
+        # The 13-day window includes today and the old event, not the far one.
+        start = (today - timedelta(days=12)).isoformat()
+        end = today.isoformat()
+        response = self.get(f"/api/fun?start={start}&end={end}", cookie)
+        payload = json.loads(response.read().decode())
+        self.assertEqual(payload["days"], 13)
+        self.assertEqual(payload["messages"], 3)
+        names = {row["name"] for row in payload["ranking"]}
+        self.assertTrue({"小明", "小红", "旧人"} <= names)
+        self.assertNotIn("远古人", names)
+        self.assertEqual(payload["conversations"][0]["messages"], 3)
+        self.assertEqual(payload["conversation_total"], 1)
+
+        # A wider window picks the far event up.
+        wide_start = (today - timedelta(days=25)).isoformat()
+        response = self.get(f"/api/fun?start={wide_start}&end={end}", cookie)
+        payload = json.loads(response.read().decode())
+        self.assertEqual(payload["days"], 26)
+        self.assertEqual(payload["messages"], 4)
+        self.assertIn("远古人", {row["name"] for row in payload["ranking"]})
+
+        # Inverted bounds are normalised, and bad dates fall back to today.
+        response = self.get(f"/api/fun?start={end}&end={start}", cookie)
+        payload = json.loads(response.read().decode())
+        self.assertEqual(payload["start"], start)
+        self.assertEqual(payload["end"], end)
+
+        response = self.get("/api/fun?start=nope&end=nope", cookie)
+        payload = json.loads(response.read().decode())
+        self.assertEqual(payload["start"], today.isoformat())
+        self.assertEqual(payload["end"], today.isoformat())
+
+        # A far-future date is clamped instead of overflowing datetime.max.
+        response = self.get("/api/fun?start=9999-12-31&end=9999-12-31", cookie)
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        self.assertEqual(payload["start"], today.isoformat())
+        self.assertEqual(payload["end"], today.isoformat())
 
     def test_wrong_password_is_rejected(self) -> None:
         _, response = self.login("nope")

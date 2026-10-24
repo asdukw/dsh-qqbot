@@ -234,7 +234,7 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 - `usage.db` 的 `usage_events` 统一记录非缓存输入、缓存输入和输出。DSH 侧由 `DSHClient.run_with_events()` 返回本轮 events，`UsageStore.record_dsh()` 解析 `assistant/message` 和 `compaction/summary` 的 usage；thin client 侧由 `LLMClient.usage_sink` 上报图片描述、表情打标、任务解析/文案等调用。
 - 启动时 `UsageStore.backfill_dsh()` 从现有 DSH JSONL 回填历史 usage，按 session/seq 幂等去重；旧数据也能进入面板。
 - `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息（发送者、文本、时间），供「今日发言排行」和「今日词云」使用；词云优先用 jieba，缺失时回退正则。
-- Admin UI 的 `/api/usage` 支持 `days` 和 `conversation`（群/好友）筛选，`/api/fun` 返回当天的排行、词云和会话列表。
+- Admin UI 的 `/api/usage` 支持 `days` 和 `conversation`（群/好友）筛选；`/api/fun` 支持 `conversation` 与 `start` / `end`（`YYYY-MM-DD`，北京时间，含首尾，缺省为今天），返回该范围的排行、词云和会话列表；聊天分析页提供「今天 / 近一周 / 近一月」快捷按钮和起止日日历。
 
 ## Admin UI 结构
 
