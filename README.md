@@ -132,12 +132,21 @@ sudo journalctl -u qqbot -f
 
 ## Admin UI
 
-面板是 `admin/` 下的 Vite + React + Tailwind 应用，组件按 shadcn/ui 的方式直接放在 `src/components/ui/`，主题为蓝白。Python 端只提供 JSON API 和静态文件：
+面板是 `admin/` 下的 Vite + React + Tailwind 应用，组件按 shadcn/ui 的方式直接放在 `src/components/ui/`，主题为蓝白。页面按内容分组，左侧导航 + hash 路由，每个功能独立成页：
+
+- **仪表盘**：今日消息 / Token、7 / 30 天趋势、订阅异常、最近消息、当前模型与角色卡；
+- **对话**：会话（群 / 私聊、session generation、消息量、token）、聊天分析（今日发言排行、词云、会话分布）；
+- **自动化**：定时任务、订阅推送；
+- **内容**：模型、角色卡、表情库；
+- **用量**：Token 用量，支持 7 / 30 / 90 天与按会话筛选；
+- **系统**：数据库路径与大小、DSH 路径、面板配置。
+
+Python 端只提供 JSON API 和静态文件：
 
 - 本地构建：`cd admin && npm install && npm run build`；产物在 `admin/dist/`（已随仓库提交，便于纯 Python 部署）。
-- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面，接口为 `/api/session`、`/api/login`、`/api/logout`、`/api/dashboard`；登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
+- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/conversations`、`/api/models`、`/api/cards`、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
 - 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
-- 页面包含模型、角色卡、定时任务、RSS 订阅、表情库计数，只读，每 60 秒自动刷新。
+- 只读，每 60 秒自动刷新；右上角「刷新」会立即重拉当前页。
 
 ## Token 审计与今日趣味数据
 

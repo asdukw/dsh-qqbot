@@ -222,6 +222,14 @@ CREATE TABLE group_facts (
 - `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息（发送者、文本、时间），供「今日发言排行」和「今日词云」使用；词云优先用 jieba，缺失时回退正则。
 - Admin UI 的 `/api/usage` 支持 `days` 和 `conversation`（群/好友）筛选，`/api/fun` 返回当天的排行、词云和会话列表。
 
+## Admin UI 结构
+
+- `bot/admin_ui.py` 只做 JSON API + 静态文件；React 端用 hash 路由（`#/tasks` 等）分组，服务端不需要额外的路由配置。
+- 资源接口各自读一个 SQLite：`/api/models`、`/api/cards`、`/api/tasks`、`/api/feeds`、`/api/stickers`；`/api/conversations` 合并 `memory.db` 的 `chat_events` / `session_state`、`profile.db` 的 `conversations` 与 `usage.db` 的按会话汇总。
+- `/api/overview` 返回仪表盘所需的计数、今日指标、按自然日（Asia/Shanghai）的活动趋势、订阅异常和最近消息；`/api/system` 返回数据库路径/大小与只读面板配置。
+- `/api/dashboard` 保留为旧版一次性聚合接口，内部复用上述资源函数；新页面不再使用它。
+- 所有 `/api/*` 都需要 HMAC cookie；前端 401 时回到登录页，每 60 秒重拉当前页。
+
 ## 上下文与压缩
 
 - 上下文长度来自模型注册表的 `context_window`（付费 Flash 1M，free 200k），经渲染后成为 DSH route 的 `contextWindow`。token meter 和 compaction 使用这个值；模型本身不需要被 prompt 告知。

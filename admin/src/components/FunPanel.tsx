@@ -2,7 +2,8 @@ import { Loader2, MessageSquareText, Sparkles, Trophy } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatNumber, type FunData } from "@/lib/analytics";
+import { formatNumber } from "@/lib/format";
+import type { FunData } from "@/lib/analytics";
 
 export default function FunPanel({
   data,

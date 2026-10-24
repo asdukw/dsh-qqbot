@@ -13,12 +13,11 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
-  conversationLabel,
   formatNumber,
   formatPercent,
-  type UsageData,
-} from "@/lib/analytics";
-import { cn } from "@/lib/utils";
+  conversationLabel,
+} from "@/lib/format";
+import type { UsageData } from "@/lib/analytics";
 
 const PURPOSE_LABELS: Record<string, string> = {
   chat: "聊天",
@@ -66,19 +65,9 @@ function MetricCard({
 
 export default function UsagePanel({
   data,
-  conversations,
-  days,
-  onDaysChange,
-  conversation,
-  onConversationChange,
   loading,
 }: {
   data: UsageData | null;
-  conversations: Array<{ id: string; label: string }>;
-  days: number;
-  onDaysChange: (days: number) => void;
-  conversation: string;
-  onConversationChange: (id: string) => void;
   loading: boolean;
 }) {
   const totals = data?.totals;
@@ -99,36 +88,8 @@ export default function UsagePanel({
             </CardDescription>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={conversation}
-            onChange={(event) => onConversationChange(event.target.value)}
-            className="h-9 rounded-lg border border-blue-200 bg-white px-3 text-sm text-slate-700 shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="">全部会话</option>
-            {conversations.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-          <div className="flex rounded-lg border border-blue-200 bg-white p-0.5">
-            {[7, 30, 90].map((value) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => onDaysChange(value)}
-                className={cn(
-                  "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                  days === value
-                    ? "bg-blue-600 text-white"
-                    : "text-slate-500 hover:bg-blue-50 hover:text-blue-700"
-                )}
-              >
-                {value} 天
-              </button>
-            ))}
-          </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">{data?.days ?? 7} 天</Badge>
           {loading ? <Loader2 className="h-4 w-4 animate-spin text-blue-600" /> : null}
         </div>
       </CardHeader>
@@ -170,7 +131,7 @@ export default function UsagePanel({
           <div className="rounded-xl border border-blue-100">
             <div className="flex items-center justify-between border-b border-blue-50 px-4 py-3">
               <h4 className="text-sm font-semibold text-slate-800">每日用量</h4>
-              <Badge variant="outline">{days} 天</Badge>
+              <Badge variant="outline">{data?.days ?? 7} 天</Badge>
             </div>
             {data?.by_day.length ? (
               <Table>
@@ -283,7 +244,9 @@ export default function UsagePanel({
                     <TableCell className="whitespace-nowrap text-xs">
                       {conversationLabel(row.conversation_id)}
                     </TableCell>
-                    <TableCell className="text-xs text-slate-500">{row.session_id}</TableCell>
+                    <TableCell className="text-xs text-slate-500">
+                      {row.session_id || "-"}
+                    </TableCell>
                     <TableCell className="text-xs">{formatNumber(row.input)}</TableCell>
                     <TableCell className="text-xs">{formatNumber(row.cache_read)}</TableCell>
                     <TableCell className="text-xs">{formatNumber(row.output)}</TableCell>
