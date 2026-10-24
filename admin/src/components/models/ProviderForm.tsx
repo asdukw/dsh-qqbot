@@ -21,6 +21,31 @@ export type ProviderFormValues = {
 };
 
 const BUILTIN_PROVIDERS = new Set(["opencode", "opencode-go"]);
+const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+// Derive a readable id from a Latin display name; Chinese names fall back to
+// "provider" and the uniqueness suffix.
+function slugifyProvider(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, 48);
+  return PROVIDER_ID_RE.test(slug) ? slug : "";
+}
+
+function uniqueProviderId(base: string, existing: string[]): string {
+  const reserved = new Set(existing.map((value) => value.toLowerCase()));
+  const root = base || "provider";
+  if (!reserved.has(root)) return root;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${root}-${index}`.slice(0, 64);
+    if (!reserved.has(candidate)) return candidate;
+  }
+  return `${root}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 64);
+}
 
 const EMPTY: ProviderFormValues = {
   provider: "",
@@ -95,9 +120,11 @@ export function ProviderForm({
 
   const isBuiltin = BUILTIN_PROVIDERS.has(values.provider.trim());
   const keySource = provider?.api_key_source ?? "missing";
+  const previewId =
+    values.provider.trim() ||
+    uniqueProviderId(slugifyProvider(values.display_name), existingProviders);
   const canSubmit =
     !busy &&
-    /^[a-z0-9][a-z0-9._-]{0,63}$/.test(values.provider.trim()) &&
     values.base_url.trim().length > 0 &&
     values.display_name.trim().length > 0 &&
     (mode === "edit" || (values.api_key ?? "").trim().length > 0);
@@ -127,9 +154,12 @@ export function ProviderForm({
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!canSubmit) return;
+    const providerId =
+      values.provider.trim() ||
+      uniqueProviderId(slugifyProvider(values.display_name), existingProviders);
     const payload: ProviderFormValues = {
       ...values,
-      provider: values.provider.trim(),
+      provider: providerId,
       display_name: values.display_name.trim(),
       api: values.api.trim() || "openai-completions",
       base_url: values.base_url.trim(),
@@ -225,28 +255,20 @@ export function ProviderForm({
           </div>
         ) : null}
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="供应商 ID"
-            hint="DSH route 名，小写字母/数字/._-；创建后不可修改。"
-          >
-            <Input
-              value={values.provider}
-              onChange={(event) => update("provider", event.target.value.toLowerCase())}
-              disabled={mode === "edit"}
-              placeholder="deepseek"
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </Field>
-          <Field label="显示名称" hint="面板和 DSH route 上显示的名字。">
-            <Input
-              value={values.display_name}
-              onChange={(event) => update("display_name", event.target.value)}
-              placeholder="DeepSeek"
-            />
-          </Field>
-        </div>
+        <Field label="显示名称" hint="面板和 DSH route 上显示的名字。">
+          <Input
+            value={values.display_name}
+            onChange={(event) => update("display_name", event.target.value)}
+            placeholder="DeepSeek"
+          />
+        </Field>
+        <p className="text-[11px] text-slate-400">
+          {mode === "edit"
+            ? `供应商 ID：${values.provider}`
+            : values.display_name.trim()
+              ? `保存时自动生成供应商 ID：${previewId}`
+              : "保存时自动生成供应商 ID"}
+        </p>
 
         <Field label="Base URL" hint="OpenAI 兼容端点，通常以 /v1 结尾；不要带 /chat/completions。">
           <Input
