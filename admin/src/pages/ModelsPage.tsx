@@ -53,12 +53,6 @@ type ModelModalState =
 
 type Notice = { kind: "ok" | "error"; text: string } | null;
 
-function capabilitiesOf(model: ModelRow): string[] {
-  return Object.entries(model.capabilities)
-    .filter(([, value]) => Boolean(value))
-    .map(([key]) => key);
-}
-
 export default function ModelsPage({ refreshKey }: { refreshKey: number }) {
   const { data, loading, error, reload } = useApi<ModelsData>("/api/models", refreshKey);
   const [selected, setSelected] = useState<string | null>(null);
@@ -580,7 +574,6 @@ function ProviderDetail({
       <SectionCard
         icon={Boxes}
         title="模型"
-        description="每个模型只保存自己的窗口、输出上限与能力"
         badge={models.length}
         actions={
           <Button size="sm" variant="outline" onClick={onAddModel} disabled={busy}>
@@ -590,21 +583,17 @@ function ProviderDetail({
         }
       >
         {models.length ? (
-          <Table className="min-w-[920px]">
+          <Table className="min-w-[680px]">
             <TableHeader>
               <TableRow>
                 <TableHead>模型</TableHead>
-                <TableHead>状态</TableHead>
                 <TableHead className="text-right">上下文</TableHead>
                 <TableHead>Reasoning</TableHead>
-                <TableHead>能力</TableHead>
-                <TableHead>更新</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {models.map((model) => {
-                const capabilities = capabilitiesOf(model);
                 return (
                   <TableRow key={`${model.provider}/${model.model_id}`}>
                     <TableCell className="max-w-[20rem]">
@@ -613,18 +602,6 @@ function ProviderDetail({
                         {model.is_active ? <Badge>当前</Badge> : null}
                         {!model.enabled ? <Badge variant="muted">禁用</Badge> : null}
                       </div>
-                      <div className="mt-0.5 font-mono text-[11px] text-slate-400">
-                        {model.model_id}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {model.enabled ? (
-                        <Badge variant="success">
-                          <CheckCircle2 className="mr-1 h-3 w-3" /> 启用
-                        </Badge>
-                      ) : (
-                        <Badge variant="muted">禁用</Badge>
-                      )}
                     </TableCell>
                     <TableCell className="text-right text-xs tabular-nums">
                       {formatNumber(model.context_window)}
@@ -668,22 +645,6 @@ function ProviderDetail({
                           </select>
                         );
                       })()}
-                    </TableCell>
-                    <TableCell>
-                      {capabilities.length ? (
-                        <div className="flex max-w-[12rem] flex-wrap gap-1">
-                          {capabilities.map((key) => (
-                            <Badge key={key} variant="outline" className="text-[10px]">
-                              {key}
-                            </Badge>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-slate-400">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap text-xs text-slate-500">
-                      {formatTs(model.updated_at)}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
