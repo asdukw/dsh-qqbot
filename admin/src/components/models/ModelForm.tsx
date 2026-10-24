@@ -126,10 +126,7 @@ export function ModelForm({
         : [...EFFORTS],
     [reasoningEffort]
   );
-  const canSubmit =
-    !busy &&
-    values.model_id.trim().length > 0 &&
-    Number(values.max_output_tokens) > 0;
+  const canSubmit = !busy && values.model_id.trim().length > 0;
 
   async function fetchModels() {
     fetchAbort.current?.abort();
@@ -188,6 +185,11 @@ export function ModelForm({
       Number.isFinite(contextWindow) && contextWindow > 0
         ? values.context_window.trim()
         : "256000";
+    const maxOutput = Number(values.max_output_tokens);
+    const maxOutputValue =
+      Number.isFinite(maxOutput) && maxOutput > 0
+        ? values.max_output_tokens.trim()
+        : "2048";
     const declaredEfforts =
       reasoningEffort && !isKnownEffort(reasoningEffort)
         ? [reasoningEffort, ...EFFORTS]
@@ -205,7 +207,7 @@ export function ModelForm({
           ? model.display_name
           : values.model_id.trim(),
       context_window: contextWindowValue,
-      max_output_tokens: values.max_output_tokens.trim(),
+      max_output_tokens: maxOutputValue,
       reasoning_effort: reasoningEffort === "none" ? "" : reasoningEffort,
       capabilities,
       enabled,
@@ -313,7 +315,11 @@ export function ModelForm({
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="上下文窗口" hint="tokens；留空默认 256000。DSH 的 token meter 和自动压缩用它。">
+          <Field
+            className="sm:col-span-2"
+            label="上下文窗口"
+            hint="tokens；留空默认 256000。DSH 的 token meter 和自动压缩用它。"
+          >
             <Input
               type="number"
               min={1}
@@ -322,17 +328,6 @@ export function ModelForm({
                 setValues((current) => ({ ...current, context_window: event.target.value }))
               }
               placeholder="256000"
-            />
-          </Field>
-          <Field label="最大输出 tokens" hint="单次请求的 max_tokens，建议 2048–8192。">
-            <Input
-              type="number"
-              min={1}
-              value={values.max_output_tokens}
-              onChange={(event) =>
-                setValues((current) => ({ ...current, max_output_tokens: event.target.value }))
-              }
-              placeholder="2048"
             />
           </Field>
         </div>

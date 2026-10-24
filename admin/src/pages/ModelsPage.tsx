@@ -596,7 +596,6 @@ function ProviderDetail({
                 <TableHead>模型</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead className="text-right">上下文</TableHead>
-                <TableHead className="text-right">最大输出</TableHead>
                 <TableHead>Reasoning</TableHead>
                 <TableHead>能力</TableHead>
                 <TableHead>更新</TableHead>
@@ -629,9 +628,6 @@ function ProviderDetail({
                     </TableCell>
                     <TableCell className="text-right text-xs tabular-nums">
                       {formatNumber(model.context_window)}
-                    </TableCell>
-                    <TableCell className="text-right text-xs tabular-nums">
-                      {formatNumber(model.max_output_tokens)}
                     </TableCell>
                     <TableCell>
                       {(() => {
