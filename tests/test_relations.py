@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -108,6 +109,69 @@ class RelationStoreTests(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.affinity, 20)
 
+    def test_group_and_private_impressions_are_separate(self) -> None:
+        self.store.touch(7, "小明")
+        record = self.store.apply(
+            7,
+            RelationMarkers(delta=1, impression="公开印象", relationship="损友"),
+            now=1000,
+            scope="group",
+        )
+        assert record is not None
+        self.assertEqual(record.public_impression, "公开印象")
+        self.assertEqual(record.impression, "")
+        record = self.store.apply(
+            7, RelationMarkers(delta=1, impression="私下印象"), now=1100
+        )
+        assert record is not None
+        self.assertEqual(record.public_impression, "公开印象")
+        self.assertEqual(record.impression, "私下印象")
+        self.assertEqual(record.affinity, 22)
+
+    def test_prompt_context_scope(self) -> None:
+        self.store.touch(7, "小明")
+        self.store.apply(
+            7,
+            RelationMarkers(impression="公开印象", relationship="损友"),
+            now=1000,
+            scope="group",
+        )
+        self.store.apply(7, RelationMarkers(impression="私下印象"), now=1100)
+        private = self.store.prompt_context(7)
+        group = self.store.prompt_context(7, scope="group")
+        self.assertIn("私下印象", private)
+        self.assertNotIn("公开印象", private)
+        self.assertIn("关系：损友", private)
+        self.assertIn("公开印象", group)
+        self.assertNotIn("私下印象", group)
+        self.assertNotIn("关系：损友", group)
+
+    def test_concurrent_apply_is_serialized(self) -> None:
+        self.store.close()
+        self.store = RelationStore(
+            self.path,
+            start=20,
+            max_delta=3,
+            cooldown_seconds=0,
+            max_changes_per_day=10,
+        )
+        self.store.touch(7, "小明")
+        barrier = threading.Barrier(2)
+
+        def worker(delta: int) -> None:
+            barrier.wait()
+            self.store.apply(7, RelationMarkers(delta=delta), now=1000)
+
+        threads = [threading.Thread(target=worker, args=(d,)) for d in (1, 2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        record = self.store.get(7)
+        assert record is not None
+        self.assertEqual(record.affinity, 23)
+        self.assertEqual(record.updates_today, 2)
+
     def test_affinity_stays_within_bounds(self) -> None:
         self.store.close()
         self.store = RelationStore(
@@ -162,17 +226,20 @@ class RelationStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get(7))
         self.assertFalse(self.store.reset(7))
 
-    def test_facts_respect_visibility(self) -> None:
+    def test_facts_are_group_scoped(self) -> None:
         conn = sqlite3.connect(self.path)
         conn.execute(
-            "CREATE TABLE user_facts (user_id TEXT, key TEXT, value TEXT, "
-            "visibility TEXT, updated_at INTEGER)"
+            "CREATE TABLE user_facts (user_id TEXT, group_id TEXT NOT NULL DEFAULT '', "
+            "key TEXT, value TEXT, visibility TEXT, updated_at INTEGER, "
+            "PRIMARY KEY (user_id, group_id, key))"
         )
         conn.executemany(
-            "INSERT INTO user_facts VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO user_facts VALUES (?, ?, ?, ?, ?, ?)",
             [
-                ("7", "city", "杭州", "public", 2),
-                ("7", "secret", "怕黑", "private", 1),
+                ("7", "", "city", "杭州", "public", 2),
+                ("7", "", "secret", "怕黑", "private", 1),
+                ("7", "42", "weather", "长春", "public", 3),
+                ("7", "43", "weather", "北京", "public", 4),
             ],
         )
         conn.commit()
@@ -182,21 +249,61 @@ class RelationStoreTests(unittest.TestCase):
             self.store.facts(7, include_private=True),
             [("city", "杭州"), ("secret", "怕黑")],
         )
+        self.assertEqual(
+            self.store.facts(7, group_id="42"),
+            [("weather", "长春"), ("city", "杭州")],
+        )
+        self.assertEqual(
+            self.store.facts(7, group_id="43"),
+            [("weather", "北京"), ("city", "杭州")],
+        )
 
-    def test_render_hides_impression_from_others(self) -> None:
+    def test_facts_fall_back_to_source_before_migration(self) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "CREATE TABLE user_facts (user_id TEXT, key TEXT, value TEXT, "
+            "visibility TEXT, source TEXT, updated_at INTEGER, "
+            "PRIMARY KEY (user_id, key))"
+        )
+        conn.executemany(
+            "INSERT INTO user_facts VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("7", "city", "杭州", "public", None, 2),
+                ("7", "secret", "怕黑", "private", "private", 1),
+                ("7", "weather", "长春", "public", "group:42", 3),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.store.facts(7), [("city", "杭州")])
+        self.assertEqual(
+            self.store.facts(7, group_id="42"),
+            [("weather", "长春"), ("city", "杭州")],
+        )
+        self.assertEqual(self.store.facts(7, group_id="43"), [("city", "杭州")])
+
+    def test_render_scopes_impressions(self) -> None:
         self.store.touch(7, "小明")
         record = self.store.apply(
             7,
-            RelationMarkers(delta=1, impression="有礼貌", relationship="损友"),
+            RelationMarkers(delta=1, impression="公开印象", relationship="损友"),
             now=1000,
+            scope="group",
+        )
+        record = self.store.apply(
+            7, RelationMarkers(impression="私下印象"), now=1100
         )
         assert record is not None
-        full = render_relation(record, "小明", [], full=True)
+        full_private = render_relation(record, "小明", [], full=True)
+        full_group = render_relation(record, "小明", [], full=True, scope="group")
         limited = render_relation(
-            record, "QQ 7", [("city", "杭州")], full=False
+            record, "QQ 7", [("city", "杭州")], full=False, scope="group"
         )
-        self.assertIn("有礼貌", full)
-        self.assertIn("损友", full)
-        self.assertNotIn("有礼貌", limited)
-        self.assertNotIn("损友", limited)
+        self.assertIn("私下印象", full_private)
+        self.assertIn("损友", full_private)
+        self.assertIn("公开印象", full_group)
+        self.assertNotIn("私下印象", full_group)
+        self.assertNotIn("损友", full_group)
+        self.assertNotIn("私下印象", limited)
+        self.assertNotIn("公开印象", limited)
         self.assertIn("公开画像", limited)

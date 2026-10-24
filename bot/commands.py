@@ -205,10 +205,23 @@ class CommandRouter:
             )
         full = is_self or is_admin
         include_private = event.message_type == "private" and (is_self or is_admin)
-        facts = store.facts(target, include_private=include_private and full)
+        group_id = (
+            str(event.group_id)
+            if event.message_type == "group"
+            and getattr(event, "group_id", None) is not None
+            else ""
+        )
+        facts = store.facts(
+            target,
+            include_private=include_private and full,
+            group_id=group_id,
+        )
+        scope = "group" if event.message_type == "group" else "private"
         await self.bot.send_text(
             event,
-            render_relation(record, label, facts, full=full, start=store.start),
+            render_relation(
+                record, label, facts, full=full, scope=scope, start=store.start
+            ),
         )
 
     async def _reset(self, event: Any) -> None:

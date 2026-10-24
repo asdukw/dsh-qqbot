@@ -1099,6 +1099,12 @@ class Bot:
         text = task.message
         if getattr(task, "mode", "fixed") == "generate":
             text = await self._compose_task_message(task)
+        text, _ = extract_relation_markers(text)
+        if not text.strip():
+            log.warning(
+                "scheduled task #%s produced no visible text", getattr(task, "id", "?")
+            )
+            return
         await self._send_to_chat(task.chat_type, task.chat_id, text)
 
     def start_feeds(self) -> None:
@@ -1565,7 +1571,10 @@ class Bot:
         if relation_markers.has_update and self.relations is not None:
             try:
                 updated = await asyncio.to_thread(
-                    self.relations.apply, event.user_id, relation_markers
+                    self.relations.apply,
+                    event.user_id,
+                    relation_markers,
+                    scope="group" if event.message_type == "group" else "private",
                 )
             except sqlite3.Error as exc:
                 log.warning("relation update failed: %s", exc)
@@ -1589,6 +1598,11 @@ class Bot:
         reply, wants_voice = extract_voice_marker(reply)
         visible, hint = extract_sticker_marker(reply)
         spoken = spoken_text(visible)
+        if not visible.strip() and meme_text is None and hint is None:
+            # A model can emit only hidden markers; do not leave the user with
+            # silence after the relation update.
+            visible = "……"
+            spoken = spoken_text(visible)
         if wants_voice:
             log.info("voice marker found (spoken=%d chars)", len(spoken))
         if not wants_voice and proactive and self._voice_roll(spoken):
@@ -2405,7 +2419,10 @@ class Bot:
             max_history_chars=self.config.bot.max_history_chars,
         )
         if self.relations is not None:
-            relation_text = self.relations.prompt_context(event.user_id)
+            relation_text = self.relations.prompt_context(
+                event.user_id,
+                scope="group" if event.message_type == "group" else "private",
+            )
             if relation_text:
                 messages[0]["content"] = (
                     f"{messages[0]['content']}\n\n[关系状态]\n"

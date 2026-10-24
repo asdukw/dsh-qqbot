@@ -231,10 +231,11 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 
 ## 关系 / 好感度（`bot/relations.py`）
 
-- 每个 QQ 一行，存在 `profile.db` 的 `user_relations` 表（与 DSH 用户画像同库）：好感度 `0~100`（默认 20）、关系标签、结构化印象、最近活动/更新时间、每日变更计数。
-- 主模型在回复末尾输出隐藏标记 `[好感+2]` / `[印象: …]` / `[关系: …]`；`Bot._send_reply` 在发送前剥离并写入 `RelationStore`。增量夹在 `±max_delta`，有冷却和每日变更上限；衰减暂不启用。
-- `/relation`（别名 `/关系`、`/好感度`、`/印象`）对所有人开放：默认查自己，`/relation <QQ>` 查他人；自己/管理员看完整印象，其他人只看分数/等级和公开 facts；私聊之外不展示 private facts。管理员可用 `/relation set|reset`。
-- `dsh/user-profile.mjs` 通过 `{{user_relation}}` 把压缩后的关系块注入 DSH 系统提示；thin 路径在 `_reply_llm` 的 system message 里追加同一块和标记说明。
+- 每个 QQ 一行，存在 `profile.db` 的 `user_relations` 表（与 DSH 用户画像同库）：好感度 `0~100`（默认 20）、关系标签、私下印象、公开印象、最近活动/更新时间、每日变更计数。
+- 主模型在回复末尾输出隐藏标记 `[好感+2]` / `[印象: …]` / `[关系: …]`；`Bot._send_reply` 在发送前剥离并写入 `RelationStore`。群聊里的 `[印象]` 写 `public_impression`，私聊里写 `impression`；增量夹在 `±max_delta`，有冷却和每日变更上限；衰减暂不启用。
+- `user_facts` 带 `group_id` 作用域：群里学到的 fact 只在该群注入/查询，私聊只能看到全局 facts；旧数据迁移时按 `source=group:<gid>` 回填。`/relation` 的画像同样按当前群过滤。
+- `/relation`（别名 `/关系`、`/好感度`、`/印象`）对所有人开放：默认查自己，`/relation <QQ>` 查他人；群聊只展示公开印象，私聊展示私下印象；其他人不展示印象，只看分数/等级和公开 facts。管理员可用 `/relation set|reset`。
+- `dsh/user-profile.mjs` 通过 `{{user_relation}}` 把压缩后的关系块注入 DSH 系统提示（群聊用公开印象，私聊用私下印象）；thin 路径在 `_reply_llm` 的 system message 里追加同一块和标记说明。
 
 ## Token 审计与群聊统计
 
