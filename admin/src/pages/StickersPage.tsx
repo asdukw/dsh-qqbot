@@ -35,6 +35,7 @@ import { cn } from "@/lib/utils";
 
 type StickerFilter = "all" | "ok" | "banned";
 type StickerView = "grid" | "table";
+type StickerSort = "default" | "uses-desc" | "uses-asc";
 
 // Icons are looked up in the view toggle so the label stays a plain string.
 const VIEW_ICONS: Record<StickerView, typeof LayoutGrid> = {
@@ -45,6 +46,7 @@ const VIEW_ICONS: Record<StickerView, typeof LayoutGrid> = {
 export default function StickersPage({ refreshKey }: { refreshKey: number }) {
   const [filter, setFilter] = useState<StickerFilter>("all");
   const [view, setView] = useState<StickerView>("grid");
+  const [sort, setSort] = useState<StickerSort>("default");
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState<number | null>(null);
   const { data, loading, error } = useApi<StickersData>("/api/stickers", refreshKey);
@@ -52,7 +54,7 @@ export default function StickersPage({ refreshKey }: { refreshKey: number }) {
   const rows = useMemo(() => {
     const all = data?.stickers ?? [];
     const query = search.trim().toLowerCase();
-    return all.filter((sticker) => {
+    const filtered = all.filter((sticker) => {
       if (filter === "ok" && sticker.status !== "ok") return false;
       if (filter === "banned" && sticker.status !== "banned") return false;
       if (!query) return true;
@@ -60,7 +62,14 @@ export default function StickersPage({ refreshKey }: { refreshKey: number }) {
         value.toLowerCase().includes(query)
       );
     });
-  }, [data, filter, search]);
+    if (sort === "uses-desc") {
+      return [...filtered].sort((a, b) => b.uses - a.uses || b.id - a.id);
+    }
+    if (sort === "uses-asc") {
+      return [...filtered].sort((a, b) => a.uses - b.uses || b.id - a.id);
+    }
+    return filtered;
+  }, [data, filter, search, sort]);
 
   const all = data?.stickers ?? [];
   // Derive the open row from the latest payload so a refresh updates the dialog.
@@ -111,6 +120,16 @@ export default function StickersPage({ refreshKey }: { refreshKey: number }) {
           </div>
           <div className="flex items-center gap-2">
             {loading ? <span className="text-xs text-slate-500">加载中…</span> : null}
+            <select
+              value={sort}
+              onChange={(event) => setSort(event.target.value as StickerSort)}
+              aria-label="排序方式"
+              className="h-9 rounded-lg border border-blue-200 bg-white px-2.5 text-xs text-slate-600 shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="default">默认排序</option>
+              <option value="uses-desc">使用最多</option>
+              <option value="uses-asc">使用最少</option>
+            </select>
             <div className="inline-flex rounded-lg border border-blue-200 bg-white p-0.5">
               {(Object.keys(VIEW_ICONS) as StickerView[]).map((option) => {
                 const Icon = VIEW_ICONS[option];
