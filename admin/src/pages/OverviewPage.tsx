@@ -134,7 +134,7 @@ export default function OverviewPage({
           label="已知会话"
           value={formatNumber(counts.conversations)}
           hint="群聊 / 好友 / 任务"
-          onClick={() => onNavigate("conversations")}
+          onClick={() => onNavigate("usage")}
         />
         <StatCard
           icon={CalendarClock}
@@ -256,10 +256,10 @@ export default function OverviewPage({
         actions={
           <button
             type="button"
-            onClick={() => onNavigate("conversations")}
+            onClick={() => onNavigate("usage")}
             className="text-xs font-medium text-blue-600 hover:text-blue-700"
           >
-            查看会话 →
+            查看用量 →
           </button>
         }
       >

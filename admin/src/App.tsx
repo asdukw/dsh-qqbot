@@ -16,7 +16,6 @@ import { Separator } from "@/components/ui/separator";
 import { requestJson, setUnauthorizedHandler, Unauthorized } from "@/lib/api";
 import { useHashRoute, type RouteId } from "@/lib/router";
 import CardsPage from "@/pages/CardsPage";
-import ConversationsPage from "@/pages/ConversationsPage";
 import FeedsPage from "@/pages/FeedsPage";
 import InsightsPage from "@/pages/InsightsPage";
 import ModelsPage from "@/pages/ModelsPage";
@@ -107,8 +106,6 @@ function Page({
   navigate: (id: RouteId) => void;
 }) {
   switch (route) {
-    case "conversations":
-      return <ConversationsPage refreshKey={refreshKey} />;
     case "insights":
       return <InsightsPage refreshKey={refreshKey} />;
     case "tasks":
