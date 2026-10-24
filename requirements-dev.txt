@@ -1,0 +1,5 @@
+# Development-only tooling; install alongside bot/requirements.txt.
+# Pyright's checking mode ("standard") lives in pyproject.toml; it is not a
+# package extra. See the Development section of README.md.
+ruff==0.17.2
+pyright==1.1.414

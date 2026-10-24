@@ -4,26 +4,26 @@ import asyncio
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
 from tasks import (  # noqa: E402
     TZ,
-    TaskScheduler,
     TaskRecord,
+    TaskScheduler,
     TaskSpec,
     TaskStore,
     describe_record,
     describe_target,
-    extract_task_marker,
     extract_task_management,
+    extract_task_marker,
     next_run_for,
-    resolve_target,
     parse_task,
     parse_task_json,
     render_task_list,
+    resolve_target,
     spec_of,
 )
 
@@ -62,7 +62,7 @@ class NextRunTests(unittest.TestCase):
         )
 
     def test_once_time_is_normalised_to_beijing(self) -> None:
-        utc = datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc)
+        utc = datetime(2026, 10, 25, 0, 0, tzinfo=UTC)
         when = next_run_for(spec(kind="once", time=None, run_at=utc), NOW)
         self.assertEqual(when.utcoffset(), timedelta(hours=8))
         self.assertEqual(when, datetime(2026, 10, 25, 8, 0, tzinfo=TZ))

@@ -165,8 +165,9 @@ async def synthesize(
     chunks = bytearray()
     try:
         async for chunk in communicate.stream():
-            if chunk.get("type") == "audio" and chunk.get("data"):
-                chunks.extend(chunk["data"])
+            audio = chunk.get("data")
+            if chunk.get("type") == "audio" and audio:
+                chunks.extend(audio)
     except Exception as exc:  # noqa: BLE001 - network/service errors
         raise VoiceError(f"tts failed: {exc}") from exc
     if not chunks:

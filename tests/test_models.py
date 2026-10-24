@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -90,7 +91,7 @@ class ModelRegistryTests(unittest.TestCase):
 
     def test_upsert_requires_core_fields_for_new_rows(self) -> None:
         with self.assertRaises(ValueError):
-            self.registry.upsert("deepseek", "missing-model", {"context_window": "1000"})
+            self.registry.upsert("unregistered", "missing-model", {"context_window": "1000"})
 
     def test_effort_must_be_declared(self) -> None:
         with self.assertRaises(ValueError):
@@ -146,13 +147,136 @@ class ModelRegistryTests(unittest.TestCase):
         ids = [m["id"] for m in deepseek["models"]]
         self.assertNotIn("deepseek-flash", ids)
 
-    def test_inconsistent_provider_metadata_is_rejected(self) -> None:
+    def test_connection_fields_are_shared_by_the_provider(self) -> None:
         self.registry.upsert("opencode-go", "other", {
             "base_url": "https://elsewhere.example/v1",
             "context_window": "1000",
         })
+        # The old per-model fields now update the provider, so every model
+        # behind it reports the same endpoint and the patch has one route.
+        for model_id in ("deepseek-v4.1-flash", "other"):
+            record = self.registry.get("opencode-go", model_id)
+            assert record is not None
+            self.assertEqual(record.base_url, "https://elsewhere.example/v1")
+        target = Path(self.tmp.name) / "shared.json"
+        self.registry.write_dsh_patch(target)
+        patch = json.loads(target.read_text(encoding="utf-8"))
+        opencode = patch[0]["config"]["providers"]["opencode-go"]
+        self.assertEqual(opencode["baseURL"], "https://elsewhere.example/v1")
+        self.assertEqual(
+            sorted(model["id"] for model in opencode["models"]),
+            ["deepseek-v4.1-flash", "other"],
+        )
+
+    def test_model_edits_do_not_change_provider(self) -> None:
+        self.registry.upsert("deepseek", "deepseek-flash", {
+            "display_name": "Renamed Model",
+            "enabled": "0",
+        })
+        provider = self.registry.get_provider("deepseek")
+        assert provider is not None
+        self.assertEqual(provider.display_name, "DeepSeek")
+        self.assertTrue(provider.enabled)
+        model = self.registry.get("deepseek", "deepseek-flash")
+        assert model is not None
+        self.assertEqual(model.display_name, "Renamed Model")
+        self.assertFalse(model.enabled)
+
+    def test_provider_crud_and_active_guards(self) -> None:
+        provider = self.registry.upsert_provider("newco", {
+            "display_name": "New Co",
+            "base_url": "https://new.example/v1",
+            "api_key_env": "NEWCO_API_KEY",
+        })
+        self.assertEqual(provider.display_name, "New Co")
+        self.assertFalse(provider.builtin)
+        self.assertEqual(provider.model_count, 0)
+
+        self.registry.upsert("newco", "new-model", {
+            "context_window": "32000",
+            "capabilities": '{"reasoning_efforts": ["low", "high"]}',
+        })
+        provider = self.registry.get_provider("newco")
+        assert provider is not None
+        self.assertEqual(provider.model_count, 1)
+        self.registry.use("newco", "new-model")
+
         with self.assertRaises(ValueError):
-            self.registry.write_dsh_patch(Path(self.tmp.name) / "bad.json")
+            self.registry.delete_provider("newco")
+        with self.assertRaises(ValueError):
+            self.registry.upsert_provider("newco", {"enabled": "0"})
+        with self.assertRaises(ValueError):
+            self.registry.delete_model("newco", "new-model")
+
+        self.registry.use("opencode-go", "deepseek-v4.1-flash")
+        self.registry.upsert_provider("newco", {"enabled": "0"})
+        with self.assertRaises(ValueError):
+            self.registry.use("newco", "new-model")
+        self.registry.delete_model("newco", "new-model")
+        self.registry.delete_provider("newco")
+        self.assertIsNone(self.registry.get_provider("newco"))
+
+    def test_disabled_provider_is_excluded_from_the_patch(self) -> None:
+        self.registry.upsert_provider("newco", {
+            "base_url": "https://new.example/v1",
+            "api_key_env": "NEWCO_API_KEY",
+        })
+        self.registry.upsert("newco", "new-model", {"context_window": "32000"})
+        self.registry.upsert_provider("newco", {"enabled": "0"})
+        target = Path(self.tmp.name) / "disabled-provider.json"
+        self.registry.write_dsh_patch(target)
+        patch = json.loads(target.read_text(encoding="utf-8"))
+        self.assertNotIn("newco", patch[0]["config"]["providers"])
+
+    def test_empty_registry_is_not_reseeded(self) -> None:
+        # The admin UI can delete models; seeding is a one-time bootstrap, not
+        # a resurrection on the next bot restart.
+        self.registry._db.execute("DELETE FROM models")
+        self.registry._db.commit()
+        self.reopen()
+        self.assertEqual(self.registry.list(), [])
+
+    def test_stored_key_uses_a_synthetic_env_ref(self) -> None:
+        self.registry.upsert_provider("newco", {
+            "base_url": "https://new.example/v1",
+            "api_key_env": "NEWCO_API_KEY",
+            "api_key": "sk-test-secret",
+        })
+        self.registry.upsert("newco", "new-model", {"context_window": "32000"})
+        self.registry.use("newco", "new-model")
+        before = self.registry.active_signature()
+
+        target = Path(self.tmp.name) / "stored-key.json"
+        self.registry.write_dsh_patch(target)
+        raw = target.read_text(encoding="utf-8")
+        patch = json.loads(raw)
+        route = patch[0]["config"]["providers"]["newco"]
+        ref = route["apiKeyEnv"]
+        self.addCleanup(lambda: os.environ.pop(ref, None))
+        self.assertTrue(ref.startswith("QQBOT_PK_"))
+        self.assertEqual(os.environ.get(ref), "sk-test-secret")
+        self.assertNotIn("sk-test-secret", raw)
+
+        # A key change is part of the active signature, so the running bot
+        # reloads its DSH runtime instead of keeping the old environment.
+        self.registry.upsert_provider("newco", {"api_key": "sk-test-rotated"})
+        after = self.registry.active_signature()
+        self.assertNotEqual(before, after)
+        self.registry.write_dsh_patch(target)
+        self.assertEqual(os.environ.get(ref), "sk-test-rotated")
+
+        # Clearing the stored key falls back to the configured env reference.
+        self.registry.upsert_provider("newco", {"api_key": ""})
+        self.registry.write_dsh_patch(target)
+        route = json.loads(target.read_text(encoding="utf-8"))[0]["config"]["providers"]["newco"]
+        self.assertEqual(route["apiKeyEnv"], "NEWCO_API_KEY")
+        self.assertNotIn(ref, os.environ)
+
+    def test_provider_id_validation(self) -> None:
+        with self.assertRaises(ValueError):
+            self.registry.upsert_provider("Bad Co", {"base_url": "https://x"})
+        with self.assertRaises(ValueError):
+            self.registry.upsert_provider("../escape", {"base_url": "https://x"})
 
     def test_migrates_first_release_schema(self) -> None:
         old = Path(self.tmp.name) / "old.db"
@@ -180,6 +304,53 @@ class ModelRegistryTests(unittest.TestCase):
             self.assertEqual(record.key, "opencode-go/deepseek-v4.1-flash")
             self.assertEqual(record.effective_effort, "low")
             self.assertIn("image", record.capabilities.get("input", []))
+            # Legacy per-row connection fields were split into providers.
+            provider = registry.get_provider("opencode-go")
+            assert provider is not None
+            self.assertEqual(provider.base_url, "https://opencode.ai/inference/openai/v1")
+            self.assertEqual(provider.api_key_env, "LLM_API_KEY")
+            legacy = registry._db.execute("PRAGMA table_info(models)").fetchall()
+            self.assertNotIn("base_url", {row["name"] for row in legacy})
+        finally:
+            registry.close()
+
+    def test_migrates_legacy_rows_into_one_provider(self) -> None:
+        old = Path(self.tmp.name) / "legacy-provider.db"
+        conn = sqlite3.connect(old)
+        conn.executescript(
+            """
+            CREATE TABLE models (
+                provider TEXT NOT NULL, model_id TEXT NOT NULL, display_name TEXT NOT NULL,
+                api TEXT NOT NULL DEFAULT 'openai-completions', base_url TEXT NOT NULL,
+                api_key_env TEXT NOT NULL DEFAULT 'LLM_API_KEY', context_window INTEGER NOT NULL,
+                max_output_tokens INTEGER NOT NULL DEFAULT 2048,
+                reasoning_effort TEXT NOT NULL DEFAULT 'low',
+                capabilities TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
+                is_active INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+                PRIMARY KEY (provider, model_id));
+            INSERT INTO models VALUES
+                ('deepseek', 'chat', 'Chat', 'openai-completions',
+                 'https://api.deepseek.com', 'DEEPSEEK_API_KEY', 64000, 4096, 'low',
+                 '{}', 1, 0, 10),
+                ('deepseek', 'reasoner', 'Reasoner', 'openai-completions',
+                 'https://api.deepseek.com', 'DEEPSEEK_API_KEY', 128000, 8192, 'high',
+                 '{"reasoning_efforts": ["low", "high"]}', 1, 0, 20);
+            """
+        )
+        conn.commit()
+        conn.close()
+        registry = ModelRegistry(old)
+        try:
+            providers = registry.list_providers()
+            self.assertEqual([row.provider for row in providers], ["deepseek"])
+            self.assertEqual(providers[0].base_url, "https://api.deepseek.com")
+            self.assertEqual(providers[0].model_count, 2)
+            self.assertEqual(
+                sorted(row.model_id for row in registry.list("deepseek")),
+                ["chat", "reasoner"],
+            )
+            columns = {row["name"] for row in registry._db.execute("PRAGMA table_info(models)")}
+            self.assertNotIn("api_key_env", columns)
         finally:
             registry.close()
 

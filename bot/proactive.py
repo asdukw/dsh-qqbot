@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 DEFAULT_PROMPT = (
     "你正在群里和大家聊天。结合上面的最近消息，简短、自然地接一句；"

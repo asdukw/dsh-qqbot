@@ -16,7 +16,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 try:
-    from deepseek_harness import DeepSeekHarness
+    from deepseek_harness import DeepSeekHarness  # pyright: ignore[reportMissingImports]
 except ImportError:  # pragma: no cover - reported at runtime
     DeepSeekHarness = None  # type: ignore[assignment]
 

@@ -12,6 +12,7 @@ from stickers import (  # noqa: E402
     StickerStore,
     extract_sticker_marker,
     parse_tags,
+    preview_jpeg,
     sniff_mime,
 )
 
@@ -30,6 +31,24 @@ class SniffTests(unittest.TestCase):
 
     def test_unknown_format(self) -> None:
         self.assertEqual(sniff_mime(b"not an image"), ("", ""))
+
+
+class PreviewTests(unittest.TestCase):
+    def test_downsizes_a_large_image(self) -> None:
+        from io import BytesIO
+
+        from PIL import Image
+
+        out = BytesIO()
+        Image.new("RGBA", (1200, 800), (0, 0, 0, 0)).save(out, format="PNG")
+        preview = preview_jpeg(out.getvalue())
+        self.assertIsNotNone(preview)
+        with Image.open(BytesIO(preview)) as image:
+            self.assertEqual(image.format, "JPEG")
+            self.assertLessEqual(max(image.size), 512)
+
+    def test_corrupt_bytes_return_none(self) -> None:
+        self.assertIsNone(preview_jpeg(b"not an image"))
 
 
 class MarkerTests(unittest.TestCase):

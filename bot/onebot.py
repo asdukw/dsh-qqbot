@@ -7,8 +7,9 @@ import json
 import logging
 import re
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 from urllib.parse import quote
 
 import websockets
@@ -383,7 +384,7 @@ class OneBotWSClient:
         try:
             await ws.send(json.dumps({"action": action, "params": params, "echo": echo}, ensure_ascii=False))
             response = await asyncio.wait_for(future, timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise OneBotError(f"{action} timed out") from exc
         except websockets.exceptions.WebSocketException as exc:
             raise OneBotError(f"{action} connection error: {exc}") from exc

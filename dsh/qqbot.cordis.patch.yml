@@ -89,6 +89,10 @@
         providers: {}
     - id: user-profile
       name: '/opt/qqbot/dsh/plugins/user-profile.mjs'
+    # Read-only on-demand access to older DSH session JSONL and chat_events.
+    # The model asks for history explicitly; it is not injected every turn.
+    - id: session-history
+      name: '/opt/qqbot/dsh/plugins/session-history.mjs'
     # Web search/fetch: the official service and model-facing tools, with a
     # keyless provider instead of the exa/perplexity/deepseek ones (each of
     # those needs its own API key; the keyless backend matches what OpenCode's

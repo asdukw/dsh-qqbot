@@ -7,9 +7,9 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import os
 import random
+import re
 import signal
 import sqlite3
 import sys
@@ -28,62 +28,72 @@ from card_fetch import CardFetchError, fetch_card_bytes_sync
 from commands import CommandRouter, strip_leading_mention, strip_message_markers
 from conversations import ConversationStore
 from dsh_client import DSHClient, DSHConfig, DSHError
-from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
-from images import ImageStore, StoredImage
-from llm import LLMClient, LLMConfig, LLMError
-from memory import Memory, format_recall
-from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
-from onebot import EMPTY_REPLY, MessageEvent, OneBotError, OneBotWSClient
-from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
-from schedule import extract_schedule, render_schedule
-from sessions import SessionStore
-from usage import UsageStore
-from tasks import (
-    TZ as TASK_TZ,
-    TaskScheduler,
-    TaskStore,
-    describe_record,
-    describe_target,
-    extract_task_marker,
-    extract_task_management,
-    next_run_for,
-    parse_task,
-    render_task_list,
-    resolve_target,
-    spec_of,
-)
 from feeds import (
-    FeedError,
     FeedPoller,
     FeedStore,
     bilibili_feed_url,
-    fetch_feed,
     feed_title,
+    fetch_feed,
     format_entry,
     parse_feed,
 )
+from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
+from images import ImageStore, StoredImage
+from llm import LLMClient, LLMConfig, LLMError
 from meme import (
     MemeError,
-    available as meme_available,
     extract_meme_marker,
     render_meme,
 )
-from voice import (
-    VoiceError,
-    extract_voice_marker,
-    synthesize,
-    synthesize_fish,
-    synthesize_stepfun,
-    spoken_text,
+from meme import (
+    available as meme_available,
 )
+from memory import Memory, format_recall
+from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
+from onebot import (
+    EMPTY_REPLY,
+    MessageEvent,
+    OneBotConfig,
+    OneBotError,
+    OneBotWSClient,
+)
+from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
+from prompt import build_messages, build_system_prompt
+from schedule import extract_schedule, render_schedule
+from sessions import SessionStore
 from stickers import (
     StickerError,
     StickerStore,
     download_image,
     extract_sticker_marker,
     parse_tags,
+    preview_jpeg,
 )
-from prompt import build_messages, build_system_prompt
+from tasks import (
+    TZ as TASK_TZ,
+)
+from tasks import (
+    TaskScheduler,
+    TaskStore,
+    describe_record,
+    describe_target,
+    extract_task_management,
+    extract_task_marker,
+    next_run_for,
+    parse_task,
+    render_task_list,
+    resolve_target,
+    spec_of,
+)
+from usage import UsageStore
+from voice import (
+    VoiceError,
+    extract_voice_marker,
+    spoken_text,
+    synthesize,
+    synthesize_fish,
+    synthesize_stepfun,
+)
 
 from cards import CardError, CardRecord, CardRegistry, CharacterCard
 
@@ -98,10 +108,8 @@ LEGACY_MODEL_ENV = (
 
 
 @dataclass
-class OneBotSection:
-    url: str = "ws://127.0.0.1:3001"
-    token: str = ""
-    self_id: int = 0
+class OneBotSection(OneBotConfig):
+    """TOML section; the same shape OneBotWSClient consumes."""
 
 
 @dataclass
@@ -558,7 +566,8 @@ def load_active_model(config: AppConfig, write_patch: bool = True) -> ModelRecor
 
 
 def model_api_key(record: ModelRecord) -> str:
-    return os.environ.get(record.api_key_env, "").strip()
+    """The provider key saved in the registry, else its environment fallback."""
+    return (record.api_key or "").strip() or os.environ.get(record.api_key_env, "").strip()
 
 
 def model_signature(config: AppConfig) -> tuple | None:
@@ -1107,6 +1116,11 @@ class Bot:
 
     async def _compose_task_message(self, task: Any) -> str:
         """Let DSH (tools included) or the card write the scheduled line."""
+        conversation_id = (
+            f"group:{task.chat_id}"
+            if getattr(task, "chat_type", "") == "group"
+            else f"private:{task.chat_id}"
+        )
         prompt = (
             f"[定时任务] {task.message}。现在是 "
             f"{datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}，"
@@ -1138,7 +1152,7 @@ class Bot:
                     "role": "user",
                     "content": f"任务：{task.message}。只输出要发送的那一句话。",
                 },
-            ], purpose="task_generate", conversation_id=target_conversation)
+            ], purpose="task_generate", conversation_id=conversation_id)
         except LLMError as exc:
             log.warning("task #%s generation failed: %s", task.id, exc)
             return task.message
@@ -1261,10 +1275,19 @@ class Bot:
         except OSError as exc:
             log.warning("cannot read sticker #%s: %s", record.id, exc)
             return
-        uri = (
-            f"data:{record.mime or 'image/png'};base64,"
-            f"{base64.b64encode(data).decode('ascii')}"
-        )
+        # Big animated GIFs time out the vision request; send one small frame.
+        preview = await asyncio.to_thread(preview_jpeg, data)
+        if preview is not None:
+            data, mime = preview, "image/jpeg"
+        elif len(data) > 512 * 1024:
+            log.warning(
+                "sticker #%s too large to tag without a preview (%d bytes)",
+                record.id, len(data),
+            )
+            return
+        else:
+            mime = record.mime or "image/png"
+        uri = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
         try:
             raw = await self.client.chat([
                 {"role": "system", "content": "你是一个表情包标注助手。"},
@@ -1799,7 +1822,11 @@ class Bot:
                 log.error("cannot reload the model registry: %s", exc)
                 return
             if not model_api_key(record):
-                log.error("%s is not set; keeping the current model", record.api_key_env)
+                log.error(
+                    "no API key for %s: set it in the admin UI or put %s in bot.env; "
+                    "keeping the current model",
+                    record.key, record.api_key_env,
+                )
                 return
             try:
                 new_client = make_llm_client(self.config, record)
@@ -2382,7 +2409,11 @@ async def check_llm(config: AppConfig) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if not model_api_key(record):
-        print(f"error: {record.api_key_env} is not set (needed by {record.key})", file=sys.stderr)
+        print(
+            f"error: no API key for {record.key}; set it in the admin UI "
+            f"or put {record.api_key_env} in bot.env",
+            file=sys.stderr,
+        )
         return 2
     client = make_llm_client(config, record)
     try:
@@ -2407,7 +2438,11 @@ async def check_dsh(config: AppConfig) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if not model_api_key(record):
-        print(f"error: {record.api_key_env} is not set (needed by {record.key})", file=sys.stderr)
+        print(
+            f"error: no API key for {record.key}; set it in the admin UI "
+            f"or put {record.api_key_env} in bot.env",
+            file=sys.stderr,
+        )
         return 2
     client = make_dsh_client(config, record, system_prompt="你是一个测试助手。")
     try:
@@ -2432,7 +2467,7 @@ async def check_onebot(config: AppConfig) -> int:
         info = await onebot.get_login_info()
         print(f"connected: {info}")
         return 0
-    except (OneBotError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, OneBotError) as exc:
         print(f"error: could not reach NapCat OneBot WebSocket: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -2457,8 +2492,8 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
         return None
     if not model_api_key(record):
         log.error(
-            "%s is not set (needed by %s; put it in /etc/qqbot/bot.env)",
-            record.api_key_env, record.key,
+            "no API key for %s; set it in the admin UI or put %s in bot.env",
+            record.key, record.api_key_env,
         )
         return None
     if not config.onebot.self_id:

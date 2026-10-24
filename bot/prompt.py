@@ -103,11 +103,11 @@ def build_messages(
     now: datetime,
     lore_chunks: list[str],
     max_history_chars: int = 12000,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     system = build_system_prompt(data, char_name, user_name, now, lore_chunks)
     trimmed = trim_history(history, max_history_chars)
 
-    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     messages.extend(trimmed)
     messages.append({"role": "user", "content": user_text})
 

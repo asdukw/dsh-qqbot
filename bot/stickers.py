@@ -81,6 +81,39 @@ class StickerError(RuntimeError):
     pass
 
 
+def preview_jpeg(data: bytes, max_px: int = 512) -> bytes | None:
+    """First frame as a small JPEG, for vision calls with request size limits."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:  # pragma: no cover - Pillow ships with the bot
+        return None
+    from io import BytesIO
+
+    try:
+        with Image.open(BytesIO(data)) as opened:
+            if opened.width * opened.height > 24_000_000:
+                return None
+            opened.seek(0)
+            image = (
+                ImageOps.exif_transpose(opened) if opened.getexif().get(274) else opened
+            )
+            if image.mode == "RGB":
+                target = image
+            elif image.mode in ("RGBA", "LA", "P", "PA"):
+                rgba = image.convert("RGBA")
+                target = Image.new("RGB", rgba.size, (255, 255, 255))
+                target.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                target = image.convert("RGB")
+            target.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+            out = BytesIO()
+            target.save(out, format="JPEG", quality=85, optimize=True)
+            return out.getvalue()
+    except Exception as exc:  # noqa: BLE001 - tagging must survive bad files
+        log.debug("cannot build sticker preview: %s", exc)
+        return None
+
+
 def sniff_mime(data: bytes) -> tuple[str, str]:
     """Return (mime, suffix) for a supported image, or ("", "") otherwise."""
     for magic, mime, suffix in _SIGNATURES:

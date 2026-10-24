@@ -1,5 +1,5 @@
 [Unit]
-Description=qqbot admin UI (read-only, localhost)
+Description=qqbot admin UI (localhost)
 After=network.target
 
 [Service]

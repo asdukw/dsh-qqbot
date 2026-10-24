@@ -71,7 +71,7 @@ export const ROUTES: RouteMeta[] = [
   {
     id: "models",
     label: "模型",
-    description: "SQLite 模型注册表与当前 DSH route",
+    description: "供应商、SQLite 模型注册表与当前 DSH route",
     icon: Server,
   },
   {
@@ -95,7 +95,7 @@ export const ROUTES: RouteMeta[] = [
   {
     id: "system",
     label: "系统状态",
-    description: "数据库、路径与只读面板配置",
+    description: "数据库、路径与面板配置",
     icon: Settings2,
   },
 ];

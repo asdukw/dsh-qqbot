@@ -16,7 +16,7 @@
 - **定时任务**：管理员直接说"每天早上8点提醒我起床"即可创建，说"把喝水那个删了/暂停"也能管理（模型输出 `[定时: ...]` / `[定时列表|删除|暂停|恢复]`，adapter 解析 + Pydantic 校验）；任务绑定创建时的群/私聊，可显式选 here/private/group；支持 fixed/generate 两种文案（generate 到点按人设现写）；`/task list|delete|pause|resume|run`；
 - **联网搜索**：DSH 官方的 `web_search` / `web_fetch` 工具；搜索 provider 用免密钥后端（与 OpenCode 自带 websearch 同类），不需要额外 API key；
 - **角色卡**：SillyTavern Character Card V1 / V2 / V3，支持 `.json` 和 `.png`（读取 `ccv3` → `chara` → `iTXt`）；SQLite 角色库，`/card search/install/use` 热切换
-- **DSH session**：每个 QQ 会话一份持久化 JSONL 历史，自动上下文压缩
+- **DSH session**：每个 QQ 会话一份持久化 JSONL 历史，自动上下文压缩；`session-history` 插件让模型按需读取旧 generation
 - **用户画像**：内置 `user-profile` 插件，SQLite 存储，提供 `profile_read` / `profile_write` / `profile_forget`
 - **文件记忆**：模型可使用 `read` / `write` / `edit` / `glob` / `grep`，工作目录限定在 `/var/lib/qqbot/dsh-workspace`
 - **无 shell**：DSH profile 中禁用了 bash / pwsh / PTY / jobs，只保留文件与搜索工具
@@ -103,9 +103,10 @@ OPENCODE_API_KEY=sk-...
 说明：
 
 - 用哪个模型、上下文多长、输出上限、推理强度，全部在[模型注册表](#模型注册表)里配置，不再读 `LLM_PROVIDER` / `DSH_MODEL` 等环境变量（旧变量会在启动日志里提示被忽略）。
-- 每个模型行用 `api_key_env` 指明从哪个环境变量读 key；默认的 OpenCode 行用 `OPENCODE_API_KEY`。
+- 供应商（provider）保存 `api` / `base_url` / `api_key`；每个模型只声明自己属于哪个供应商。API Key 直接在 Admin UI 里填写，保存在 `models.db`（文件权限 600）。
+- 默认的 OpenCode 行用 `OPENCODE_API_KEY`。
 - OpenCode Go 订阅使用 `https://opencode.ai/zen/go/v1`，请求必须带 `x-opencode-session`。注册表用的是 DSH 内置的 `opencode-go` provider，这个头由 DSH 按会话自动加；注册表只覆盖 `apiKeyEnv`、`baseURL` 和模型参数（context window / effort 等）。
-- 想换 provider：用 `--set-model` 新增一行（填 `base_url`、`api_key_env`、`context_window`），再 `--use-model` 切过去。
+- 想换 provider：在 Admin UI 的「模型」页先添加供应商、再进入供应商添加模型；也可以继续用 `--set-model`（首次带上 `base_url`）新增，再 `--use-model` 切过去。
 
 > `deepseek-v4.1-flash-free` 只能在 OpenCode 客户端内使用；从机器人直接调用会返回 `403 FreeTierError`。机器人请使用付费的 `deepseek-v4.1-flash`，或换一个 provider。
 
@@ -137,16 +138,16 @@ sudo journalctl -u qqbot -f
 - **仪表盘**：今日消息 / Token、7 / 30 天趋势、订阅异常、最近消息、当前模型与角色卡；
 - **对话**：会话（群 / 私聊、session generation、消息量、token）、聊天分析（今日发言排行、词云、会话分布）；
 - **自动化**：定时任务、订阅推送；
-- **内容**：模型、角色卡、表情库；
+- **内容**：模型（供应商 → 模型两级管理，可新增、编辑、启停、切换当前模型）、角色卡、表情库；
 - **用量**：Token 用量，支持 7 / 30 / 90 天与按会话筛选；
 - **系统**：数据库路径与大小、DSH 路径、面板配置。
 
 Python 端只提供 JSON API 和静态文件：
 
 - 本地构建：`cd admin && npm install && npm run build`；产物在 `admin/dist/`（已随仓库提交，便于纯 Python 部署）。
-- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/conversations`、`/api/models`、`/api/cards`、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
+- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。读取接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/conversations`、`/api/models`、`/api/cards`（点开单张卡时用 `/api/cards/<id>` 取完整 V3 payload）、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。模型页的写入接口（需登录、JSON、同源）：`POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
 - 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
-- 只读，每 60 秒自动刷新；右上角「刷新」会立即重拉当前页。
+- 模型页可写，其余页面只读；每 60 秒自动刷新，右上角「刷新」会立即重拉当前页。API Key 直接在供应商表单里填写，保存在 `models.db`（权限 600）且不会回显。
 
 ## Token 审计与今日趣味数据
 
@@ -214,6 +215,14 @@ $M --remove-card-alias 肥鱼
 3. **群画像**：同库的 `group_facts`，**按群号**存，记群主题、氛围、常聊话题、梗和黑话、群规、约定。只在该群里注入。工具：`group_profile_read` / `group_profile_write` / `group_profile_forget`（私聊里不可用）。
 4. **文件记忆**：`/var/lib/qqbot/dsh-workspace/memory/`；`lore.md` 是角色设定，`notes/` 放事件、约定和重要片段。模型可以用 `write` / `edit` / `glob` / `grep` 维护和检索。
 
+会话 JSONL 不在文件工具的工作区内，所以另有一个只读的 **`session-history` 插件**，只在模型主动调用时读取，不会每轮注入：
+
+- `history_sessions`：列出当前群/私聊的 session 文件（当前 + 旧 generation，含起止时间、轮数、大小）；
+- `history_read`：读取某个 session 的 JSONL，返回用户消息和助手回复，支持关键词、`since` / `until`、条数限制；
+- `chat_search`：检索 `memory.db.chat_events` 的入站消息，包含群里未 @ 机器人的普通消息（保留 90 天，不含助手回复）。
+
+三个工具都只读，并且只允许访问当前群/私聊，不能跨会话读取。模型在用户问到“昨天/之前聊了什么”时会先查再答。
+
 ### 群聊上下文与活跃度
 
 群里没 @ 机器人的消息会按群留在内存里最近 `group_context_messages`（默认 30）条；被 @ 时，这些消息和 @ 的那句一起交给模型，它就能接上话题。每条只送一次，不写盘，不跨群。
@@ -247,23 +256,36 @@ DSH SDK 的 prompt 接口只有 session id 和消息内容，没有元数据字�
 
 ## 模型注册表
 
-模型配置统一以 SQLite `/var/lib/qqbot/models.db` 的 `models` 表为准，主键 `(provider, model_id)`：
+模型配置统一以 SQLite `/var/lib/qqbot/models.db` 为准，分成供应商和模型两级。
+
+`providers`（连接信息，一个供应商一行）：
 
 | 字段 | 含义 |
 |---|---|
-| `provider` + `model_id` | 主键，对应 DSH 的 route 名和模型 id |
+| `provider` | 主键，DSH route 名（如 `opencode-go`、`deepseek`） |
+| `display_name` | 面板和 DSH 上显示的名字 |
+| `api` / `base_url` | 协议和 OpenAI 兼容端点 |
+| `api_key` | 面板里直接保存的密钥（DB 文件权限 600） |
+| `enabled` | 是否参与渲染；禁用后该供应商的模型都不会写入 DSH route |
+
+`models`（模型，主键 `(provider, model_id)`）：
+
+| 字段 | 含义 |
+|---|---|
+| `provider` + `model_id` | 所属供应商，以及对应 DSH 的模型 id |
 | `display_name` | 展示名 |
-| `api` / `base_url` / `api_key_env` | 协议、端点、读取 key 的环境变量（同一 provider 的行必须一致） |
 | `context_window` | 上下文长度，DSH 的 token meter 和压缩用它 |
 | `max_output_tokens` | 单次输出上限，直接作为请求的 `max_tokens` |
-| `reasoning_effort` | 推理强度，默认 `low`；留空表示用模型自己的默认值 |
-| `capabilities` | JSON；`reasoning_efforts` 列出该模型接受的推理强度 |
+| `reasoning_effort` | 推理强度，留空表示用模型自己的默认值 |
+| `capabilities` | JSON；`reasoning_efforts` 列出该模型接受的推理强度，`input` 声明图片输入 |
 | `enabled` | 是否参与渲染 |
 | `is_active` | 当前使用的模型，全表只能有一行为 1 |
 
-首次启动写入默认行：`opencode-go/deepseek-v4.1-flash`（1M，默认激活）、`opencode-go/deepseek-v4.1-flash-free`（200k）、`fake/fake-model`（本地测试），推理强度都是 `low`。之后不会覆盖你的修改；旧版本的库会自动补上新列，并把旧的 `opencode/*` 默认行迁移到 `opencode-go/*`。
+Admin UI 的「模型」页按**供应商 → 模型**组织：先添加供应商（可从 OpenCode、DeepSeek、OpenAI、OpenRouter、SiliconFlow、百炼、Moonshot、智谱等预设开始，预设带品牌图标），点进供应商卡片后再添加该供应商的模型。API Key 必须直接在供应商表单里填写；保存后写入 `models.db`（`chmod 600`），面板不回显。修改已保存的 Key 后，机器人在下一轮消息自动重载 DSH。
 
-启动时机器人读取激活行，把它的 `max_output_tokens` / `reasoning_effort` 作为请求参数，并把所有启用的行渲染成 DSH `llm-pi-ai` 的 patch（`/var/lib/qqbot/dsh-state/models.patch.json`），通过 SDK 的 `patches` 传给 DSH。`reasoning_effort` 必须出现在该行的 `capabilities.reasoning_efforts` 里，否则写入时直接拒绝。
+首次启动写入默认供应商 `opencode-go` 和模型 `opencode-go/deepseek-v4.1-flash`（1M，默认激活）。默认数据只在首次初始化时写入，之后不会覆盖你的修改，删空模型也不会在下次重启时复活。旧版本的库会自动把每行重复的 `api` / `base_url` / `api_key_env` 拆分到 `providers`，并把旧的 `opencode/*` 默认行迁移到 `opencode-go/*`。
+
+启动时机器人读取激活行，把它的 `max_output_tokens` / `reasoning_effort` 作为请求参数，并把所有启用的供应商和模型渲染成 DSH `llm-pi-ai` 的 patch（`/var/lib/qqbot/dsh-state/models.patch.json`），通过 SDK 的 `patches` 传给 DSH。数据库里的密钥不会写进 patch：机器人启动 DSH runtime 前把它放进一个按供应商生成的 `QQBOT_PK_*` 环境变量，patch 只引用这个名字；DSH 的 credentials 层按请求解析 `apiKeyEnv`。`reasoning_effort` 必须出现在该行的 `capabilities.reasoning_efforts` 里，否则写入时直接拒绝。内置 provider（`opencode` / `opencode-go`）只覆盖 `apiKeyEnv`、`baseURL` 和模型参数，**不写 `api`**，以免替换 DSH 自带的 adapter 包装（OpenCode Go 依赖它加 `x-opencode-session`）。
 
 ```bash
 M="sudo -u qqbot /opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/main.py"
@@ -271,11 +293,12 @@ M="sudo -u qqbot /opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/main.py"
 $M --list-models                                              # 查看，* 为当前模型
 $M --use-model opencode-go/deepseek-v4.1-flash                # 切换模型
 $M --set-model opencode-go/deepseek-v4.1-flash reasoning_effort=medium max_output_tokens=4096
-$M --set-model deepseek/deepseek-flash \
+$M --set-model deepseek/deepseek-chat \
    base_url=https://api.deepseek.com api_key_env=DEEPSEEK_API_KEY \
-   context_window=1000000 'capabilities={"reasoning_efforts":["low","high"]}'   # 新增
-sudo systemctl restart qqbot                                  # 修改后重启生效
+   context_window=1000000 'capabilities={"reasoning_efforts":["low","high"]}'   # 新增供应商 + 模型
 ```
+
+`--set-model` 仍兼容旧的 `base_url` / `api` / `api_key_env` 参数：如果供应商不存在会一并创建，已存在则更新该供应商的连接信息（影响它下面的所有模型）。更直观的方式是使用 Admin UI。
 
 `[llm]` 段只剩 `temperature` / `timeout`，用于 `[dsh] enabled = false` 时的回退客户端；DSH SDK 不开放 temperature。
 
@@ -313,7 +336,7 @@ auto: true
 bot/        adapter：OneBot 客户端、DSH client、角色卡、SQLite、prompt 回退
 cards/      示例角色卡（安装脚本复制到 /opt/qqbot/cards）
 deploy/     NapCat/Docker、systemd、安装脚本、诊断工具
-dsh/        DSH 自定义 profile patch、user-profile 插件、fake LLM 测试服务
+dsh/        DSH 自定义 profile patch、user-profile / session-history 插件、fake LLM 测试服务
 docs/       架构说明
 tests/      单元测试（卡片解析、prompt）
 ```
@@ -321,9 +344,16 @@ tests/      单元测试（卡片解析、prompt）
 ## 开发
 
 ```bash
+uv venv
+uv pip install -r bot/requirements.txt -r requirements-dev.txt
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
 python -m unittest discover -s tests -v
-python -m py_compile bot/*.py
+ruff check .
+pyright
 ```
+
+`ruff` 和 `pyright` 的配置都在 `pyproject.toml`。Pyright 使用 `standard` 检查模式（`typeCheckingMode = "standard"`；包本身没有名为 `standard` 的 extra）。测试里的 `SimpleNamespace` / `**overrides` 打桩在 `[tool.pyright.executionEnvironments]` 中单独放宽，生产代码仍按标准模式检查。
 
 本地调试 DSH 工具链时，可以不用真实模型：`dsh/fake_llm.py` 是一个 OpenAI-compatible 的假服务，会先让模型调用 `profile_write`，再返回文本。profile patch 里已经带了一个指向 `127.0.0.1:8000` 的 `fake` 路由。
 

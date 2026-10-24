@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { CalendarClock, CheckCircle2, CreditCard, Hash } from "lucide-react";
+import { CalendarClock, CheckCircle2, CreditCard, Eye, Hash } from "lucide-react";
 
 import {
   EmptyState,
@@ -8,7 +8,9 @@ import {
   SectionCard,
   StatCard,
 } from "@/components/common/Bits";
+import { CardDetailModal } from "@/components/cards/CardDetailModal";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -23,6 +25,7 @@ import { cn } from "@/lib/utils";
 
 export default function CardsPage({ refreshKey }: { refreshKey: number }) {
   const [search, setSearch] = useState("");
+  const [detailId, setDetailId] = useState<number | null>(null);
   const { data, loading, error } = useApi<CardsData>("/api/cards", refreshKey);
 
   const rows = useMemo(() => {
@@ -63,7 +66,7 @@ export default function CardsPage({ refreshKey }: { refreshKey: number }) {
       <SectionCard
         icon={CreditCard}
         title="角色卡库"
-        description="当前角色卡会随 /card use 热切换"
+        description="当前角色卡会随 /card use 热切换，点击卡片查看 V3 规范详情"
         badge={rows.length}
         actions={
           <SearchField
@@ -81,14 +84,27 @@ export default function CardsPage({ refreshKey }: { refreshKey: number }) {
               <Card
                 key={card.id}
                 className={cn(
-                  "flex flex-col",
+                  "flex cursor-pointer flex-col transition-shadow hover:shadow-md focus-within:shadow-md",
                   card.is_active && "border-blue-300 ring-1 ring-blue-200"
                 )}
+                onClick={() => setDetailId(card.id)}
               >
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <CardTitle className="truncate">{card.nickname || card.name}</CardTitle>
+                      <CardTitle
+                        className="cursor-pointer truncate hover:text-blue-700"
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setDetailId(card.id);
+                          }
+                        }}
+                      >
+                        {card.nickname || card.name}
+                      </CardTitle>
                       <CardDescription className="mt-1 truncate">
                         #{card.id} · {card.name}
                         {card.character_version ? ` · v${card.character_version}` : ""}
@@ -141,6 +157,19 @@ export default function CardsPage({ refreshKey }: { refreshKey: number }) {
                       <span className="text-slate-600">{formatDate(card.updated_at)}</span>
                     </div>
                   </div>
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setDetailId(card.id);
+                    }}
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                    查看详情
+                  </Button>
                 </CardContent>
               </Card>
             ))}
@@ -153,6 +182,8 @@ export default function CardsPage({ refreshKey }: { refreshKey: number }) {
           />
         )}
       </SectionCard>
+
+      <CardDetailModal cardId={detailId} onClose={() => setDetailId(null)} />
     </div>
   );
 }

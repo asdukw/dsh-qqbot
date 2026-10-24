@@ -7,12 +7,16 @@ import { Button } from "@/components/ui/button";
 import { NAV_GROUPS, routeMeta, type RouteId } from "@/lib/router";
 import { cn } from "@/lib/utils";
 
+// Floating "island" panels: the shell is a light canvas and every major region
+// (sidebar, header, content) is a detachable rounded card with a soft shadow.
+const ISLAND = "rounded-3xl border border-white/70 bg-white/90 shadow-soft backdrop-blur-sm";
+
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-3">
       <div
         className={cn(
-          "flex items-center justify-center rounded-xl bg-blue-600 text-white shadow-md shadow-blue-600/20",
+          "flex items-center justify-center rounded-2xl bg-blue-600 text-white shadow-md shadow-blue-600/25",
           compact ? "h-9 w-9" : "h-10 w-10"
         )}
       >
@@ -23,7 +27,7 @@ function Brand({ compact = false }: { compact?: boolean }) {
           <span className="truncate text-base font-semibold tracking-tight text-slate-900">
             大肥鱼 Admin
           </span>
-          <Badge variant="secondary">只读</Badge>
+          <Badge variant="secondary">模型可管理</Badge>
         </div>
         <p className="truncate text-xs text-muted-foreground">QQ bot 运行面板</p>
       </div>
@@ -56,9 +60,9 @@ function SidebarNav({
                   onClick={() => onNavigate(item.id)}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                    "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm font-medium transition-all",
                     active
-                      ? "bg-blue-600 text-white shadow-sm"
+                      ? "bg-blue-600 text-white shadow-sm shadow-blue-600/30"
                       : "text-slate-600 hover:bg-blue-50 hover:text-blue-700"
                   )}
                 >
@@ -81,8 +85,8 @@ function SidebarNav({
 
 function SidebarFoot() {
   return (
-    <div className="border-t border-blue-50 px-5 py-4 text-[11px] leading-relaxed text-slate-400">
-      只读面板 · 数据直接读取 SQLite
+    <div className="px-5 py-4 text-[11px] leading-relaxed text-slate-400">
+      模型配置可编辑 · 其余只读
       <br />
       每 60 秒自动刷新
     </div>
@@ -108,9 +112,14 @@ export default function AppShell({
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className="min-h-screen bg-[#f4f8ff]">
-      <aside className="fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r border-blue-100 bg-white lg:flex">
-        <div className="border-b border-blue-50 px-4 py-4">
+    <div className="min-h-screen bg-canvas px-3 py-3 md:px-4 md:py-4 lg:flex lg:items-start lg:gap-4">
+      <aside
+        className={cn(
+          ISLAND,
+          "sticky top-4 hidden h-[calc(100vh-2rem)] w-64 shrink-0 flex-col lg:flex"
+        )}
+      >
+        <div className="px-4 py-4">
           <button type="button" onClick={() => onNavigate("overview")} className="text-left">
             <Brand />
           </button>
@@ -127,8 +136,8 @@ export default function AppShell({
             onClick={() => setMenuOpen(false)}
             aria-label="关闭导航"
           />
-          <aside className="absolute inset-y-0 left-0 flex w-72 max-w-[85%] flex-col bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-blue-50 px-4 py-3">
+          <aside className="absolute inset-y-3 left-3 flex w-72 max-w-[85%] flex-col rounded-3xl border border-white/70 bg-white shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3">
               <Brand compact />
               <Button
                 variant="ghost"
@@ -151,9 +160,9 @@ export default function AppShell({
         </div>
       ) : null}
 
-      <div className="lg:pl-64">
-        <header className="sticky top-0 z-30 border-b border-blue-100 bg-white/85 backdrop-blur">
-          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 md:px-8">
+      <div className="min-w-0 flex-1 space-y-4">
+        <header className={cn(ISLAND, "sticky top-3 z-30 md:top-4")}>
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 md:px-6">
             <div className="flex min-w-0 items-center gap-2">
               <Button
                 variant="ghost"
@@ -170,7 +179,7 @@ export default function AppShell({
                     {meta.label}
                   </h1>
                   <Badge variant="secondary" className="hidden sm:inline-flex">
-                    只读
+                    模型可管理
                   </Badge>
                 </div>
                 <p className="truncate text-xs text-muted-foreground">{meta.description}</p>
@@ -189,9 +198,7 @@ export default function AppShell({
           </div>
         </header>
 
-        <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 md:px-8 md:py-8">
-          {children}
-        </main>
+        <main className="pb-4">{children}</main>
       </div>
     </div>
   );

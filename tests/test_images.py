@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from images import ImageStore  # noqa: E402
 from group_context import GroupContextBuffer  # noqa: E402
-from main import AppConfig, Bot, PreparedImage  # noqa: E402
+from images import ImageStore  # noqa: E402
+from main import AppConfig, Bot  # noqa: E402
 from memory import Memory  # noqa: E402
 from onebot import MessageEvent  # noqa: E402
 

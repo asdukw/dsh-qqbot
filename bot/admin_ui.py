@@ -6,11 +6,17 @@ bundle is served from ``[admin] static_dir`` (default
 ``index.html`` for unknown non-asset paths. Authentication is a single password
 from ADMIN_UI_PASSWORD with an HMAC-signed session cookie.
 
-Every endpoint is read-only. The overview aggregates counts, a day-by-day
-trend and alerts; ``/api/models``, ``/api/cards``, ``/api/tasks``,
-``/api/feeds``, ``/api/stickers``, ``/api/conversations`` and ``/api/system``
-each expose one page's data. ``/api/dashboard`` is kept as the original
-single-page aggregate for compatibility.
+Every page reads SQLite directly. The model page is the exception: it can add
+providers and models through authenticated ``POST /api/models/*`` endpoints,
+which write through ``ModelRegistry`` (the same code the bot uses). The
+overview aggregates counts, a day-by-day trend and alerts; ``/api/models``,
+``/api/cards``, ``/api/tasks``, ``/api/feeds``, ``/api/stickers``,
+``/api/conversations`` and ``/api/system`` each expose one page's data;
+``/api/cards/<id>`` returns one card's full V3 payload for the detail view;
+``/api/stickers/<id>/image`` streams a sticker file (``?thumb=1`` for a
+bounded JPEG thumbnail) so the panel can show the images themselves.
+``/api/dashboard`` is kept as the original single-page aggregate for
+compatibility.
 """
 
 from __future__ import annotations
@@ -28,16 +34,25 @@ import sqlite3
 import threading
 import time
 import tomllib
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
 
 from admin_insights import clean_conversation, fun_data, usage_data
+from models import (
+    BUILTIN_PROVIDERS,
+    PROVIDER_PRESETS,
+    ModelRecord,
+    ModelRegistry,
+    ProviderRecord,
+)
 from sessions import SessionStore
 from usage import conversation_label
 
@@ -66,6 +81,16 @@ STATIC_MIME = {
     ".woff": "font/woff",
     ".woff2": "font/woff2",
 }
+
+# Only the formats StickerStore accepts are ever served back.
+STICKER_IMAGE_MIME = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+THUMB_PX = 320
+THUMB_MAX_PIXELS = 12_000_000
+THUMB_CACHE_LIMIT = 512
+THUMB_WORKERS = 2
+_thumb_cache: OrderedDict[tuple[str, int], tuple[bytes, str]] = OrderedDict()
+_thumb_lock = threading.Lock()
+_thumb_slots = threading.BoundedSemaphore(THUMB_WORKERS)
 
 
 def load_config(path: str) -> dict[str, Any]:
@@ -126,12 +151,129 @@ def db_paths(config: dict[str, Any]) -> dict[str, str]:
             (config.get("feeds") or {}).get("database", "/var/lib/qqbot/feeds.db")
         ),
         "stickers": str(
-            (config.get("stickers") or {}).get("database", "/var/lib/qqbot/stickers.db")
+            os.environ.get("STICKER_DB", "").strip()
+            or (config.get("stickers") or {}).get(
+                "database", "/var/lib/qqbot/stickers.db"
+            )
         ),
         "usage": str(
             (config.get("usage") or {}).get("database", "/var/lib/qqbot/usage.db")
         ),
     }
+
+
+def sticker_directory(config: dict[str, Any]) -> Path:
+    """Root that every sticker file must live under before we serve it.
+
+    Mirrors bot/main.py: the STICKER_DIR override wins over [stickers]
+    directory, and the fallback matches StickerStore's default.
+    """
+    env = os.environ.get("STICKER_DIR", "").strip()
+    if env:
+        return Path(env)
+    section = config.get("stickers") or {}
+    configured = str(section.get("directory") or "").strip()
+    return Path(configured or "/var/lib/qqbot/stickers")
+
+
+def sticker_target(config: dict[str, Any], raw_path: Any) -> Path | None:
+    """Resolve one stored path, refusing anything outside the library root."""
+    stored = str(raw_path or "").strip()
+    if not stored:
+        return None
+    try:
+        target = Path(stored).resolve(strict=True)
+        target.relative_to(sticker_directory(config).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return target if target.is_file() else None
+
+
+def _make_thumb(data: bytes) -> bytes | None:
+    """First frame of a sticker as a small JPEG; None keeps the original."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:  # pragma: no cover - Pillow ships with the bot
+        return None
+    try:
+        with Image.open(BytesIO(data)) as opened:
+            # Read the dimensions before decoding: a compressed image bomb can
+            # still hold hundreds of megapixels and would OOM this process.
+            if opened.width * opened.height > THUMB_MAX_PIXELS:
+                return None
+            opened.seek(0)
+            # exif_transpose copies the whole bitmap even without an
+            # orientation tag, so only pay for it when the tag is there.
+            image = (
+                ImageOps.exif_transpose(opened) if opened.getexif().get(274) else opened
+            )
+            if image.mode == "RGB":
+                target = image
+            elif image.mode in ("RGBA", "LA", "P", "PA"):
+                rgba = image.convert("RGBA")
+                target = Image.new("RGB", rgba.size, (255, 255, 255))
+                target.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                target = image.convert("RGB")
+            target.thumbnail((THUMB_PX, THUMB_PX), Image.Resampling.LANCZOS)
+            out = BytesIO()
+            target.save(out, format="JPEG", quality=82, optimize=True)
+            return out.getvalue()
+    except Exception as exc:  # noqa: BLE001 - untrusted decoders raise anything
+        log.debug("cannot thumbnail sticker: %s", exc)
+        return None
+
+
+def sticker_image(
+    config: dict[str, Any], sticker_id: int, thumb: bool = False
+) -> tuple[bytes, str] | None:
+    """Read one sticker from disk, optionally as a cached thumbnail."""
+    path = db_paths(config)["stickers"]
+    rows = db_rows(
+        path, "SELECT path, mime FROM stickers WHERE id = ?", (sticker_id,)
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    target = sticker_target(config, row["path"])
+    if target is None:
+        log.warning("sticker #%s file missing or outside the library", sticker_id)
+        return None
+    try:
+        data = target.read_bytes()
+    except OSError as exc:
+        log.warning("cannot read sticker #%s: %s", sticker_id, exc)
+        return None
+    mime = str(row["mime"] or "").strip().lower()
+    if mime not in STICKER_IMAGE_MIME:
+        mime = STATIC_MIME.get(target.suffix.lower(), "")
+    if mime not in STICKER_IMAGE_MIME:
+        return None
+    if not thumb:
+        return data, mime
+
+    try:
+        stamp = target.stat().st_mtime_ns
+    except OSError:
+        return data, mime
+    key = (str(target), stamp)
+    with _thumb_lock:
+        cached = _thumb_cache.get(key)
+        if cached is not None:
+            _thumb_cache.move_to_end(key)
+            return cached
+    with _thumb_slots:
+        thumb_data = _make_thumb(data)
+    if thumb_data is None:
+        # Undecodable (or Pillow absent): showing the original beats a blank tile.
+        return data, mime
+    result = (thumb_data, "image/jpeg")
+    with _thumb_lock:
+        _thumb_cache[key] = result
+        _thumb_cache.move_to_end(key)
+        while len(_thumb_cache) > THUMB_CACHE_LIMIT:
+            _thumb_cache.popitem(last=False)
+    return result
 
 
 def _json_list(value: Any) -> list[str]:
@@ -508,42 +650,160 @@ def conversations_data(config: dict[str, Any]) -> dict[str, Any]:
     return {"generated_at": int(time.time()), "conversations": rows}
 
 
-def models_data(config: dict[str, Any]) -> dict[str, Any]:
+def _models_registry(config: dict[str, Any]) -> ModelRegistry | None:
+    """Open the registry for a read; missing files are an empty page, not a 500."""
     path = db_paths(config)["models"]
-    rows = []
-    for row in db_rows(
-        path,
-        "SELECT provider, model_id, display_name, api, base_url, api_key_env, "
-        "context_window, max_output_tokens, reasoning_effort, capabilities, "
-        "enabled, is_active, updated_at FROM models "
-        "ORDER BY is_active DESC, provider, model_id",
-    ):
-        try:
-            capabilities = json.loads(row["capabilities"] or "{}")
-        except (TypeError, ValueError):
-            capabilities = {}
-        if not isinstance(capabilities, dict):
-            capabilities = {}
-        rows.append({
-            "provider": str(row["provider"]),
-            "model_id": str(row["model_id"]),
-            "display_name": str(row["display_name"] or row["model_id"]),
-            "api": str(row["api"] or ""),
-            "base_url": str(row["base_url"] or ""),
-            "api_key_env": str(row["api_key_env"] or ""),
-            "context_window": int(row["context_window"] or 0),
-            "max_output_tokens": int(row["max_output_tokens"] or 0),
-            "reasoning_effort": str(row["reasoning_effort"] or ""),
-            "capabilities": capabilities,
-            "enabled": bool(row["enabled"]),
-            "is_active": bool(row["is_active"]),
-            "updated_at": int(row["updated_at"] or 0),
-        })
-    active = next(
-        (f"{row['provider']}/{row['model_id']}" for row in rows if row["is_active"]),
-        "-",
-    )
-    return {"generated_at": int(time.time()), "active": active, "models": rows}
+    if not Path(path).is_file():
+        return None
+    try:
+        return ModelRegistry(path)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        log.warning("cannot open model registry %s: %s", path, exc)
+        return None
+
+
+def _provider_payload(provider: ProviderRecord) -> dict[str, Any]:
+    """Provider metadata for the UI. Never includes the key itself."""
+    env_key = os.environ.get(provider.api_key_env, "") if provider.api_key_env else ""
+    stored = provider.has_stored_key
+    if stored:
+        source = "stored"
+    elif env_key.strip():
+        source = "env"
+    else:
+        source = "missing"
+    return {
+        "provider": provider.provider,
+        "display_name": provider.display_name,
+        "api": provider.api,
+        "base_url": provider.base_url,
+        "enabled": provider.enabled,
+        "builtin": provider.builtin,
+        "model_count": provider.model_count,
+        "enabled_models": provider.enabled_models,
+        "active_model_id": provider.active_model_id,
+        "api_key_set": source != "missing",
+        "api_key_source": source,
+        "updated_at": provider.updated_at,
+    }
+
+
+def _model_payload(model: ModelRecord) -> dict[str, Any]:
+    return {
+        "provider": model.provider,
+        "model_id": model.model_id,
+        "display_name": model.display_name,
+        "api": model.api,
+        "base_url": model.base_url,
+        "context_window": model.context_window,
+        "max_output_tokens": model.max_output_tokens,
+        "reasoning_effort": model.reasoning_effort,
+        "capabilities": model.capabilities,
+        "enabled": model.enabled,
+        "is_active": model.is_active,
+        "updated_at": model.updated_at,
+        "provider_display_name": model.provider_display_name,
+        "provider_enabled": model.provider_enabled,
+        "builtin": model.provider in BUILTIN_PROVIDERS,
+    }
+
+
+def models_data(config: dict[str, Any]) -> dict[str, Any]:
+    registry = _models_registry(config)
+    if registry is None:
+        return {
+            "generated_at": int(time.time()),
+            "active": "-",
+            "providers": [],
+            "models": [],
+            "presets": [
+                {key: value for key, value in preset.items() if key != "api_key_env"}
+                for preset in PROVIDER_PRESETS
+            ],
+        }
+    try:
+        providers = [_provider_payload(row) for row in registry.list_providers()]
+        models = [_model_payload(row) for row in registry.list()]
+        active = registry.active()
+        return {
+            "generated_at": int(time.time()),
+            "active": active.key if active else "-",
+            "providers": providers,
+            "models": models,
+            "presets": [
+                {key: value for key, value in preset.items() if key != "api_key_env"}
+                for preset in PROVIDER_PRESETS
+            ],
+        }
+    finally:
+        registry.close()
+
+
+def _string_field(payload: dict[str, Any], name: str) -> str:
+    value = payload.get(name)
+    return "" if value is None else str(value).strip()
+
+
+def _enabled_field(value: Any) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return "1" if str(value).strip().lower() in ("1", "true", "yes", "on") else "0"
+
+
+def _provider_fields(payload: dict[str, Any]) -> dict[str, str]:
+    fields = {
+        name: _string_field(payload, name)
+        for name in ("display_name", "api", "base_url", "api_key_env", "api_key")
+        if name in payload and payload[name] is not None
+    }
+    if "enabled" in payload:
+        fields["enabled"] = _enabled_field(payload["enabled"])
+    return fields
+
+
+def _model_fields(payload: dict[str, Any]) -> dict[str, str]:
+    fields = {
+        name: _string_field(payload, name)
+        for name in ("display_name", "context_window", "max_output_tokens", "reasoning_effort")
+        if name in payload and payload[name] is not None
+    }
+    if "enabled" in payload:
+        fields["enabled"] = _enabled_field(payload["enabled"])
+    if "capabilities" in payload:
+        capabilities = payload["capabilities"]
+        if isinstance(capabilities, (dict, list)):
+            fields["capabilities"] = json.dumps(capabilities, ensure_ascii=False)
+        else:
+            fields["capabilities"] = str(capabilities)
+    return fields
+
+
+def apply_models_action(
+    config: dict[str, Any], action: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply one model-page mutation and return the refreshed page payload."""
+    path = db_paths(config)["models"]
+    if not Path(path).is_file():
+        raise ValueError("模型数据库不存在，请先启动 qqbot")
+    registry = ModelRegistry(path)
+    try:
+        provider = _string_field(payload, "provider")
+        model_id = _string_field(payload, "model_id")
+        if action == "provider.upsert":
+            registry.upsert_provider(provider, _provider_fields(payload))
+        elif action == "provider.delete":
+            registry.delete_provider(provider)
+        elif action == "model.upsert":
+            registry.upsert(provider, model_id, _model_fields(payload))
+        elif action == "model.delete":
+            registry.delete_model(provider, model_id)
+        elif action == "model.activate":
+            registry.use(provider, model_id)
+        else:
+            raise ValueError(f"unknown action {action!r}")
+    finally:
+        registry.close()
+    return models_data(config)
 
 
 def cards_data(config: dict[str, Any]) -> dict[str, Any]:
@@ -578,6 +838,68 @@ def cards_data(config: dict[str, Any]) -> dict[str, Any]:
         "-",
     )
     return {"generated_at": int(time.time()), "active_card": active, "cards": cards}
+
+
+# Embedded asset blobs (``data:`` URIs) can be megabytes; the detail view only
+# needs to know they exist.
+_ASSET_URI_PREVIEW = 120
+
+
+def _asset_payload(asset: Any) -> Any:
+    if not isinstance(asset, dict):
+        return asset
+    uri = asset.get("uri")
+    if isinstance(uri, str) and uri.startswith("data:") and len(uri) > _ASSET_URI_PREVIEW:
+        header = uri.split(",", 1)[0]
+        return {**asset, "uri": f"{header},… ({len(uri)} chars)"}
+    return asset
+
+
+def card_detail_data(config: dict[str, Any], card_id: int) -> dict[str, Any] | None:
+    """Return one card's stored V3 payload plus its library metadata."""
+    rows = db_rows(
+        db_paths(config)["cards"],
+        "SELECT id, name, nickname, aliases, tags, creator, character_version, "
+        "fingerprint, payload, source_kind, source, installed_by, is_active, "
+        "created_at, updated_at FROM cards WHERE id = ?",
+        (card_id,),
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    if isinstance(data.get("assets"), list):
+        data = {**data, "assets": [_asset_payload(asset) for asset in data["assets"]]}
+    imported = payload.get("_import")
+    return {
+        "generated_at": int(time.time()),
+        "id": int(row["id"]),
+        "name": str(row["name"] or ""),
+        "nickname": str(row["nickname"] or ""),
+        "aliases": _json_list(row["aliases"]),
+        "tags": _json_list(row["tags"]),
+        "creator": str(row["creator"] or ""),
+        "character_version": str(row["character_version"] or ""),
+        "fingerprint": str(row["fingerprint"] or ""),
+        "source_kind": str(row["source_kind"] or ""),
+        "source": str(row["source"] or ""),
+        "installed_by": str(row["installed_by"] or ""),
+        "is_active": bool(row["is_active"]),
+        "created_at": int(row["created_at"] or 0),
+        "updated_at": int(row["updated_at"] or 0),
+        "spec": str(payload.get("spec") or "chara_card_v3"),
+        "spec_version": str(payload.get("spec_version") or "3.0"),
+        "imported_from": imported if isinstance(imported, dict) else {},
+        "data": data,
+    }
 
 
 def tasks_data(config: dict[str, Any]) -> dict[str, Any]:
@@ -652,8 +974,8 @@ def stickers_data(config: dict[str, Any]) -> dict[str, Any]:
     stickers = []
     for row in db_rows(
         path,
-        "SELECT id, description, tags, source, source_kind, status, uses, size, "
-        "mime, created_at, last_used FROM stickers "
+        "SELECT id, path, description, tags, source, source_kind, status, uses, "
+        "size, mime, created_at, last_used FROM stickers "
         "ORDER BY CASE status WHEN 'ok' THEN 0 ELSE 1 END, last_used DESC, id DESC",
     ):
         stickers.append({
@@ -666,6 +988,7 @@ def stickers_data(config: dict[str, Any]) -> dict[str, Any]:
             "uses": int(row["uses"] or 0),
             "size": int(row["size"] or 0),
             "mime": str(row["mime"] or ""),
+            "has_image": sticker_target(config, row["path"]) is not None,
             "created_at": int(row["created_at"] or 0),
             "last_used": int(row["last_used"] or 0),
         })
@@ -828,6 +1151,25 @@ class AdminHandler(BaseHTTPRequestHandler):
             return payload if isinstance(payload, dict) else {}
         return {key: values[0] for key, values in parse_qs(raw).items()}
 
+    def _mutation_guard(self) -> bool:
+        """Reject form posts and cross-origin writes.
+
+        The session cookie is SameSite=Strict; requiring JSON on top keeps a
+        stray HTML form (and older browsers) from reaching the write endpoints.
+        """
+        content_type = (self.headers.get("Content-Type") or "").lower()
+        if "application/json" not in content_type:
+            self._send_json(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                {"error": "Content-Type must be application/json"},
+            )
+            return False
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != (self.headers.get("Host") or ""):
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "cross-origin request rejected"})
+            return False
+        return True
+
     # ------------------------------------------------------------------ auth
     def _password(self) -> str:
         return os.environ.get("ADMIN_UI_PASSWORD", "")
@@ -935,6 +1277,43 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not self._api_guard():
                 return
             self._send_json(HTTPStatus.OK, resources[path](self.config))
+            return
+        if path.startswith("/api/stickers/"):
+            if not self._api_guard():
+                return
+            raw_id, _, action = path.removeprefix("/api/stickers/").partition("/")
+            try:
+                sticker_id = (
+                    int(raw_id) if raw_id.isascii() and raw_id.isdigit() else -1
+                )
+            except ValueError:
+                sticker_id = -1
+            if action != "image" or not 0 <= sticker_id < 2**63:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            query = parse_qs(urlparse(self.path).query)
+            thumb = (query.get("thumb") or ["0"])[0].lower() not in ("", "0", "false")
+            image = sticker_image(self.config, sticker_id, thumb=thumb)
+            if image is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "表情文件不存在"})
+                return
+            body, content_type = image
+            self._send_raw(
+                HTTPStatus.OK,
+                body,
+                content_type,
+                cache="private, max-age=31536000, immutable",
+            )
+            return
+        if path.startswith("/api/cards/"):
+            if not self._api_guard():
+                return
+            raw_id = path.removeprefix("/api/cards/")
+            detail = card_detail_data(self.config, int(raw_id)) if raw_id.isdigit() else None
+            if detail is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "角色卡不存在"})
+            else:
+                self._send_json(HTTPStatus.OK, detail)
             return
         if path == "/api/system":
             if not self._api_guard():
@@ -1053,6 +1432,33 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_raw(HTTPStatus.SEE_OTHER, b"", headers=headers)
             else:
                 self._send_json(HTTPStatus.OK, {"ok": True}, headers=headers)
+            return
+
+        model_actions = {
+            "/api/models/providers": "provider.upsert",
+            "/api/models/providers/delete": "provider.delete",
+            "/api/models/items": "model.upsert",
+            "/api/models/items/delete": "model.delete",
+            "/api/models/active": "model.activate",
+        }
+        if path in model_actions:
+            if not self._api_guard() or not self._mutation_guard():
+                return
+            try:
+                result = apply_models_action(
+                    self.config, model_actions[path], self._read_payload()
+                )
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except (OSError, sqlite3.Error) as exc:
+                log.exception("model mutation failed")
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": f"写入失败: {exc}"},
+                )
+                return
+            self._send_json(HTTPStatus.OK, result)
             return
 
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})

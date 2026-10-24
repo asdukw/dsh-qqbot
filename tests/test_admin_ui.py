@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sqlite3
@@ -12,21 +13,61 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
 from admin_ui import (  # noqa: E402
     AdminHandler,
     conversations_data,
+    db_paths,
     db_rows,
     fmt_ts,
     ip_allowed,
     issue_session,
     page,
     scalar,
+    sticker_directory,
+    sticker_target,
     valid_session,
 )
 from usage import UsageStore  # noqa: E402
+
+# 1×1 transparent PNG: a real file the image endpoint can decode.
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def rgba_png(width: int, height: int) -> bytes:
+    """A PNG with a transparent border and an opaque red centre."""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(image).rectangle(
+        [width // 5, height // 5, width * 4 // 5, height * 4 // 5],
+        fill=(220, 30, 30, 255),
+    )
+    out = BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def broken_png() -> bytes:
+    """A PNG with a valid signature and a corrupt IDAT chunk length."""
+    import struct
+    from io import BytesIO
+
+    from PIL import Image
+
+    out = BytesIO()
+    Image.new("RGB", (100, 100), (10, 20, 30)).save(out, format="PNG")
+    data = bytearray(out.getvalue())
+    index = data.find(b"IDAT")
+    data[index - 4:index] = struct.pack(">I", 0x82)
+    return bytes(data)
 
 
 class SessionTests(unittest.TestCase):
@@ -65,6 +106,32 @@ class HelperTests(unittest.TestCase):
     def test_fmt_ts(self) -> None:
         self.assertIn("2026-", fmt_ts(1792743000))
         self.assertEqual(fmt_ts(None), "-")
+
+
+class StickerDirectoryTests(unittest.TestCase):
+    def test_env_override_matches_the_bot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "a.png"
+            image.write_bytes(PNG_BYTES)
+            config = {"stickers": {"database": str(root / "stickers.db")}}
+            with patch.dict(os.environ, {"STICKER_DIR": str(root)}, clear=False):
+                self.assertEqual(sticker_directory(config), root)
+                self.assertEqual(sticker_target(config, image), image.resolve())
+            with patch.dict(os.environ, {"STICKER_DIR": ""}, clear=False):
+                # No env and no TOML value -> the bot's default, not the DB parent.
+                self.assertEqual(
+                    sticker_directory(config), Path("/var/lib/qqbot/stickers")
+                )
+
+    def test_sticker_db_env_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"stickers": {"database": str(root / "other.db")}}
+            with patch.dict(
+                os.environ, {"STICKER_DB": str(root / "custom.db")}, clear=False
+            ):
+                self.assertEqual(db_paths(config)["stickers"], str(root / "custom.db"))
 
 
 class ConversationMergeTests(unittest.TestCase):
@@ -111,6 +178,13 @@ class HttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
+        self.sticker_dir = root / "stickers"
+        self.sticker_dir.mkdir()
+        for name in ("a.png", "b.png"):
+            (self.sticker_dir / name).write_bytes(PNG_BYTES)
+        (self.sticker_dir / "c.png").write_bytes(rgba_png(600, 400))
+        (self.sticker_dir / "broken.png").write_bytes(broken_png())
+        (root / "outside.png").write_bytes(PNG_BYTES)
         self.dbs = {}
         for name, schema in {
             "memory": """
@@ -308,21 +382,21 @@ class HttpTests(unittest.TestCase):
         conn = sqlite3.connect(self.dbs["stickers"])
         conn.execute(
             "INSERT INTO stickers VALUES "
-            "(1, 'sha1', '/tmp/a.png', 'image/png', 1024, '开心', '[\"笑\"]', "
+            "(1, 'sha1', ?, 'image/png', 1024, '开心', '[\"笑\"]', "
             "'group:42', 'collected', 'ok', 4, ?, ?)",
-            (now, now),
+            (str(self.sticker_dir / "a.png"), now, now),
         )
         conn.execute(
             "INSERT INTO stickers VALUES "
-            "(2, 'sha2', '/tmp/b.webp', 'image/webp', 2048, '无语', '[]', "
+            "(2, 'sha2', ?, 'image/png', 2048, '无语', '[]', "
             "'group:42', 'collected', 'banned', 0, ?, 0)",
-            (now,),
+            (str(self.sticker_dir / "b.png"), now),
         )
         conn.execute(
             "INSERT INTO stickers VALUES "
-            "(3, 'sha3', '/tmp/c.jpg', 'image/jpeg', 4096, '点赞', '[\"好耶\"]', "
+            "(3, 'sha3', ?, 'image/png', 4096, '点赞', '[\"好耶\"]', "
             "'manual', 'upload', 'ok', 1, ?, ?)",
-            (now, now),
+            (str(self.sticker_dir / "c.png"), now, now),
         )
         conn.commit()
         conn.close()
@@ -390,7 +464,10 @@ class HttpTests(unittest.TestCase):
             "cards": {"database": self.dbs["cards"]},
             "tasks": {"database": self.dbs["tasks"]},
             "feeds": {"database": self.dbs["feeds"]},
-            "stickers": {"database": self.dbs["stickers"]},
+            "stickers": {
+                "database": self.dbs["stickers"],
+                "directory": str(self.sticker_dir),
+            },
             "usage": {"database": str(root / "usage.db"), "retention_days": 90},
             "dsh": {
                 "home": str(root / "dsh-home"),
@@ -445,6 +522,20 @@ class HttpTests(unittest.TestCase):
             response = exc
         cookie = response.headers.get("Set-Cookie", "").split(";")[0]
         return cookie, response
+
+    def post(self, path: str, payload: dict, cookie: str = "", content_type: str = "application/json"):
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(payload).encode(),
+            method="POST",
+            headers={"Content-Type": content_type},
+        )
+        if cookie:
+            request.add_header("Cookie", cookie)
+        try:
+            return urllib.request.urlopen(request, timeout=5)
+        except urllib.error.HTTPError as exc:
+            return exc
 
     def test_healthz_needs_no_auth(self) -> None:
         response = self.get("/healthz")
@@ -551,6 +642,224 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(row["description"], "一条鱼")
         self.assertTrue(row["is_active"])
 
+    def test_card_detail_endpoint(self) -> None:
+        payload = {
+            "spec": "chara_card_v3",
+            "spec_version": "3.0",
+            "data": {
+                "name": "Phoebe",
+                "first_mes": "你好，{{user}}。",
+                "alternate_greetings": ["又见面了"],
+                "character_book": {
+                    "entries": [{"keys": ["修会"], "content": "隐海修会", "enabled": True}]
+                },
+                "assets": [
+                    {"type": "icon", "name": "main", "uri": "data:image/png;base64," + "A" * 500},
+                    {"type": "icon", "name": "remote", "uri": "https://example.test/a.png"},
+                ],
+            },
+            "_import": {"spec": "chara_card_v2", "spec_version": "2.0"},
+        }
+        conn = sqlite3.connect(self.dbs["cards"])
+        conn.execute(
+            "INSERT INTO cards (id, name, fingerprint, payload, created_at, updated_at) "
+            "VALUES (2, 'Phoebe', 'fp2', ?, 1, 2)",
+            (json.dumps(payload),),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self.get("/api/cards/2").status, 401)
+        cookie, _ = self.login()
+        detail = json.loads(self.get("/api/cards/2", cookie).read().decode())
+        self.assertEqual(detail["id"], 2)
+        self.assertEqual(detail["spec"], "chara_card_v3")
+        self.assertEqual(detail["imported_from"]["spec"], "chara_card_v2")
+        self.assertEqual(detail["data"]["first_mes"], "你好，{{user}}。")
+        self.assertEqual(
+            detail["data"]["character_book"]["entries"][0]["keys"], ["修会"]
+        )
+        embedded, remote = detail["data"]["assets"]
+        self.assertTrue(embedded["uri"].startswith("data:image/png;base64,…"))
+        self.assertLess(len(embedded["uri"]), 120)
+        self.assertEqual(remote["uri"], "https://example.test/a.png")
+
+        # The legacy fixture stores an empty payload; it still renders.
+        legacy = json.loads(self.get("/api/cards/1", cookie).read().decode())
+        self.assertEqual(legacy["data"], {})
+        self.assertEqual(self.get("/api/cards/99", cookie).status, 404)
+        self.assertEqual(self.get("/api/cards/abc", cookie).status, 404)
+
+    def test_model_provider_management(self) -> None:
+        cookie, _ = self.login()
+
+        # Unauthenticated writes are rejected before touching SQLite.
+        anonymous = self.post(
+            "/api/models/providers",
+            {"provider": "deepseek", "base_url": "https://api.deepseek.test"},
+        )
+        self.assertEqual(anonymous.status, 401)
+
+        response = self.post(
+            "/api/models/providers",
+            {
+                "provider": "deepseek",
+                "display_name": "DeepSeek",
+                "api": "openai-completions",
+                "base_url": "https://api.deepseek.test",
+                "api_key_env": "DEEPSEEK_API_KEY",
+            },
+            cookie,
+        )
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        providers = {row["provider"]: row for row in payload["providers"]}
+        self.assertEqual(providers["deepseek"]["display_name"], "DeepSeek")
+        self.assertEqual(providers["deepseek"]["model_count"], 0)
+        self.assertFalse(providers["deepseek"]["api_key_set"])
+
+        response = self.post(
+            "/api/models/items",
+            {
+                "provider": "deepseek",
+                "model_id": "deepseek-chat",
+                "display_name": "DeepSeek Chat",
+                "context_window": "64000",
+                "max_output_tokens": "4096",
+                "reasoning_effort": "high",
+                "capabilities": {"reasoning_efforts": ["low", "high"]},
+            },
+            cookie,
+        )
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        model = next(
+            row for row in payload["models"] if row["model_id"] == "deepseek-chat"
+        )
+        self.assertEqual(model["context_window"], 64000)
+        self.assertEqual(model["reasoning_effort"], "high")
+        self.assertEqual(model["base_url"], "https://api.deepseek.test")
+        self.assertFalse(model["is_active"])
+
+        # Invalid effort is rejected and the row is not left half-written.
+        response = self.post(
+            "/api/models/items",
+            {
+                "provider": "deepseek",
+                "model_id": "deepseek-chat",
+                "reasoning_effort": "max",
+            },
+            cookie,
+        )
+        self.assertEqual(response.status, 400)
+        payload = json.loads(self.get("/api/models", cookie).read().decode())
+        model = next(
+            row for row in payload["models"] if row["model_id"] == "deepseek-chat"
+        )
+        self.assertEqual(model["reasoning_effort"], "high")
+
+        response = self.post(
+            "/api/models/active",
+            {"provider": "deepseek", "model_id": "deepseek-chat"},
+            cookie,
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            json.loads(response.read().decode())["active"], "deepseek/deepseek-chat"
+        )
+
+        # Active model/provider cannot be removed out from under the bot.
+        response = self.post(
+            "/api/models/items/delete",
+            {"provider": "deepseek", "model_id": "deepseek-chat"},
+            cookie,
+        )
+        self.assertEqual(response.status, 400)
+        response = self.post(
+            "/api/models/providers/delete", {"provider": "deepseek"}, cookie
+        )
+        self.assertEqual(response.status, 400)
+
+        # Switch back, then clean up model and provider.
+        self.assertEqual(
+            self.post(
+                "/api/models/active",
+                {"provider": "opencode-go", "model_id": "flash"},
+                cookie,
+            ).status,
+            200,
+        )
+        self.assertEqual(
+            self.post(
+                "/api/models/items/delete",
+                {"provider": "deepseek", "model_id": "deepseek-chat"},
+                cookie,
+            ).status,
+            200,
+        )
+        response = self.post(
+            "/api/models/providers/delete", {"provider": "deepseek"}, cookie
+        )
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        self.assertNotIn("deepseek", {row["provider"] for row in payload["providers"]})
+
+        # A provider without base_url is refused, and writes must be JSON.
+        response = self.post(
+            "/api/models/providers", {"provider": "nobase"}, cookie
+        )
+        self.assertEqual(response.status, 400)
+        response = self.post(
+            "/api/models/providers",
+            {"provider": "nobase", "base_url": "https://x"},
+            cookie,
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status, 415)
+
+    def test_provider_api_key_is_stored_but_never_returned(self) -> None:
+        cookie, _ = self.login()
+        response = self.post(
+            "/api/models/providers",
+            {
+                "provider": "keyco",
+                "display_name": "Key Co",
+                "base_url": "https://key.example/v1",
+                "api_key_env": "KEYCO_API_KEY",
+                "api_key": "sk-very-secret",
+            },
+            cookie,
+        )
+        self.assertEqual(response.status, 200)
+        raw = response.read().decode()
+        self.assertNotIn("sk-very-secret", raw)
+        payload = json.loads(raw)
+        row = next(item for item in payload["providers"] if item["provider"] == "keyco")
+        self.assertNotIn("api_key", row)
+        self.assertEqual(row["api_key_source"], "stored")
+        self.assertTrue(row["api_key_set"])
+
+        # Editing other fields leaves the saved key untouched.
+        response = self.post(
+            "/api/models/providers",
+            {"provider": "keyco", "display_name": "Key Co 2"},
+            cookie,
+        )
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        row = next(item for item in payload["providers"] if item["provider"] == "keyco")
+        self.assertEqual(row["api_key_source"], "stored")
+
+        # An explicit empty value clears it and falls back to the env var.
+        response = self.post(
+            "/api/models/providers", {"provider": "keyco", "api_key": ""}, cookie
+        )
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        row = next(item for item in payload["providers"] if item["provider"] == "keyco")
+        self.assertEqual(row["api_key_source"], "missing")
+        self.assertFalse(row["api_key_set"])
+
     def test_task_feed_and_sticker_endpoints(self) -> None:
         cookie, _ = self.login()
 
@@ -570,6 +879,95 @@ class HttpTests(unittest.TestCase):
         by_id = {row["id"]: row for row in stickers["stickers"]}
         self.assertEqual(by_id[1]["tags"], ["笑"])
         self.assertEqual(by_id[2]["status"], "banned")
+        self.assertTrue(by_id[1]["has_image"])
+
+    def test_sticker_images_are_served(self) -> None:
+        self.assertEqual(self.get("/api/stickers/1/image").status, 401)
+
+        cookie, _ = self.login()
+        response = self.get("/api/stickers/1/image", cookie)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["Content-Type"], "image/png")
+        self.assertEqual(response.read(), PNG_BYTES)
+        self.assertIn("immutable", response.headers["Cache-Control"])
+
+        thumb = self.get("/api/stickers/1/image?thumb=1", cookie)
+        self.assertEqual(thumb.status, 200)
+        self.assertEqual(thumb.headers["Content-Type"], "image/jpeg")
+        self.assertTrue(thumb.read().startswith(bytes([0xff, 0xd8, 0xff])))
+
+        # A real-sized RGBA image is downscaled and flattened onto white.
+        from io import BytesIO
+
+        from PIL import Image
+
+        large = self.get("/api/stickers/3/image?thumb=1", cookie)
+        self.assertEqual(large.status, 200)
+        with Image.open(BytesIO(large.read())) as opened:
+            self.assertEqual(opened.format, "JPEG")
+            preview = opened.convert("RGB")
+        self.assertEqual(preview.size, (320, 213))
+        self.assertTrue(all(channel > 240 for channel in preview.getpixel((2, 2))))
+        red, green, _ = preview.getpixel((160, 106))
+        self.assertGreater(red, 150)
+        self.assertLess(green, 120)
+
+        self.assertEqual(self.get("/api/stickers/999/image", cookie).status, 404)
+        self.assertEqual(self.get("/api/stickers/1/nope", cookie).status, 404)
+        self.assertEqual(self.get("/api/stickers//image", cookie).status, 404)
+        self.assertEqual(self.get("/api/stickers/not-a-number/image", cookie).status, 404)
+        self.assertEqual(
+            self.get("/api/stickers/" + "1" * 5000 + "/image", cookie).status, 404
+        )
+
+        # A row whose file lives outside the library must never be served.
+        conn = sqlite3.connect(self.dbs["stickers"])
+        conn.execute(
+            "INSERT INTO stickers VALUES "
+            "(4, 'sha4', ?, 'image/png', 123, '越界', '[]', 'manual', 'upload', "
+            "'ok', 0, ?, 0)",
+            (str(Path(self.tmp.name) / "outside.png"), int(time.time())),
+        )
+        # A row inside the directory whose file was deleted is a 404 too.
+        conn.execute(
+            "INSERT INTO stickers VALUES "
+            "(5, 'sha5', ?, 'image/png', 0, '已删除', '[]', 'manual', 'upload', "
+            "'ok', 0, ?, 0)",
+            (str(self.sticker_dir / "missing.png"), int(time.time())),
+        )
+        # Lexical containment would accept this; resolve() must reject it.
+        conn.execute(
+            "INSERT INTO stickers VALUES "
+            "(6, 'sha6', ?, 'image/png', 0, '越界二', '[]', 'manual', 'upload', "
+            "'ok', 0, ?, 0)",
+            (str(self.sticker_dir / ".." / "outside.png"), int(time.time())),
+        )
+        # A file whose bytes decode badly still falls back to the original.
+        conn.execute(
+            "INSERT INTO stickers VALUES "
+            "(7, 'sha7', ?, 'image/png', 0, '损坏', '[]', 'manual', 'upload', "
+            "'ok', 0, ?, 0)",
+            (str(self.sticker_dir / "broken.png"), int(time.time())),
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.get("/api/stickers/4/image", cookie).status, 404)
+        self.assertEqual(self.get("/api/stickers/5/image", cookie).status, 404)
+        self.assertEqual(self.get("/api/stickers/6/image", cookie).status, 404)
+
+        broken = self.get("/api/stickers/7/image?thumb=1", cookie)
+        self.assertEqual(broken.status, 200)
+        self.assertEqual(broken.headers["Content-Type"], "image/png")
+        self.assertEqual(broken.read(), broken_png())
+
+        stickers = json.loads(self.get("/api/stickers", cookie).read().decode())
+        has_image = {row["id"]: row["has_image"] for row in stickers["stickers"]}
+        self.assertTrue(has_image[1])
+        self.assertTrue(has_image[3])
+        self.assertTrue(has_image[7])
+        self.assertFalse(has_image[4])
+        self.assertFalse(has_image[5])
+        self.assertFalse(has_image[6])
 
     def test_system_endpoint_lists_databases(self) -> None:
         cookie, _ = self.login()

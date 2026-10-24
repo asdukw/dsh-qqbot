@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _sse(self, payload: dict) -> None:
-        self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
+        self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
         self.wfile.flush()
 
 

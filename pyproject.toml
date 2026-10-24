@@ -20,5 +20,29 @@ extend-exclude = ["dsh/user-profile.mjs"]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
 
+[tool.pyright]
+include = ["bot", "tests", "scripts", "deploy", "dsh"]
+exclude = [".venv", "admin", "dsh-home", "dsh-workspace"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+# Modules in bot/ are imported flat (tests add bot/ to sys.path).
+extraPaths = ["bot"]
+
+# Unit tests build MessageEvent/Bot doubles from SimpleNamespace and from
+# **overrides dicts, which standard-mode inference cannot follow. Keep tests
+# in scope (imports and names are still checked) but leave mock-shaped
+# diagnostics to unittest, which runs them for real.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportArgumentType = "none"
+reportAttributeAccessIssue = "none"
+reportOptionalMemberAccess = "none"
+reportOptionalIterable = "none"
+reportGeneralTypeIssues = "none"
+reportTypedDictNotRequiredAccess = "none"
+reportSelfClsParameterName = "none"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

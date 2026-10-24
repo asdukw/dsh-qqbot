@@ -4,14 +4,14 @@ import sys
 
 sys.path.insert(0, "/opt/qqbot/bot")
 
-from onebot import OneBotClient, OneBotConfig  # noqa: E402
+from onebot import OneBotConfig, OneBotWSClient  # noqa: E402
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 async def main():
     token = sys.argv[1]
-    client = OneBotClient(
+    client = OneBotWSClient(
         OneBotConfig(url="ws://127.0.0.1:3001", token=token, self_id=0),
         lambda _event: asyncio.sleep(0),
     )

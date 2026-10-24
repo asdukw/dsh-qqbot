@@ -42,17 +42,17 @@ function LoginScreen({
   onSubmit: (event: FormEvent) => void;
 }) {
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[#f4f8ff]">
+    <div className="relative min-h-screen overflow-hidden bg-canvas">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_8%,rgba(59,130,246,0.18),transparent_34%),radial-gradient(circle_at_82%_92%,rgba(147,197,253,0.28),transparent_42%)]" />
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(37,99,235,0.06)_1px,transparent_1px),linear-gradient(to_bottom,rgba(37,99,235,0.06)_1px,transparent_1px)] [background-size:48px_48px] [mask-image:radial-gradient(ellipse_at_center,black,transparent_70%)]" />
       <div className="relative flex min-h-screen items-center justify-center p-4">
-        <Card className="w-full max-w-sm border-blue-100 bg-white/95 shadow-soft backdrop-blur">
+        <Card className="w-full max-w-sm bg-white/95 backdrop-blur">
           <CardHeader className="items-center pb-2 text-center">
             <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/25">
               <Waves className="h-7 w-7" />
             </div>
             <CardTitle className="text-xl">大肥鱼 Admin</CardTitle>
-            <CardDescription>QQ bot 运行面板 · 只读</CardDescription>
+            <CardDescription>QQ bot 运行面板 · 模型可管理</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <form className="space-y-3" onSubmit={onSubmit}>
@@ -210,7 +210,7 @@ export default function App() {
 
   if (view === "loading") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#f4f8ff] text-sm text-slate-500">
+      <div className="flex min-h-screen items-center justify-center bg-canvas text-sm text-slate-500">
         <RefreshCw className="mr-2 h-4 w-4 animate-spin text-blue-600" />
         正在加载…
       </div>

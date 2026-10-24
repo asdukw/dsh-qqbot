@@ -18,7 +18,8 @@ from llm import LLMError
 from models import ModelRecord, ModelRegistry
 from onebot import OneBotError
 from stickers import StickerError, download_image
-from tasks import TZ as TASK_TZ, describe_record, describe_target, render_task_list
+from tasks import TZ as TASK_TZ
+from tasks import describe_record, describe_target, render_task_list
 
 from cards import CardError, CardRecord
 

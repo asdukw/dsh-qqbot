@@ -33,6 +33,7 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        canvas: "hsl(214 100% 97%)",
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -41,6 +42,7 @@ export default {
       },
       boxShadow: {
         soft: "0 18px 45px -20px rgba(37, 99, 235, 0.35)",
+        island: "0 12px 32px -20px rgba(37, 99, 235, 0.4)",
       },
     },
   },

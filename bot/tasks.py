@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -71,10 +71,13 @@ _TASK_PROMPT = """把管理员这句话解析成定时任务，只返回 JSON，
 管理员的话：{description}"""
 
 
+TaskKind = Literal["daily", "weekly", "once", "interval"]
+
+
 class TaskSpec(BaseModel):
     """A validated schedule + the message to send."""
 
-    kind: Literal["daily", "weekly", "once", "interval"]
+    kind: TaskKind
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
     target: Literal["here", "private", "group"] = "here"
     mode: Literal["fixed", "generate"] = "fixed"
@@ -191,7 +194,9 @@ def next_run_for(spec: TaskSpec, now: datetime) -> datetime:
             target += timedelta(days=1)
         return target
     # weekly
-    days = (int(spec.weekday) - now.weekday()) % 7
+    if spec.weekday is None:
+        raise ValueError("weekly task is missing its weekday")
+    days = (spec.weekday - now.weekday()) % 7
     target += timedelta(days=days)
     if target <= now:
         target += timedelta(days=7)
@@ -243,7 +248,7 @@ def describe_target(record: TaskRecord) -> str:
 def spec_of(record: TaskRecord) -> TaskSpec:
     """Rebuild a validated spec from a stored row."""
     return TaskSpec(
-        kind=record.kind,
+        kind=cast(TaskKind, record.kind),
         message=record.message,
         time=record.time_of_day,
         weekday=record.weekday,
@@ -556,7 +561,7 @@ class TaskScheduler:
                 log.exception("task scheduler tick failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.check_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def tick(self, now: datetime) -> int:

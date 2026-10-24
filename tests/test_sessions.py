@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from sessions import SessionStore, TZ  # noqa: E402
+from sessions import TZ, SessionStore  # noqa: E402
 
 
 class SessionStoreTests(unittest.TestCase):

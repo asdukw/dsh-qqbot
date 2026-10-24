@@ -17,8 +17,9 @@ import sqlite3
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -360,7 +361,7 @@ class FeedPoller:
                 log.exception("feed poller tick failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.check_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def tick(self) -> int:

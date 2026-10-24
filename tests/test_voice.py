@@ -16,10 +16,10 @@ from voice import (  # noqa: E402
     MAX_CHARS,
     VoiceError,
     extract_voice_marker,
+    spoken_text,
     synthesize,
     synthesize_fish,
     synthesize_stepfun,
-    spoken_text,
 )
 
 

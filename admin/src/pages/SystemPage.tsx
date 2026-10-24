@@ -71,7 +71,7 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
-        <SectionCard icon={Server} title="管理面板" description="只读，密码来自 bot.env">
+        <SectionCard icon={Server} title="管理面板" description="模型页可写，其余只读；密码来自 bot.env">
           <div className="divide-y divide-blue-50">
             <InfoRow label="监听" value={data ? `${data.admin.host}:${data.admin.port}` : "-"} mono />
             <InfoRow
@@ -114,7 +114,7 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
       <SectionCard
         icon={Database}
         title="数据库"
-        description="只读连接；文件大小取自面板进程可见的路径"
+        description="面板读取的 SQLite 文件；文件大小取自面板进程可见的路径"
         badge={data?.databases.length ?? 0}
       >
         <Table className="min-w-[720px]">

@@ -12,6 +12,13 @@ export function useApi<T>(url: string, refreshKey = 0) {
 
   useEffect(() => {
     let active = true;
+    if (!url) {
+      // An empty url means "nothing selected yet"; skip the request entirely.
+      setData(null);
+      setError("");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     requestJson<T>(url)
       .then((payload) => {

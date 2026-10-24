@@ -26,7 +26,7 @@ RSS_V1 = """<?xml version="1.0" encoding="UTF-8"?>
 <title>UP 主 的 bilibili 动态</title>
 <item><title>old post</title><link>https://t.bilibili.com/1</link>
 <description>&lt;p&gt;first &amp; best&lt;/p&gt;</description><guid>1</guid></item>
-</channel></rss>""".encode("utf-8")
+</channel></rss>""".encode()
 
 RSS_V2 = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -35,7 +35,7 @@ RSS_V2 = """<?xml version="1.0" encoding="UTF-8"?>
 <description>hello &lt;b&gt;world&lt;/b&gt;</description><guid>2</guid></item>
 <item><title>old post</title><link>https://t.bilibili.com/1</link>
 <description>first</description><guid>1</guid></item>
-</channel></rss>""".encode("utf-8")
+</channel></rss>""".encode()
 
 ATOM = b"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

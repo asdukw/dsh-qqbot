@@ -50,6 +50,7 @@
 - `subprocess`（仅供 `tool-fs-search` 启动打包的 `rg`）
 - `fs-observation-policy`
 - `user-profile`（自定义插件）
+- `session-history`（自定义插件，按需读取旧 session JSONL / chat_events）
 - `web` + `tool-web` + `web-fetch-http`（官方 web seam 与 `web_search` / `web_fetch` 工具）
 - `web-search-keyless`（自定义 provider，注册到官方 `ctx.web`；官方 exa/perplexity/deepseek provider 都要各自的 key，这个走免密钥搜索后端）
 
@@ -141,21 +142,34 @@ CREATE TABLE group_facts (
 
 画像只保存明确说出的稳定事实。事件、约定和重要片段走文件记忆（`memory/notes/`），由模型用 `write` / `edit` / `glob` / `grep` 维护。
 
+## 历史插件（`dsh/session-history.mjs`）
+
+DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/sessions` 下、sandbox 工作区之外，文件工具读不到。这个插件把它们变成三个只读、按需调用的工具：
+
+- `history_sessions`：扫描 `$DSH_HOME/sessions/<workspace>/<session>/session.*.jsonl`，按当前会话前缀过滤（`group-<gid>` / `private-<uid>`，含 `-gN`），返回当前/旧 generation 的起止时间、轮数、大小；
+- `history_read`：流式读取指定 session 的 `user/message` 和 `assistant/message` 事件，支持关键词、`since` / `until`（北京时间）、`limit` 和最新/最早窗口；输出保持对话顺序；
+- `chat_search`：查 `memory.db.chat_events` 当前会话的入站消息，包含群里未 @ 机器人的普通消息；保留由 `[usage] event_retention_days` 控制（默认 90 天），不包含助手回复。
+- 会话身份来自 `profile.db.conversations`（插件按 `exec.agent.id` 查，不解析 session id）；读不到身份时回退解析 `group-*` / `private-*`。跨会话的 session 名会被拒绝。
+- 在 `agent/created` 里注册 section `session-history`（order 8100），告诉模型“先查再答、不要假装记得没读过的内容”。
+- 插件只读；只有模型主动调用时才读，不会每轮注入上下文。
+
 ## 模型注册表（`bot/models.py`）
 
 模型配置的唯一来源。代码和环境变量里都不再有模型 id、上下文长度、输出上限或推理强度。
 
-- SQLite `/var/lib/qqbot/models.db`，表 `models`，主键 `(provider, model_id)`；字段：`display_name`、`api`、`base_url`、`api_key_env`、`context_window`、`max_output_tokens`、`reasoning_effort`（默认 `low`）、`capabilities`（JSON，含 `reasoning_efforts`）、`enabled`、`is_active`。
+- SQLite `/var/lib/qqbot/models.db` 分两张表：
+  - `providers`：主键 `provider`，字段 `display_name`、`api`、`base_url`、`api_key`、`enabled`、`created_at`、`updated_at`；一个供应商的模型共享这些连接信息。`api_key` 是面板里直接保存的密钥（DB 文件 0600）。旧记录仍保留一个内部 `api_key_env` 兼容字段，界面不再暴露，新供应商默认不依赖它。
+  - `models`：主键 `(provider, model_id)`，字段 `display_name`、`context_window`、`max_output_tokens`、`reasoning_effort`（默认空，表示模型默认值）、`capabilities`（JSON，含 `reasoning_efforts` / `input`）、`enabled`、`is_active`。
 - `is_active` 上有部分唯一索引，保证全表最多一行激活；`use()` 在一个事务里切换。
-- 空库时写入默认行（`opencode-go` 付费 Flash 1M 激活、free 200k、本地 fake）；之后不覆盖用户修改。旧版本库启动时 `_migrate()` 补列、给默认行补上 `reasoning_efforts`，并把旧的 `opencode/*` 默认行迁移到 `opencode-go/*`。
-- 写入校验：新行必须有 `base_url` 和 `context_window`；`reasoning_effort` 必须在 `capabilities.reasoning_efforts` 中；不能禁用激活行。
+- 空库时写入默认供应商 `opencode-go` 和模型 `opencode-go/deepseek-v4.1-flash`（1M 激活）；`meta.seeded` 保证只 seed 一次，之后不覆盖用户修改，删空模型也不会重新写入。
+- 旧库迁移：`_migrate()` 补列、把旧的 `opencode/*` 默认行迁移到 `opencode-go/*`，并把每行重复的 `api` / `base_url` / `api_key_env` 拆分到 `providers`，然后重建 `models` 表（去掉旧的连接字段）。
+- 写入校验：新建供应商必须有 `provider`（小写 slug）和 `base_url`；新建模型必须有 `context_window`；`reasoning_effort` 必须在 `capabilities.reasoning_efforts` 中；不能禁用/删除激活模型，也不能禁用拥有激活模型的供应商；供应商下还有模型时不能删除供应商。
 - 启动时：
   1. `load_active_model()` 读取激活行；
-  2. 把所有启用的行按 provider 分组，渲染成 `llm-pi-ai` 的 `providers` 覆盖配置，写到 `/var/lib/qqbot/dsh-state/models.patch.json`；profile 里的 `llm-pi-ai` 只挂载 adapter，`providers` 为空。内置 provider（`opencode` / `opencode-go`）只覆盖 `apiKeyEnv`、`baseURL` 和模型参数，**不写 `api`**——否则会替换掉 DSH 内置的 adapter 包装，丢掉 `x-opencode-session`；自定义 provider 仍写完整定义；
+  2. 遍历启用的供应商及其启用的模型，渲染成 `llm-pi-ai` 的 `providers` 覆盖配置，写到 `/var/lib/qqbot/dsh-state/models.patch.json`；profile 里的 `llm-pi-ai` 只挂载 adapter，`providers` 为空。若供应商保存了 API Key，渲染时把它放进按供应商生成的 `QQBOT_PK_<slug>_<hash>` 环境变量，patch 的 `apiKeyEnv` 引用该变量（密钥不落 patch 文件）；DSH runtime 作为 Python 子进程启动，继承这个环境变量，再由 credentials 层按请求解析。内置 provider（`opencode` / `opencode-go`）只覆盖 `apiKeyEnv`、`baseURL` 和模型参数，**不写 `api`**——否则会替换掉 DSH 内置的 adapter 包装，丢掉 `x-opencode-session`；自定义 provider 仍写完整定义；
   3. `make_dsh_client()` 用激活行的 `provider` / `model_id` / `max_output_tokens` / `reasoning_effort` 构造 `DeepSeekHarness`，并通过 `patches=` 传入上面的 patch；
-  4. 回退客户端（`[dsh] enabled = false`）同样从激活行取 `base_url`、key、`max_tokens`、`reasoning_effort`。
-- 同一 provider 下的行必须共享 `api` / `base_url` / `api_key_env`，不一致时渲染报错。
-- 管理命令：`--list-models`、`--use-model p/m`、`--set-model p/m field=value ...`；修改后重启生效。
+  4. 回退客户端（`[dsh] enabled = false`）同样从激活行（JOIN 供应商）取 `base_url`、key、`max_tokens`、`reasoning_effort`。
+- 管理入口：Admin UI 的「模型」页（`POST /api/models/*`，登录 + JSON + 同源）按供应商 → 模型两级管理，API Key 在表单里直接填写并存入 `providers.api_key`；CLI 保留 `--list-models`、`--use-model p/m`、`--set-model p/m field=value ...`。修改后机器人在下一轮消息自动热切换。
 
 ## 角色卡库（`bot/cards.py`）
 
@@ -173,7 +187,7 @@ CREATE TABLE group_facts (
 - SQLite `/var/lib/qqbot/stickers.db` + 文件目录 `/var/lib/qqbot/stickers/`；一行一张图，`sha1` 唯一，按内容去重。
 - 入站判定：OneBot `image` 段带 `summary="[动画表情]"` 或 `sub_type=1` 时视为表情包；解析器同时把它标成 `[表情包]` 写进文本，`MessageEvent.stickers` 单独带出 URL。
 - 只收群聊，私聊不收；下载异步执行，不阻塞回复；每个群每小时有收藏上限（`[stickers] max_per_hour`），单张上限 `max_bytes`，只接受 PNG/JPEG/GIF/WebP（按魔数判断，不信任 Content-Type）。
-- 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。
+- 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。Admin UI 的表情库页直接展示图片（见下文 Admin UI 结构）。
 - 收进来后用视觉模型打标：一次调用同时给描述和 1-3 个情绪标签，写进 `description` / `tags`；打标失败不影响入库。
 - 发送：prompt 里带一句约定，模型想发表情时在回复最后写 `[表情: 语气词]`；adapter 用 `extract_sticker_marker` 摘掉标记，按标签/描述匹配（`StickerStore.pick`）挑一张，以 `base64://` 图片段跟在文字后面发出，并受每会话冷却/小时上限约束。
 - 图片输入默认走占位符（见“一条消息的路径”第 7 步）：原图存 workspace、描述缓存、prompt 只带描述和路径；`read_image` 按需读原图。`[dsh] image_mode = "inline"` 时才使用 DSH content block；thin client 路径和打标仍用 `image_url`。
@@ -225,8 +239,9 @@ CREATE TABLE group_facts (
 ## Admin UI 结构
 
 - `bot/admin_ui.py` 只做 JSON API + 静态文件；React 端用 hash 路由（`#/tasks` 等）分组，服务端不需要额外的路由配置。
-- 资源接口各自读一个 SQLite：`/api/models`、`/api/cards`、`/api/tasks`、`/api/feeds`、`/api/stickers`；`/api/conversations` 合并 `memory.db` 的 `chat_events` / `session_state`、`profile.db` 的 `conversations` 与 `usage.db` 的按会话汇总。
-- `/api/overview` 返回仪表盘所需的计数、今日指标、按自然日（Asia/Shanghai）的活动趋势、订阅异常和最近消息；`/api/system` 返回数据库路径/大小与只读面板配置。
+- 资源接口各自读一个 SQLite：`/api/models`、`/api/cards`、`/api/tasks`、`/api/feeds`、`/api/stickers`；`/api/stickers` 返回每张表情的元数据和 `has_image`（文件是否仍在库目录内），`/api/stickers/<id>/image` 流式返回原图，`?thumb=1` 用 Pillow 生成 320px 的 JPEG 缩略图并做进程内 LRU 缓存；两个接口都会校验文件路径位于 `[stickers] directory` 之下，越界或缺失一律 404；`/api/cards` 只返回列表摘要，`/api/cards/<id>` 额外解析出库里存的 V3 payload，供角色卡详情页按 V3 字段分栏展示（内嵌的 `data:` 资产只保留前缀）；`/api/conversations` 合并 `memory.db` 的 `chat_events` / `session_state`、`profile.db` 的 `conversations` 与 `usage.db` 的按会话汇总。
+- `/api/models` 通过 `ModelRegistry` 打开 `models.db`（会执行与机器人相同的迁移），返回 `providers`、`models`、`presets` 以及每个供应商的 `api_key_set` / `api_key_source`（`stored` / `env` / `missing`；不返回密钥本身）。模型页的写入走 `POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`；这些接口要求登录 cookie、`Content-Type: application/json` 和同源 `Origin`，并复用 `ModelRegistry` 的校验（不能禁用/删除激活模型、不能删除仍有模型的供应商等）。
+- `/api/overview` 返回仪表盘所需的计数、今日指标、按自然日（Asia/Shanghai）的活动趋势、订阅异常和最近消息；`/api/system` 返回数据库路径/大小与面板配置。
 - `/api/dashboard` 保留为旧版一次性聚合接口，内部复用上述资源函数；新页面不再使用它。
 - 所有 `/api/*` 都需要 HMAC cookie；前端 401 时回到登录页，每 60 秒重拉当前页。
 
@@ -255,7 +270,7 @@ auto: true
 - `memory/notes/`：模型自由写入的事件、约定、摘要；
 - `memory/profiles/`：旧版 JSON 画像的兼容目录（SQLite 版不再写入，可删除）。
 
-工作区是模型唯一可写的文件区域。密钥、数据库和 DSH session 日志都在工作区之外。
+工作区是模型唯一可写的文件区域。密钥、数据库和 DSH session 日志都在工作区之外；旧 session JSONL 由 `session-history` 插件只读、按需访问。
 
 ## 失败与恢复
 
@@ -269,4 +284,4 @@ auto: true
 
 - `deepseek-harness-sdk` 固定 `0.2.1rc2`；DSH 的插件 API 仍是 developer preview。
 - 升级步骤：改 `deploy/install-bot.sh` 里的版本 → 重新安装 → 用 `dsh --profile qqbot --dump-config` 验证 profile → 跑 `--check-dsh`。
-- 如果 DSH 改了 `agent/created`、`ctx.systemPrompt` 或 `ToolDefinition`，需要同步调整 `dsh/user-profile.mjs`。
+- 如果 DSH 改了 `agent/created`、`ctx.systemPrompt` 或 `ToolDefinition`，需要同步调整 `dsh/user-profile.mjs` 和 `dsh/session-history.mjs`。

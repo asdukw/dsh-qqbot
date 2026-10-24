@@ -20,14 +20,14 @@ async def hold(name, url, headers):
                 try:
                     msg = await asyncio.wait_for(ws.recv(), 1.5)
                     print(name, "event", str(msg)[:160], flush=True)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     print(name, "idle", flush=True)
             await ws.send(ACTION)
             for _ in range(3):
                 try:
                     msg = await asyncio.wait_for(ws.recv(), 1.5)
                     print(name, "after", str(msg)[:160], flush=True)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     print(name, "after idle", flush=True)
         finally:
             print(name, "close_code", ws.close_code, "reason", ws.close_reason, flush=True)
