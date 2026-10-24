@@ -16,7 +16,8 @@ overview aggregates counts, a day-by-day trend and alerts; ``/api/models``,
 ``/api/stickers/<id>/image`` streams a sticker file (``?thumb=1`` for a
 bounded JPEG thumbnail) so the panel can show the images themselves.
 ``/api/dashboard`` is kept as the original single-page aggregate for
-compatibility.
+compatibility. ``POST /api/models/provider-models`` asks a saved provider
+for its model list so the panel does not need a hand-typed model id.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
 
+import httpx
 from admin_insights import clean_conversation, fun_data, usage_data
 from models import (
     BUILTIN_PROVIDERS,
@@ -706,6 +708,153 @@ def _model_payload(model: ModelRecord) -> dict[str, Any]:
         "provider_enabled": model.provider_enabled,
         "builtin": model.provider in BUILTIN_PROVIDERS,
     }
+
+
+class ProviderModelsError(RuntimeError):
+    """The upstream provider could not return its model list."""
+
+
+def _provider_api_key(record: ProviderRecord) -> str:
+    """Stored key wins; otherwise read the provider's configured env var."""
+    key = record.api_key.strip()
+    if not key and record.api_key_env:
+        key = os.environ.get(record.api_key_env, "").strip()
+    return key
+
+
+def _provider_models_url(base_url: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("供应商未配置 base_url")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    try:
+        parsed = httpx.URL(base)
+    except httpx.InvalidURL as exc:
+        raise ValueError(f"供应商 base_url 无效：{exc}") from exc
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("供应商 base_url 必须是 http(s) 地址")
+    return base if base.endswith("/models") else f"{base}/models"
+
+
+def _model_list(payload: Any) -> list[dict[str, str]]:
+    """Normalise the common OpenAI-compatible /models response shapes."""
+    items: Any = payload
+    if isinstance(payload, dict):
+        items = payload.get("data")
+        if not isinstance(items, list):
+            items = payload.get("models")
+    if not isinstance(items, list):
+        raise ProviderModelsError("上游返回的模型列表格式无法识别")
+    found: dict[str, str] = {}
+    for item in items:
+        if isinstance(item, str):
+            model_id, owned_by = item.strip(), ""
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("name") or "").strip()
+            owned_by = str(
+                item.get("owned_by") or item.get("owner") or ""
+            ).strip()
+        else:
+            continue
+        if model_id:
+            found.setdefault(model_id, owned_by)
+    if not found:
+        raise ProviderModelsError("上游没有返回任何模型")
+    return [{"id": model_id, "owned_by": found[model_id]} for model_id in sorted(found)]
+
+
+MAX_MODELS_BYTES = 2 * 1024 * 1024
+
+
+def _read_prefix(response: httpx.Response, limit: int) -> bytes:
+    """Read a short prefix of an error body and always close the response."""
+    data = bytearray()
+    try:
+        for chunk in response.iter_bytes():
+            data.extend(chunk)
+            if len(data) >= limit:
+                break
+    finally:
+        response.close()
+    return bytes(data[:limit])
+
+
+def _read_body(response: httpx.Response, limit: int) -> bytes:
+    data = bytearray()
+    try:
+        for chunk in response.iter_bytes():
+            data.extend(chunk)
+            if len(data) > limit:
+                raise ProviderModelsError("上游响应过大")
+    finally:
+        response.close()
+    return bytes(data)
+
+
+def provider_models(config: dict[str, Any], provider: str) -> dict[str, Any]:
+    """Fetch one provider's model ids from its OpenAI-compatible endpoint."""
+    provider = str(provider or "").strip()
+    if not provider:
+        raise ValueError("缺少 provider")
+    registry = _models_registry(config)
+    if registry is None:
+        raise ValueError("模型数据库不存在，请先启动 qqbot")
+    try:
+        record = registry.get_provider(provider)
+    finally:
+        registry.close()
+    if record is None:
+        raise ValueError(f"供应商 {provider!r} 不存在")
+    url = _provider_models_url(record.base_url)
+    headers = {"Accept": "application/json", "User-Agent": "qqbot-admin"}
+    key = _provider_api_key(record)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        # No redirects: a custom x-api-key header is not stripped on a
+        # cross-origin redirect, and the key must only go to the provider.
+        with httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=8.0), follow_redirects=False
+        ) as client:
+            request = client.build_request("GET", url, headers=headers)
+            response = client.send(request, stream=True)
+            if key and response.status_code in (401, 403):
+                # Some OpenAI-compatible gateways (OpenCode Zen) expect the
+                # key in x-api-key instead of a Bearer token.
+                response.close()
+                alt = {**headers}
+                alt.pop("Authorization", None)
+                alt["x-api-key"] = key
+                response = client.send(
+                    client.build_request("GET", url, headers=alt), stream=True
+                )
+            if 300 <= response.status_code < 400:
+                response.close()
+                raise ProviderModelsError(
+                    f"上游返回了重定向（HTTP {response.status_code}），"
+                    "请把供应商 base_url 改成最终地址"
+                )
+            if response.status_code >= 400:
+                detail = " ".join(
+                    _read_prefix(response, 512).decode("utf-8", "replace").split()
+                )[:200]
+                hint = (
+                    "（请检查供应商的 API Key）"
+                    if response.status_code in (401, 403)
+                    else ""
+                )
+                message = f"上游返回 HTTP {response.status_code}{hint}"
+                raise ProviderModelsError(f"{message}：{detail}" if detail else message)
+            body = _read_body(response, MAX_MODELS_BYTES)
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        raise ProviderModelsError(f"网络请求失败：{exc}") from exc
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError) as exc:
+        raise ProviderModelsError("上游返回的不是 JSON") from exc
+    models = _model_list(payload)
+    return {"provider": provider, "count": len(models), "models": models}
 
 
 def models_data(config: dict[str, Any]) -> dict[str, Any]:
@@ -1432,6 +1581,23 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_raw(HTTPStatus.SEE_OTHER, b"", headers=headers)
             else:
                 self._send_json(HTTPStatus.OK, {"ok": True}, headers=headers)
+            return
+
+        if path == "/api/models/provider-models":
+            if not self._api_guard() or not self._mutation_guard():
+                return
+            payload = self._read_payload()
+            try:
+                result = provider_models(
+                    self.config, _string_field(payload, "provider")
+                )
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except ProviderModelsError as exc:
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, result)
             return
 
         model_actions = {

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Gauge, Save } from "lucide-react";
+import { Gauge, RefreshCw, Save } from "lucide-react";
 
 import { ErrorBanner } from "@/components/common/Bits";
 import { CheckboxRow, Field, Modal, Select } from "@/components/models/Modal";
@@ -8,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { ModelRow, ProviderRow } from "@/lib/analytics";
+import { requestJson } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 export type ModelFormValues = {
   provider: string;
@@ -70,9 +72,20 @@ export function ModelForm({
   const [extras, setExtras] = useState<Record<string, unknown>>({});
   const [reasoningEffort, setReasoningEffort] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [modelsBusy, setModelsBusy] = useState(false);
+  const [modelsError, setModelsError] = useState("");
+  const [manualId, setManualId] = useState(false);
+  const fetchAbort = useRef<AbortController | null>(null);
   const modelKey = model ? `${provider.provider}/${model.model_id}` : "";
 
   useEffect(() => {
+    fetchAbort.current?.abort();
+    fetchAbort.current = null;
+    setModelsBusy(false);
+    setModelOptions([]);
+    setModelsError("");
+    setManualId(false);
     if (!open) return;
     if (mode === "edit" && model) {
       setValues({
@@ -123,6 +136,8 @@ export function ModelForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, modelKey]);
 
+  useEffect(() => () => fetchAbort.current?.abort(), []);
+
   const extraKeys = useMemo(() => Object.keys(extras), [extras]);
   const supported = supportedEfforts(reasoningMode, customEfforts);
   const canSubmit =
@@ -140,6 +155,48 @@ export function ModelForm({
     }
     if (!nextSupported.includes(reasoningEffort)) {
       setReasoningEffort(next === "all" ? "low" : nextSupported[0]);
+    }
+  }
+
+  async function fetchModels() {
+    fetchAbort.current?.abort();
+    const controller = new AbortController();
+    fetchAbort.current = controller;
+    setModelsBusy(true);
+    setModelsError("");
+    try {
+      const payload = await requestJson<{ models: Array<{ id: string }> }>(
+        "/api/models/provider-models",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: provider.provider }),
+          signal: controller.signal,
+        }
+      );
+      if (controller.signal.aborted) return;
+      const ids = payload.models
+        .map((item) => item.id)
+        .filter((id) => id.length > 0);
+      setModelOptions(ids);
+      setManualId(false);
+      if (ids.length) {
+        setValues((current) =>
+          current.model_id && ids.includes(current.model_id)
+            ? current
+            : { ...current, model_id: ids[0] }
+        );
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      setModelsError(
+        err instanceof Error && err.message ? err.message : "获取模型列表失败"
+      );
+    } finally {
+      if (fetchAbort.current === controller) {
+        fetchAbort.current = null;
+        setModelsBusy(false);
+      }
     }
   }
 
@@ -192,17 +249,75 @@ export function ModelForm({
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="模型 ID" hint="发给上游的 model 字段；创建后不可修改。">
-            <Input
-              value={values.model_id}
-              onChange={(event) =>
-                setValues((current) => ({ ...current, model_id: event.target.value }))
-              }
-              disabled={mode === "edit"}
-              placeholder="deepseek-chat"
-              spellCheck={false}
-            />
-          </Field>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="model-id"
+                className="text-xs font-medium text-slate-600"
+              >
+                模型 ID
+              </label>
+              {mode === "create" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void fetchModels()}
+                  disabled={modelsBusy}
+                >
+                  <RefreshCw className={cn("h-3.5 w-3.5", modelsBusy && "animate-spin")} />
+                  {modelsBusy ? "获取中…" : "获取模型"}
+                </Button>
+              ) : null}
+            </div>
+            {modelOptions.length && !manualId ? (
+              <Select
+                id="model-id"
+                value={values.model_id}
+                onChange={(value) =>
+                  setValues((current) => ({ ...current, model_id: value }))
+                }
+              >
+                {modelOptions.map((modelId) => (
+                  <option key={modelId} value={modelId}>
+                    {modelId}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              <Input
+                id="model-id"
+                value={values.model_id}
+                onChange={(event) =>
+                  setValues((current) => ({ ...current, model_id: event.target.value }))
+                }
+                disabled={mode === "edit"}
+                placeholder={mode === "edit" ? values.model_id : "点击“获取模型”或手动输入"}
+                spellCheck={false}
+              />
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[11px] text-slate-400">
+                {modelOptions.length && !manualId
+                  ? `已从供应商拉取 ${modelOptions.length} 个模型。`
+                  : "发给上游的 model 字段；创建后不可修改。"}
+              </p>
+              {modelOptions.length && !manualId && mode === "create" ? (
+                <button
+                  type="button"
+                  onClick={() => setManualId(true)}
+                  className="text-[11px] text-blue-600 hover:underline"
+                >
+                  手动填写
+                </button>
+              ) : null}
+            </div>
+            {modelsError ? (
+              <p className="rounded-lg border border-red-100 bg-red-50 px-2 py-1 text-[11px] text-red-700">
+                {modelsError}
+              </p>
+            ) : null}
+          </div>
           <Field label="显示名称" hint="留空时使用模型 ID。">
             <Input
               value={values.display_name}

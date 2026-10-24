@@ -11,7 +11,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
 from admin_ui import (  # noqa: E402
     AdminHandler,
+    ProviderModelsError,
+    _model_list,
+    _provider_models_url,
     conversations_data,
     db_paths,
     db_rows,
@@ -108,6 +111,48 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(fmt_ts(None), "-")
 
 
+class ProviderModelsUrlTests(unittest.TestCase):
+    def test_base_url_variants(self) -> None:
+        self.assertEqual(
+            _provider_models_url("https://api.example/v1"),
+            "https://api.example/v1/models",
+        )
+        self.assertEqual(
+            _provider_models_url("https://api.example/v1/"),
+            "https://api.example/v1/models",
+        )
+        self.assertEqual(
+            _provider_models_url("https://api.example/v1/chat/completions"),
+            "https://api.example/v1/models",
+        )
+        self.assertEqual(
+            _provider_models_url("https://api.example/v1/models"),
+            "https://api.example/v1/models",
+        )
+        with self.assertRaises(ValueError):
+            _provider_models_url("")
+        with self.assertRaises(ValueError):
+            _provider_models_url("ftp://api.example/v1")
+
+    def test_model_list_shapes(self) -> None:
+        self.assertEqual(
+            _model_list({"data": [{"id": "b"}, {"id": "a"}, {"id": "a"}]}),
+            [{"id": "a", "owned_by": ""}, {"id": "b", "owned_by": ""}],
+        )
+        self.assertEqual(
+            _model_list(["x", "y"]),
+            [{"id": "x", "owned_by": ""}, {"id": "y", "owned_by": ""}],
+        )
+        self.assertEqual(
+            _model_list({"models": [{"name": "z", "owner": "acme"}]}),
+            [{"id": "z", "owned_by": "acme"}],
+        )
+        with self.assertRaises(ProviderModelsError):
+            _model_list({"data": []})
+        with self.assertRaises(ProviderModelsError):
+            _model_list({"unexpected": "shape"})
+
+
 class StickerDirectoryTests(unittest.TestCase):
     def test_env_override_matches_the_bot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -156,6 +201,49 @@ class ConversationMergeTests(unittest.TestCase):
                 "usage": {"database": str(root / "usage.db")},
             }
             self.assertEqual(conversations_data(config)["conversations"], [])
+
+
+class FakeProviderHandler(BaseHTTPRequestHandler):
+    """Tiny OpenAI-compatible /models endpoint for admin-UI tests."""
+
+    status = 200
+    auth = ""
+    api_key = ""
+    path = ""
+    require_api_key = False
+    respond_json = True
+    model_ids = ("alpha", "beta")
+
+    def do_GET(self) -> None:
+        FakeProviderHandler.auth = self.headers.get("Authorization", "")
+        FakeProviderHandler.api_key = self.headers.get("x-api-key", "")
+        FakeProviderHandler.path = self.path
+        authorized = (
+            FakeProviderHandler.api_key == "test-key"
+            if FakeProviderHandler.require_api_key
+            else FakeProviderHandler.auth == "Bearer test-key"
+        )
+        status = FakeProviderHandler.status if authorized else 401
+        if FakeProviderHandler.respond_json:
+            body = json.dumps({
+                "object": "list",
+                "data": [
+                    {"id": model_id, "owned_by": "acme"}
+                    for model_id in FakeProviderHandler.model_ids
+                ],
+            }).encode()
+            content_type = "application/json"
+        else:
+            body = b"<html>not json</html>"
+            content_type = "text/html"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -968,6 +1056,157 @@ class HttpTests(unittest.TestCase):
         self.assertFalse(has_image[4])
         self.assertFalse(has_image[5])
         self.assertFalse(has_image[6])
+
+    def test_provider_model_list_endpoint(self) -> None:
+        FakeProviderHandler.status = 200
+        FakeProviderHandler.auth = ""
+        FakeProviderHandler.api_key = ""
+        FakeProviderHandler.path = ""
+        FakeProviderHandler.require_api_key = False
+        FakeProviderHandler.respond_json = True
+        provider_server = ThreadingHTTPServer(("127.0.0.1", 0), FakeProviderHandler)
+        thread = threading.Thread(target=provider_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = provider_server.server_address[1]
+            base_url = f"http://127.0.0.1:{port}/v1"
+
+            # The endpoint stays behind the admin session.
+            self.assertEqual(
+                self.post("/api/models/provider-models", {"provider": "acme"}).status,
+                401,
+            )
+
+            cookie, _ = self.login()
+            response = self.post(
+                "/api/models/providers",
+                {
+                    "provider": "acme",
+                    "display_name": "Acme",
+                    "api": "openai-completions",
+                    "base_url": base_url,
+                    "api_key": "test-key",
+                },
+                cookie,
+            )
+            self.assertEqual(response.status, 200)
+
+            response = self.post(
+                "/api/models/provider-models", {"provider": "acme"}, cookie
+            )
+            self.assertEqual(response.status, 200)
+            body = response.read().decode()
+            payload = json.loads(body)
+            self.assertEqual(payload["provider"], "acme")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(
+                [row["id"] for row in payload["models"]], ["alpha", "beta"]
+            )
+            self.assertEqual(payload["models"][0]["owned_by"], "acme")
+            self.assertNotIn("test-key", body)
+            self.assertEqual(FakeProviderHandler.path, "/v1/models")
+            self.assertEqual(FakeProviderHandler.auth, "Bearer test-key")
+
+            # OpenCode-style gateways accept the key in x-api-key instead.
+            FakeProviderHandler.require_api_key = True
+            FakeProviderHandler.auth = ""
+            FakeProviderHandler.api_key = ""
+            response = self.post(
+                "/api/models/provider-models", {"provider": "acme"}, cookie
+            )
+            self.assertEqual(response.status, 200)
+            self.assertEqual(FakeProviderHandler.api_key, "test-key")
+            self.assertEqual(FakeProviderHandler.auth, "")
+            FakeProviderHandler.require_api_key = False
+
+            # A key that only lives in the environment is picked up.
+            os.environ["FAKE_PROVIDER_KEY"] = "test-key"
+            try:
+                response = self.post(
+                    "/api/models/providers",
+                    {
+                        "provider": "envprov",
+                        "display_name": "Env",
+                        "api": "openai-completions",
+                        "base_url": base_url,
+                        "api_key_env": "FAKE_PROVIDER_KEY",
+                    },
+                    cookie,
+                )
+                self.assertEqual(response.status, 200)
+                response = self.post(
+                    "/api/models/provider-models", {"provider": "envprov"}, cookie
+                )
+                self.assertEqual(response.status, 200)
+                self.assertEqual(FakeProviderHandler.auth, "Bearer test-key")
+            finally:
+                os.environ.pop("FAKE_PROVIDER_KEY", None)
+
+            # No stored key and no env key: the provider's 401 surfaces as 502.
+            os.environ.pop("MISSING_PROVIDER_KEY", None)
+            response = self.post(
+                "/api/models/providers",
+                {
+                    "provider": "nokey",
+                    "display_name": "No Key",
+                    "api": "openai-completions",
+                    "base_url": base_url,
+                    "api_key_env": "MISSING_PROVIDER_KEY",
+                },
+                cookie,
+            )
+            self.assertEqual(response.status, 200)
+            response = self.post(
+                "/api/models/provider-models", {"provider": "nokey"}, cookie
+            )
+            self.assertEqual(response.status, 502)
+            self.assertIn("401", json.loads(response.read().decode())["error"])
+
+            # Upstream errors are reported rather than raised.
+            FakeProviderHandler.status = 401
+            upstream = self.post(
+                "/api/models/provider-models", {"provider": "acme"}, cookie
+            )
+            self.assertEqual(upstream.status, 502)
+            self.assertIn("401", json.loads(upstream.read().decode())["error"])
+            FakeProviderHandler.status = 200
+
+            # An HTML gateway page is not JSON.
+            FakeProviderHandler.respond_json = False
+            broken = self.post(
+                "/api/models/provider-models", {"provider": "acme"}, cookie
+            )
+            self.assertEqual(broken.status, 502)
+            self.assertIn("JSON", json.loads(broken.read().decode())["error"])
+            FakeProviderHandler.respond_json = True
+
+            # Unreachable host -> network error, not a traceback.
+            response = self.post(
+                "/api/models/providers",
+                {
+                    "provider": "unreachable",
+                    "display_name": "Unreachable",
+                    "api": "openai-completions",
+                    "base_url": "http://127.0.0.1:1/v1",
+                    "api_key": "test-key",
+                },
+                cookie,
+            )
+            self.assertEqual(response.status, 200)
+            down = self.post(
+                "/api/models/provider-models", {"provider": "unreachable"}, cookie
+            )
+            self.assertEqual(down.status, 502)
+            self.assertIn("网络请求失败", json.loads(down.read().decode())["error"])
+        finally:
+            FakeProviderHandler.status = 200
+            FakeProviderHandler.require_api_key = False
+            FakeProviderHandler.respond_json = True
+            FakeProviderHandler.auth = ""
+            FakeProviderHandler.api_key = ""
+            FakeProviderHandler.path = ""
+            provider_server.shutdown()
+            provider_server.server_close()
 
     def test_system_endpoint_lists_databases(self) -> None:
         cookie, _ = self.login()
