@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,11 @@ PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 # metadata: setting `api` would replace the built-in adapter, and with it the
 # wrappers (OpenCode Go adds x-opencode-session from the DSH session id).
 BUILTIN_PROVIDERS = {"opencode", "opencode-go"}
+
+# DSH's llm-pi-ai schema only accepts these reasoning-effort keys. The admin
+# UI also offers "none" and "ultra"; map them at the DSH boundary.
+DSH_EFFORTS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+DSH_EFFORT_ALIASES = {"none": "off", "ultra": "max"}
 
 PROVIDER_DISPLAY = {
     "opencode": "OpenCode Zen",
@@ -232,6 +238,22 @@ def parse_key(key: str) -> tuple[str, str]:
     if not sep or not provider or not model_id:
         raise ValueError(f"model key must look like provider/model_id, got {key!r}")
     return provider, model_id
+
+
+def dsh_effort(value: str) -> str:
+    """Map a UI effort name to a key accepted by DSH's llm-pi-ai schema."""
+    effort = str(value or "").strip().lower()
+    effort = DSH_EFFORT_ALIASES.get(effort, effort)
+    return effort if effort in DSH_EFFORTS else ""
+
+
+def dsh_reasoning_efforts(values: Iterable[str]) -> dict[str, str]:
+    efforts: dict[str, str] = {}
+    for value in values:
+        effort = dsh_effort(value)
+        if effort:
+            efforts[effort] = effort
+    return efforts
 
 
 def provider_key_env(provider: str) -> str:
@@ -907,10 +929,9 @@ class ModelRegistry:
                     "name": row.display_name,
                     "contextWindow": row.context_window,
                 }
-                if row.reasoning_efforts:
-                    entry["reasoningEfforts"] = {
-                        effort: effort for effort in row.reasoning_efforts
-                    }
+                efforts = dsh_reasoning_efforts(row.reasoning_efforts)
+                if efforts:
+                    entry["reasoningEfforts"] = efforts
                 declared_input = row.capabilities.get("input")
                 if isinstance(declared_input, list):
                     modalities = [

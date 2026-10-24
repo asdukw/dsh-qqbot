@@ -49,7 +49,7 @@ from meme import (
     available as meme_available,
 )
 from memory import Memory, format_recall
-from models import EDITABLE, ModelRecord, ModelRegistry, parse_key
+from models import EDITABLE, ModelRecord, ModelRegistry, dsh_effort, parse_key
 from onebot import (
     EMPTY_REPLY,
     MessageEvent,
@@ -593,7 +593,7 @@ def make_dsh_client(config: AppConfig, record: ModelRecord, system_prompt: str =
             provider=record.provider,
             model=record.model_id,
             max_tokens=record.max_output_tokens,
-            reasoning_effort=record.effective_effort,
+            reasoning_effort=dsh_effort(record.effective_effort),
             request_timeout=config.dsh.request_timeout,
             patches=(config.models.patch,),
         ),

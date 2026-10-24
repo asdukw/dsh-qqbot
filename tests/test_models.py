@@ -10,7 +10,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from models import ModelRegistry, parse_key  # noqa: E402
+from models import ModelRegistry, dsh_effort, parse_key  # noqa: E402
+
+
+class EffortMappingTests(unittest.TestCase):
+    def test_dsh_effort_aliases(self) -> None:
+        self.assertEqual(dsh_effort("none"), "off")
+        self.assertEqual(dsh_effort("ultra"), "max")
+        self.assertEqual(dsh_effort("xhigh"), "xhigh")
+        self.assertEqual(dsh_effort("bogus"), "")
+        self.assertEqual(dsh_effort(""), "")
 
 
 class ModelRegistryTests(unittest.TestCase):
@@ -104,6 +113,37 @@ class ModelRegistryTests(unittest.TestCase):
     def test_unknown_field_rejected(self) -> None:
         with self.assertRaises(ValueError):
             self.registry.upsert("opencode-go", "deepseek-v4.1-flash", {"temperature": "1"})
+
+    def test_dsh_patch_filters_unsupported_efforts(self) -> None:
+        self.registry.upsert(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            {
+                "capabilities": json.dumps({
+                    "reasoning_efforts": [
+                        "none", "minimal", "low", "medium", "high",
+                        "xhigh", "max", "ultra", "bogus",
+                    ],
+                    "input": ["text"],
+                }),
+            },
+        )
+        target = Path(self.tmp.name) / "models.patch.json"
+        self.registry.write_dsh_patch(target)
+        patch = json.loads(target.read_text(encoding="utf-8"))
+        model = patch[0]["config"]["providers"]["opencode-go"]["models"][0]
+        self.assertEqual(
+            model["reasoningEfforts"],
+            {
+                "off": "off",
+                "minimal": "minimal",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "xhigh": "xhigh",
+                "max": "max",
+            },
+        )
 
     def test_patch_groups_models_by_provider(self) -> None:
         target = Path(self.tmp.name) / "state" / "models.patch.json"
