@@ -5,6 +5,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { formatNumber } from "@/lib/format";
 import type { FunData } from "@/lib/analytics";
 
+function rangeText(data: FunData | null): string {
+  if (!data) return "加载中…";
+  return data.start === data.end ? data.start : `${data.start} ~ ${data.end}`;
+}
+
 export default function FunPanel({
   data,
   loading,
@@ -14,6 +19,7 @@ export default function FunPanel({
 }) {
   const maxRanking = Math.max(1, ...(data?.ranking.map((row) => row.messages) ?? [1]));
   const maxWord = Math.max(1, ...(data?.words.map((word) => word.count) ?? [1]));
+  const initialLoading = loading && !data;
 
   return (
     <div className="grid gap-6 xl:grid-cols-[1fr_1.35fr]">
@@ -24,16 +30,21 @@ export default function FunPanel({
               <Trophy className="h-5 w-5" />
             </div>
             <div>
-              <CardTitle>今日发言排行</CardTitle>
+              <CardTitle>发言排行</CardTitle>
               <CardDescription className="mt-1">
-                {data?.date ?? "今天"} · {formatNumber(data?.messages)} 条消息
+                {rangeText(data)} · {formatNumber(data?.messages)} 条消息
               </CardDescription>
             </div>
           </div>
           {loading ? <Loader2 className="h-4 w-4 animate-spin text-blue-600" /> : null}
         </CardHeader>
         <CardContent className="space-y-3 p-5">
-          {data?.ranking.length ? (
+          {initialLoading ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-10 text-center text-sm text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-500" />
+              <p>加载中…</p>
+            </div>
+          ) : data?.ranking.length ? (
             data.ranking.map((row, index) => (
               <div key={row.user_id} className="space-y-1.5">
                 <div className="flex items-center justify-between gap-3 text-sm">
@@ -42,7 +53,7 @@ export default function FunPanel({
                       {index + 1}
                     </span>
                     <span className="truncate font-medium text-slate-700">{row.name}</span>
-                    {index === 0 ? <Badge variant="secondary">今日话痨</Badge> : null}
+                    {index === 0 ? <Badge variant="secondary">话痨</Badge> : null}
                   </div>
                   <span className="shrink-0 text-xs text-slate-500">
                     {formatNumber(row.messages)} 条
@@ -59,7 +70,7 @@ export default function FunPanel({
           ) : (
             <div className="flex flex-col items-center justify-center gap-2 py-10 text-center text-sm text-muted-foreground">
               <MessageSquareText className="h-6 w-6 text-blue-200" />
-              <p>今天还没有新的群聊记录。</p>
+              <p>这个范围内还没有新的群聊记录。</p>
             </div>
           )}
         </CardContent>
@@ -72,16 +83,21 @@ export default function FunPanel({
               <Sparkles className="h-5 w-5" />
             </div>
             <div>
-              <CardTitle>今日词云</CardTitle>
+              <CardTitle>词云</CardTitle>
               <CardDescription className="mt-1">
-                取今天最近 2000 条消息，按词频放大
+                取范围内最近 2000 条消息，按词频放大
               </CardDescription>
             </div>
           </div>
           <Badge variant="outline">{data?.words.length ?? 0} 个词</Badge>
         </CardHeader>
         <CardContent className="p-5">
-          {data?.words.length ? (
+          {initialLoading ? (
+            <div className="flex min-h-[260px] flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-500" />
+              <p>加载中…</p>
+            </div>
+          ) : data?.words.length ? (
             <div className="flex min-h-[260px] flex-wrap content-center items-baseline justify-center gap-x-4 gap-y-2 rounded-xl bg-gradient-to-br from-blue-50/80 via-white to-sky-50 px-4 py-6">
               {data.words.map((word, index) => {
                 const scale = word.count / maxWord;
@@ -112,7 +128,7 @@ export default function FunPanel({
           ) : (
             <div className="flex min-h-[260px] flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
               <Sparkles className="h-6 w-6 text-blue-200" />
-              <p>今天还没有足够的聊天文本。</p>
+              <p>这个范围内还没有足够的聊天文本。</p>
             </div>
           )}
         </CardContent>

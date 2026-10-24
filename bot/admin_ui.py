@@ -1511,7 +1511,13 @@ class AdminHandler(BaseHTTPRequestHandler):
                 )
             else:
                 self._send_json(
-                    HTTPStatus.OK, fun_data(self.config, conversation)
+                    HTTPStatus.OK,
+                    fun_data(
+                        self.config,
+                        conversation,
+                        (query.get("start") or [""])[0],
+                        (query.get("end") or [""])[0],
+                    ),
                 )
             return
         if path in ("/logout", "/api/logout"):
