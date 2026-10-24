@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import { Gauge, RefreshCw, Save } from "lucide-react";
 
 import { ErrorBanner } from "@/components/common/Bits";
-import { CheckboxRow, Field, Modal, Select } from "@/components/models/Modal";
+import { Field, Modal, Select } from "@/components/models/Modal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -63,9 +63,9 @@ export function ModelForm({
 }) {
   const [values, setValues] = useState({
     model_id: "",
-    context_window: "256000",
+    context_window: "1000000",
   });
-  const [imageInput, setImageInput] = useState(false);
+  const [imageInput, setImageInput] = useState(true);
   const [extras, setExtras] = useState<Record<string, unknown>>({});
   const [reasoningEffort, setReasoningEffort] = useState("none");
   const [enabled, setEnabled] = useState(true);
@@ -89,7 +89,8 @@ export function ModelForm({
         model_id: model.model_id,
         context_window: String(model.context_window),
       });
-      setImageInput(declaredStringList(model.capabilities.input).includes("image"));
+      const declaredInput = declaredStringList(model.capabilities.input);
+      setImageInput(declaredInput.length ? declaredInput.includes("image") : true);
       setExtras(
         Object.fromEntries(
           Object.entries(model.capabilities).filter(
@@ -102,9 +103,9 @@ export function ModelForm({
     } else {
       setValues({
         model_id: "",
-        context_window: "256000",
+        context_window: "1000000",
       });
-      setImageInput(false);
+      setImageInput(true);
       setExtras({});
       setReasoningEffort("none");
       setEnabled(true);
@@ -181,7 +182,7 @@ export function ModelForm({
     const contextWindowValue =
       Number.isFinite(contextWindow) && contextWindow > 0
         ? values.context_window.trim()
-        : "256000";
+        : "1000000";
     const declaredEfforts =
       reasoningEffort && !isKnownEffort(reasoningEffort)
         ? [reasoningEffort, ...EFFORTS]
@@ -310,7 +311,7 @@ export function ModelForm({
           <Field
             className="sm:col-span-2"
             label="上下文窗口"
-            hint="tokens；留空默认 256000。DSH 的 token meter 和自动压缩用它。"
+            hint="tokens；留空默认 1000000。DSH 的 token meter 和自动压缩用它。"
           >
             <Input
               type="number"
@@ -319,7 +320,7 @@ export function ModelForm({
               onChange={(event) =>
                 setValues((current) => ({ ...current, context_window: event.target.value }))
               }
-              placeholder="256000"
+              placeholder="1000000"
             />
           </Field>
         </div>
@@ -351,13 +352,6 @@ export function ModelForm({
               ))}
             </Select>
           </Field>
-
-          <CheckboxRow
-            label="支持图片输入"
-            hint="同时启用 DSH 的 read_image 工具"
-            checked={imageInput}
-            onChange={setImageInput}
-          />
         </div>
 
         <label className="flex items-center gap-2.5 rounded-lg border border-blue-100 px-3 py-2.5 text-sm text-slate-700">
