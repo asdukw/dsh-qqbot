@@ -301,6 +301,8 @@ auto: true
 
 ## 失败与恢复
 
+日常操作步骤（日志、备份与恢复、重启、常见故障）见 [运维与排障](ops.md)。
+
 - **OneBot 断开**：adapter 指数退避重连；DSH 不受影响。
 - **DSH runtime 崩溃**：`DSHClient.run` 捕获异常、关闭旧 runtime，下一轮重新启动；session JSONL 保留。
 - **模型 401/429/5xx**：DSH 把错误写进 `turn/end`，adapter 记录并在 `notify_errors = true` 时发一条简短提示。

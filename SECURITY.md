@@ -9,6 +9,7 @@
 - **使用 QQ 小号。** NapCat 是第三方 NTQQ 客户端，账号可能触发风控或封禁。
 - **不要暴露 NapCat 端口。** `6099`（WebUI）和 `3001`（OneBot WS）只绑定 `127.0.0.1`。远程访问 WebUI 请用 SSH 隧道。
 - **保护 `bot.env`。** `/etc/qqbot/bot.env` 权限为 `640 root:qqbot`，不要提交到 git。
+- **给面板设密码。** `ADMIN_UI_PASSWORD` 不要留空；面板只监听 `127.0.0.1`，远程访问走隧道，不要改绑 `0.0.0.0`。
 - **不要在 workspace 放密钥。** 模型对 `/var/lib/qqbot/dsh-workspace` 有读写权限，也能用 `read` / `grep` 看到里面的内容。
 - **模型数据外发。** 聊天内容、工具结果、画像会发送给配置的模型提供商；请阅读对应提供商的数据政策。
 - **DSH developer preview。** 当前固定 `0.2.1rc2`；升级前先看 release notes 和 profile 兼容性。
