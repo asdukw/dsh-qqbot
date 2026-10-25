@@ -159,6 +159,29 @@ class SubscriptionTests(unittest.TestCase):
         self.assertIn("upstream", logs.output[0])
         self.assert_safe_logs(logs.output)
 
+    def test_long_credentials_are_redacted_before_detail_truncation(self) -> None:
+        token = "synthetic-long-token-" + "0123456789abcdef" * 40
+        url = "https://example.com/feed?token=" + token
+        bodies = (
+            "<b>Error Message:</b><pre>" + token + "</pre>",
+            "<p>" + token + "</p>",
+        )
+        for body in bodies:
+            with self.subTest(body=body[:20]), patch("feeds.httpx.AsyncClient") as client, patch(
+                "feeds.asyncio.sleep", new=AsyncMock()
+            ), self.assertLogs("qqbot", level="WARNING") as logs:
+                client.return_value.__aenter__.return_value.get = AsyncMock(
+                    return_value=httpx.Response(503, text=body)
+                )
+                with self.assertRaises(FeedError) as raised:
+                    asyncio.run(self.bot.add_feed(self.event, url))
+            self.assertLessEqual(len(raised.exception.detail), 300)
+            self.assertIn("[redacted]", raised.exception.detail)
+            self.assertIn("[redacted]", logs.output[0])
+            self.assertNotIn(token[:100], raised.exception.detail)
+            self.assertNotIn(token[:100], logs.output[0])
+            self.assertEqual(self.store.count(), 0)
+
     def test_parse_failure_is_logged_and_not_stored(self) -> None:
         with patch("main.fetch_feed", new=AsyncMock(return_value=b"not XML")), self.assertLogs("qqbot", level="WARNING") as logs:
             with self.assertRaises(FeedError):
