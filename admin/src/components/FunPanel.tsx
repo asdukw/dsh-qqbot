@@ -1,5 +1,6 @@
 import { Loader2, MessageSquareText, Sparkles, Trophy } from "lucide-react";
 
+import WordCloud from "@/components/WordCloud";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatNumber } from "@/lib/format";
@@ -18,7 +19,10 @@ export default function FunPanel({
   loading: boolean;
 }) {
   const maxRanking = Math.max(1, ...(data?.ranking.map((row) => row.messages) ?? [1]));
-  const maxWord = Math.max(1, ...(data?.words.map((word) => word.count) ?? [1]));
+  const cloudWords = (data?.words ?? []).slice(0, 40);
+  const cloudSeed = data
+    ? `${data.start}|${data.end}|${data.conversation_id}`
+    : "";
   const initialLoading = loading && !data;
 
   return (
@@ -85,11 +89,11 @@ export default function FunPanel({
             <div>
               <CardTitle>词云</CardTitle>
               <CardDescription className="mt-1">
-                取范围内最近 2000 条消息，按词频放大
+                按消息覆盖数排布，字号越大越常被提到
               </CardDescription>
             </div>
           </div>
-          <Badge variant="outline">{data?.words.length ?? 0} 个词</Badge>
+          <Badge variant="outline">{cloudWords.length} 个词</Badge>
         </CardHeader>
         <CardContent className="p-5">
           {initialLoading ? (
@@ -98,32 +102,16 @@ export default function FunPanel({
               <p>加载中…</p>
             </div>
           ) : data?.words.length ? (
-            <div className="flex min-h-[260px] flex-wrap content-center items-baseline justify-center gap-x-4 gap-y-2 rounded-xl bg-gradient-to-br from-blue-50/80 via-white to-sky-50 px-4 py-6">
-              {data.words.map((word, index) => {
-                const scale = word.count / maxWord;
-                return (
-                  <span
-                    key={word.text}
-                    title={`${word.text} · ${word.count} 次`}
-                    className={
-                      index % 4 === 0
-                        ? "font-semibold text-blue-700"
-                        : index % 4 === 1
-                          ? "font-medium text-blue-600"
-                          : index % 4 === 2
-                            ? "font-medium text-sky-600"
-                            : "font-medium text-indigo-500"
-                    }
-                    style={{
-                      fontSize: `${12 + Math.round(scale * 30)}px`,
-                      opacity: 0.62 + scale * 0.38,
-                      lineHeight: 1.1,
-                    }}
-                  >
-                    {word.text}
-                  </span>
-                );
-              })}
+            <div className="rounded-xl bg-gradient-to-br from-blue-50/80 via-white to-sky-50 px-2 py-4 sm:px-4">
+              <div className="sm:hidden">
+                <WordCloud words={cloudWords} seed={cloudSeed} compact />
+              </div>
+              <div className="hidden sm:block">
+                <WordCloud words={cloudWords} seed={cloudSeed} />
+              </div>
+              <p className="mt-2 text-center text-[11px] text-slate-400">
+                字号越大，提到这个词的消息越多
+              </p>
             </div>
           ) : (
             <div className="flex min-h-[260px] flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">

@@ -158,6 +158,26 @@ check_seconds = 20         # scheduler poll interval
 max_tasks = 50
 max_per_chat = 10
 
+[daily]
+# Playful recap of the previous day, sent at the boundary below (00:00 =
+# midnight, i.e. "summarize yesterday as the day ends"). Stats come from
+# memory.db; the commentary is one thin-client call in the active card's
+# voice. If generation fails, a stats-only report is still sent.
+enabled = true
+database = "/var/lib/qqbot/daily.db"
+hour = 0                    # delivery boundary, Asia/Shanghai
+minute = 0
+groups = []                 # empty = every group active that day
+private = false             # also recap private chats (>= min_messages)
+min_messages = 5            # quieter chats are skipped (and remembered as skipped)
+max_late_hours = 6          # after this, a missed day is not sent retroactively
+check_seconds = 60
+sample_chars = 1600         # chat excerpt budget for the model
+max_chars = 320             # commentary length cap
+max_attempts = 3            # generation/send retries within the late window
+min_repeat = 3              # messages in a row to call out a 复读现场
+prompt = ""                 # extra style hint appended to the commentary prompt
+
 [bot]
 # Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;
 # this list is the fallback for local runs.

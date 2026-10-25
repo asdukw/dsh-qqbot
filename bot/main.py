@@ -17,7 +17,7 @@ import time
 import tomllib
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,6 +27,13 @@ from admins import parse_admin_ids
 from card_fetch import CardFetchError, fetch_card_bytes_sync
 from commands import CommandRouter, strip_leading_mention, strip_message_markers
 from conversations import ConversationStore
+from daily import (
+    DailyReporter,
+    DailySettings,
+    DailyStore,
+    DayStats,
+    write_commentary,
+)
 from dsh_client import DSHClient, DSHConfig, DSHError
 from feeds import (
     FeedPoller,
@@ -293,6 +300,14 @@ class TasksSection:
     max_per_chat: int = 10
 
 
+@dataclass(frozen=True)
+class DailySection(DailySettings):
+    # Daily recap sent after the day ends; stats come from memory.db, the
+    # commentary from the thin client in the active card's voice.
+    enabled: bool = True
+    database: str = "/var/lib/qqbot/daily.db"
+
+
 @dataclass
 class UsageSection:
     # Token ledger + per-message analytics used by the admin UI.
@@ -311,6 +326,7 @@ class AppConfig:
     cards: CardsSection = field(default_factory=CardsSection)
     stickers: StickersSection = field(default_factory=StickersSection)
     tasks: TasksSection = field(default_factory=TasksSection)
+    daily: DailySection = field(default_factory=DailySection)
     voice: VoiceSection = field(default_factory=VoiceSection)
     meme: MemeSection = field(default_factory=MemeSection)
     feeds: FeedsSection = field(default_factory=FeedsSection)
@@ -494,6 +510,29 @@ def load_config(path: str | Path) -> AppConfig:
         max_per_chat=max(0, int(tasks_raw.get("max_per_chat", 10))),
     )
 
+    daily_raw = _section(table, "daily")
+    daily = DailySection(
+        database=(
+            os.environ.get("DAILY_DB", "").strip()
+            or str(daily_raw.get("database", "/var/lib/qqbot/daily.db"))
+        ),
+        enabled=bool(daily_raw.get("enabled", True)),
+        hour=min(23, max(0, int(daily_raw.get("hour", 0)))),
+        minute=min(59, max(0, int(daily_raw.get("minute", 0)))),
+        private=bool(daily_raw.get("private", False)),
+        groups=tuple(
+            int(g) for g in daily_raw.get("groups", []) if str(g).isdigit()
+        ),
+        min_messages=max(0, int(daily_raw.get("min_messages", 5))),
+        max_late_hours=max(1.0, float(daily_raw.get("max_late_hours", 6.0))),
+        check_seconds=max(30, int(daily_raw.get("check_seconds", 60))),
+        sample_chars=max(200, int(daily_raw.get("sample_chars", 1600))),
+        max_chars=max(40, int(daily_raw.get("max_chars", 320))),
+        max_attempts=max(1, int(daily_raw.get("max_attempts", 3))),
+        min_repeat=max(2, int(daily_raw.get("min_repeat", 3))),
+        prompt=str(daily_raw.get("prompt") or ""),
+    )
+
     usage_raw = _section(table, "usage")
     usage = UsageSection(
         database=(
@@ -535,6 +574,7 @@ def load_config(path: str | Path) -> AppConfig:
         cards=cards,
         stickers=stickers,
         tasks=tasks,
+        daily=daily,
         voice=voice,
         meme=meme,
         feeds=feeds,
@@ -738,6 +778,7 @@ class Bot:
         feeds: FeedStore | None = None,
         usage: UsageStore | None = None,
         relations: RelationStore | None = None,
+        daily: DailyStore | None = None,
     ):
         self.config = config
         self.cards = cards
@@ -774,6 +815,17 @@ class Bot:
         self.conversations = conversations
         self.group_context = GroupContextBuffer(config.bot.group_context_messages)
         self.onebot = OneBotWSClient(config.onebot, self.handle, self.handle_notice)
+        self.daily_store = daily
+        self._daily: DailyReporter | None = None
+        if daily is not None:
+            self._daily = DailyReporter(
+                daily,
+                config.paths.database,
+                self._send_daily,
+                self._daily_commentary,
+                settings=config.daily,
+                ready=lambda: self.onebot.connected,
+            )
         self.commands = CommandRouter(self)
         self.proactive = ProactivePolicy(config.bot.proactive)
         self._closed = False
@@ -831,6 +883,8 @@ class Bot:
             await self._scheduler.stop()
         if self._feed_poller is not None:
             await self._feed_poller.stop()
+        if self._daily is not None:
+            await self._daily.stop()
         await self.onebot.close()
         if self.dsh is not None:
             self.dsh.close()
@@ -850,6 +904,8 @@ class Bot:
             self.tasks.close()
         if self.feeds is not None:
             self.feeds.close()
+        if self.daily_store is not None:
+            self.daily_store.close()
 
     async def handle(self, event: MessageEvent) -> None:
         if event.sender_name:
@@ -1098,6 +1154,64 @@ class Bot:
             self.proactive.note_speaking(chat_id, time.time())
         else:
             await self.onebot.send_private(chat_id, text)
+
+    def start_daily(self) -> None:
+        if self._daily is None or not self.config.daily.enabled:
+            return
+        self._daily.start()
+        groups = (
+            "all"
+            if not self.config.daily.groups
+            else ",".join(str(group) for group in self.config.daily.groups)
+        )
+        log.info(
+            "daily reporter started (%02d:%02d, groups=%s, private=%s)",
+            self.config.daily.hour,
+            self.config.daily.minute,
+            groups,
+            "on" if self.config.daily.private else "off",
+        )
+
+    async def _send_daily(self, chat_type: str, chat_id: int, text: str) -> None:
+        for chunk in split_text(text, self.config.bot.max_reply_chars):
+            await self._send_to_chat(chat_type, chat_id, chunk)
+            await asyncio.sleep(0.35)
+
+    async def _daily_commentary(self, stats: DayStats) -> str:
+        card = self._card
+        if card is None:
+            system = "你是一个幽默、俏皮的 QQ 聊天机器人，正在写每日聊天总结。"
+        else:
+            system = build_system_prompt(
+                card.data,
+                card.name,
+                "大家" if stats.chat_type == "group" else "对方",
+                datetime.now(TZ),
+                [],
+            )
+        return await write_commentary(
+            self.client,
+            system_prompt=system,
+            stats=stats,
+            hint=self.config.daily.prompt,
+            max_chars=self.config.daily.max_chars,
+        )
+
+    async def send_daily_report(
+        self, event: MessageEvent, day: date | None = None
+    ) -> bool:
+        """Manual /daily: send this chat's report for `day` (default yesterday)."""
+        reporter = self._daily
+        if reporter is None:
+            return False
+        if event.message_type == "group" and event.group_id is not None:
+            conversation_id = f"group:{event.group_id}"
+        elif event.message_type == "private":
+            conversation_id = f"private:{event.user_id}"
+        else:
+            return False
+        target_day = day or (datetime.now(TZ) - timedelta(days=1)).date()
+        return await reporter.send_now(conversation_id, target_day)
 
     async def _send_scheduled(self, task: Any) -> None:
         text = task.message
@@ -2661,9 +2775,18 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
         log.warning("cannot initialize usage ledger: %s", exc)
         usage = None
 
+    daily: DailyStore | None
+    try:
+        daily = DailyStore(config.daily.database) if config.daily.enabled else None
+        if daily is not None:
+            log.info("daily report store loaded: %d report(s)", daily.count())
+    except (OSError, sqlite3.Error) as exc:
+        log.error("cannot open the daily report store: %s", exc)
+        daily = None
+
     bot = Bot(
         config, cards, memory, client, dsh_client, conversations, stickers, tasks,
-        feeds, usage, relations,
+        feeds, usage, relations, daily,
     )
     if not bot.refresh_card(force=True):
         log.error("cannot load the active character card")
@@ -2694,6 +2817,7 @@ async def run_ws(config: AppConfig) -> int:
     runner = asyncio.create_task(bot.onebot.run())
     bot.start_scheduler()
     bot.start_feeds()
+    bot.start_daily()
     log.info("bot started (%s via WebSocket)", record.key)
     try:
         await stop.wait()

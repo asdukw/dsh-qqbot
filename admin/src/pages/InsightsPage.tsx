@@ -157,7 +157,7 @@ export default function InsightsPage({ refreshKey }: { refreshKey: number }) {
         <Badge variant="outline">{rangeLabel(data)}</Badge>
         {data && data.days > 1 ? <span>{data.days} 天</span> : null}
         <span>·</span>
-        <span>排行取前 10 名，词云取范围内最近 2000 条消息</span>
+        <span>排行取前 10 名，词云按范围内消息均匀抽样（最多 2000 条）</span>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

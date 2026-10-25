@@ -1255,8 +1255,10 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(fun.status, 200)
         payload = json.loads(fun.read().decode())
         self.assertEqual({row["name"] for row in payload["ranking"]}, {"小明", "小红"})
+        # "hello" appears twice in one message and once in another; counts are
+        # per-message document frequency, not raw token occurrences.
         self.assertTrue(
-            any(word["text"] == "hello" and word["count"] >= 3 for word in payload["words"])
+            any(word["text"] == "hello" and word["count"] == 2 for word in payload["words"])
         )
 
     def test_fun_date_range(self) -> None:
