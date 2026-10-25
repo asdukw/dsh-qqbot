@@ -1080,6 +1080,37 @@ class HttpTests(unittest.TestCase):
         self.assertFalse(has_image[5])
         self.assertFalse(has_image[6])
 
+    def test_sticker_delete_endpoint(self) -> None:
+        self.assertEqual(
+            self.post(
+                "/api/stickers/delete", {"id": 1, "block_similar": False}
+            ).status,
+            401,
+        )
+        cookie, _ = self.login()
+
+        missing = self.post(
+            "/api/stickers/delete", {"id": 999, "block_similar": False}, cookie
+        )
+        self.assertEqual(missing.status, 400)
+
+        response = self.post(
+            "/api/stickers/delete", {"id": 1, "block_similar": False}, cookie
+        )
+        self.assertEqual(response.status, 200)
+        result = json.loads(response.read().decode())
+        self.assertEqual(result["deleted"], 1)
+        self.assertFalse(result["blocked"])
+        self.assertFalse((self.sticker_dir / "a.png").exists())
+
+        again = self.post(
+            "/api/stickers/delete", {"id": 1, "block_similar": False}, cookie
+        )
+        self.assertEqual(again.status, 400)
+
+        stickers = json.loads(self.get("/api/stickers", cookie).read().decode())
+        self.assertNotIn(1, {row["id"] for row in stickers["stickers"]})
+
     def test_provider_model_list_endpoint(self) -> None:
         FakeProviderHandler.status = 200
         FakeProviderHandler.auth = ""

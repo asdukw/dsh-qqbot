@@ -82,6 +82,10 @@ class StickerError(RuntimeError):
     pass
 
 
+class StickerBlocked(StickerError):
+    """The image matches a perceptual hash the admin blocked."""
+
+
 def preview_jpeg(data: bytes, max_px: int = 512) -> bytes | None:
     """First frame as a small JPEG, for vision calls with request size limits."""
     try:
@@ -208,6 +212,11 @@ CREATE TABLE IF NOT EXISTS stickers (
 );
 CREATE INDEX IF NOT EXISTS idx_stickers_created ON stickers (created_at);
 CREATE INDEX IF NOT EXISTS idx_stickers_status ON stickers (status);
+CREATE TABLE IF NOT EXISTS sticker_blocks (
+    phash     TEXT PRIMARY KEY,
+    source_id INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -401,7 +410,7 @@ class StickerStore:
                 "DELETE FROM stickers WHERE id = ?", [(row["id"],) for row in rows]
             )
         for row in rows:
-            path = Path(row["path"]) if row["path"] else None
+            path = self._stored_path(row["path"])
             if path is not None and path.is_file():
                 try:
                     path.unlink()
@@ -424,6 +433,16 @@ class StickerStore:
         }
 
     # -------------------------------------------------------------- writes
+
+    def _is_blocked(self, phash: str) -> bool:
+        if not phash:
+            return False
+        with self._lock:
+            rows = self._db.execute("SELECT phash FROM sticker_blocks").fetchall()
+        return any(
+            hamming_distance(phash, str(row["phash"])) <= self.phash_distance
+            for row in rows
+        )
 
     def add_bytes(
         self,
@@ -452,6 +471,9 @@ class StickerStore:
             raise StickerError("unsupported image format (want png/jpeg/gif/webp)")
 
         phash = dhash_hex(data)
+        if phash and self._is_blocked(phash):
+            log.info("sticker rejected: matches a blocked perceptual hash")
+            raise StickerBlocked("该图片与已屏蔽的表情相似")
         self.backfill_phashes()
         if phash:
             with self._lock:
@@ -549,6 +571,18 @@ class StickerStore:
                 (int(time.time()), sticker_id),
             )
 
+    def _stored_path(self, raw: Any) -> Path | None:
+        """Resolve a DB path only when it stays inside the sticker directory."""
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            path = Path(text).resolve(strict=False)
+            path.relative_to(self.directory.resolve())
+        except (OSError, ValueError, RuntimeError):
+            return None
+        return path
+
     def delete(self, sticker_id: int) -> bool:
         with self._lock, self._db:
             row = self._db.execute(
@@ -557,13 +591,86 @@ class StickerStore:
             if row is None:
                 return False
             self._db.execute("DELETE FROM stickers WHERE id = ?", (sticker_id,))
-        path = Path(row["path"]) if row["path"] else None
+        path = self._stored_path(row["path"])
         if path is not None and path.is_file():
             try:
                 path.unlink()
             except OSError as exc:
                 log.warning("cannot remove sticker file %s: %s", path, exc)
         return True
+
+    def delete_blocking(
+        self, sticker_id: int, *, block_similar: bool = True
+    ) -> tuple[int, bool]:
+        """Delete one sticker and optionally block its perceptual hash.
+
+        With ``block_similar`` all stored images within ``phash_distance`` are
+        removed too, and future uploads matching the hash are rejected. This is
+        the "delete this disgusting image and never take a variant again" path
+        used by the admin UI.
+        """
+        with self._lock:
+            target = self._db.execute(
+                "SELECT id, path, phash FROM stickers WHERE id = ?", (sticker_id,)
+            ).fetchone()
+            if target is None:
+                return 0, False
+            phash = str(target["phash"] or "")
+            if not phash:
+                # Older rows may predate perceptual hashes; decode once so the
+                # block rule still works for them.
+                target_path = self._stored_path(target["path"])
+                if target_path is not None and target_path.is_file():
+                    try:
+                        phash = dhash_hex(target_path.read_bytes())
+                    except OSError:
+                        phash = ""
+            rows: list[sqlite3.Row] = [target]
+            if block_similar and phash:
+                candidates = self._db.execute(
+                    "SELECT id, path, phash FROM stickers"
+                ).fetchall()
+                similar = [
+                    row
+                    for row in candidates
+                    if row["phash"]
+                    and hamming_distance(phash, str(row["phash"]))
+                    <= self.phash_distance
+                ]
+                by_id = {int(row["id"]): row for row in similar}
+                by_id[int(target["id"])] = target
+                rows = list(by_id.values())
+
+        ids = [int(row["id"]) for row in rows]
+        paths: list[Path] = []
+        for row in rows:
+            path = self._stored_path(row["path"])
+            if path is not None:
+                paths.append(path)
+        with self._lock, self._db:
+            self._db.executemany(
+                "DELETE FROM stickers WHERE id = ?", [(sticker_id_,) for sticker_id_ in ids]
+            )
+            blocked = bool(block_similar and phash)
+            if blocked:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO sticker_blocks "
+                    "(phash, source_id, created_at) VALUES (?, ?, ?)",
+                    (phash, int(sticker_id), int(time.time())),
+                )
+        for path in paths:
+            if path.is_file():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    log.warning("cannot remove sticker file %s: %s", path, exc)
+        if len(ids) > 1:
+            log.info(
+                "deleted %d similar sticker(s) while blocking #%s",
+                len(ids),
+                sticker_id,
+            )
+        return len(ids), blocked
 
     def close(self) -> None:
         self._db.close()

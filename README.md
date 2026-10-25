@@ -141,14 +141,14 @@ sudo journalctl -u qqbot -f
 - **仪表盘**：今日消息 / Token、7 / 30 天趋势、订阅异常、最近消息、当前模型与角色卡；
 - **对话**：聊天分析（今日发言排行、词云、会话分布）；词云用前端 SVG 螺旋布局，字号 = 覆盖消息数，不依赖额外图表库；
 - **自动化**：审批、定时任务、订阅推送；
-- **内容**：模型（供应商 → 模型两级管理，可新增、编辑、启停、切换当前模型）、角色卡、表情库；
+- **内容**：模型（供应商 → 模型两级管理，可新增、编辑、启停、切换当前模型）、角色卡、表情库（可删除并屏蔽相似图片）；
 - **用量**：Token 用量，支持 7 / 30 / 90 天与按会话筛选；
 - **系统**：数据库路径与大小、DSH 路径、面板配置。
 
 Python 端只提供 JSON API 和静态文件：
 
 - 本地构建：`cd admin && npm install && npm run build`；产物在 `admin/dist/`（已随仓库提交，便于纯 Python 部署）。
-- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。读取接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/models`、`/api/cards`（点开单张卡时用 `/api/cards/<id>` 取完整 V3 payload）、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/requests`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。模型页的写入接口（需登录、JSON、同源）：`POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`；审批页的写入接口是 `POST /api/requests/action`（同样需要登录、JSON 和同源）。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
+- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。读取接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/models`、`/api/cards`（点开单张卡时用 `/api/cards/<id>` 取完整 V3 payload）、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/requests`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。模型页的写入接口（需登录、JSON、同源）：`POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`；审批页的写入接口是 `POST /api/requests/action`，表情库的删除接口是 `POST /api/stickers/delete`（同样需要登录、JSON 和同源）。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
 - 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
 - 模型页可写，其余页面只读；每 60 秒自动刷新，右上角「刷新」会立即重拉当前页。API Key 直接在供应商表单里填写，保存在 `models.db`（权限 600）且不会回显。
 
@@ -207,10 +207,12 @@ NapCat 实现的是 OneBot 11，好友请求和群请求都会以 `post_type=req
 | `/sticker search <关键词>` | 按描述/标签/来源搜索 |
 | `/sticker add`（附图） | 把管理员发的图片收藏进表情库 |
 | `/sticker import` | 导入 QQ 账号里的收藏表情 |
-| `/sticker delete <id>` / `ban` / `unban` | 删除或禁用/恢复 |
+| `/sticker delete <id> [block]` / `ban` / `unban` | 删除或禁用/恢复；带 `block` 删除时会屏蔽相似图片 |
 | `/sticker stats` | 数量与占用空间 |
 | `/sticker tag <id> <描述> [标签,标签]` | 手动补描述/标签，发送时按语境挑 |
 | `/sticker send <id>` | 手动发一张，验证发送链路 |
+
+删除表情时，如果选择「同时屏蔽相似图片」（命令里带 `block`），会把这张图的 64-bit dHash 写入 `sticker_blocks`，并删除库里所有 Hamming 距离 ≤ `[stickers] phash_distance` 的同类图片；以后群聊里再收到相似图片会直接拒绝入库。Admin UI 的表情详情页也有「删除表情」按钮，默认勾选该选项。
 | `/task add <一句话>` | 语义化创建定时任务（仅管理员），如 `每天早上8点提醒大家喝水` |
 | `/task` / `/task list` | 列出任务、下次执行时间和目标会话 |
 | `/task delete\|pause\|resume\|run <id>` | 删除 / 暂停 / 恢复 / 立即执行一次 |

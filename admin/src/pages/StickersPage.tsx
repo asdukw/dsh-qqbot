@@ -28,7 +28,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { StickersData } from "@/lib/analytics";
+import type { StickerRow, StickersData } from "@/lib/analytics";
+import { requestJson } from "@/lib/api";
 import { formatBytes, formatNumber, formatTs } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 import { cn } from "@/lib/utils";
@@ -49,7 +50,14 @@ export default function StickersPage({ refreshKey }: { refreshKey: number }) {
   const [sort, setSort] = useState<StickerSort>("default");
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState<number | null>(null);
-  const { data, loading, error } = useApi<StickersData>("/api/stickers", refreshKey);
+  const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(
+    null
+  );
+  const { data, loading, error, reload } = useApi<StickersData>(
+    "/api/stickers",
+    refreshKey
+  );
 
   const rows = useMemo(() => {
     const all = data?.stickers ?? [];
@@ -77,9 +85,53 @@ export default function StickersPage({ refreshKey }: { refreshKey: number }) {
   const available = all.filter((sticker) => sticker.status === "ok").length;
   const uses = all.reduce((sum, sticker) => sum + sticker.uses, 0);
 
+  async function deleteSticker(sticker: StickerRow, blockSimilar: boolean) {
+    const suffix = blockSimilar ? "，并删除/屏蔽所有相似图片" : "";
+    if (!window.confirm(`删除表情 #${sticker.id}${suffix}？此操作不可恢复。`)) {
+      return;
+    }
+    setDeleting(true);
+    setNotice(null);
+    try {
+      const result = await requestJson<{ deleted: number; blocked: boolean }>(
+        "/api/stickers/delete",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: sticker.id, block_similar: blockSimilar }),
+        }
+      );
+      setDetailId(null);
+      setNotice({
+        kind: "ok",
+        text: `已删除 ${result.deleted} 张${result.blocked ? "，并已屏蔽相似图片" : ""}。`,
+      });
+      reload();
+    } catch (err) {
+      setNotice({
+        kind: "error",
+        text: err instanceof Error ? err.message : "删除失败",
+      });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
       {error ? <ErrorBanner message={error} /> : null}
+      {notice ? (
+        <div
+          className={cn(
+            "rounded-xl border px-4 py-3 text-sm",
+            notice.kind === "ok"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : "border-red-200 bg-red-50 text-red-700"
+          )}
+        >
+          {notice.text}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard icon={Sticker} label="表情总数" value={formatNumber(data?.totals.total)} hint="按 sha1 去重" />
@@ -334,8 +386,11 @@ export default function StickersPage({ refreshKey }: { refreshKey: number }) {
       </SectionCard>
 
       <StickerDetailModal
+        key={detail?.id ?? "none"}
         sticker={detail}
         refreshKey={refreshKey}
+        deleting={deleting}
+        onDelete={(sticker, blockSimilar) => void deleteSticker(sticker, blockSimilar)}
         onClose={() => setDetailId(null)}
       />
     </div>

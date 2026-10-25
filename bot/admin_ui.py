@@ -11,7 +11,9 @@ providers and models through authenticated ``POST /api/models/*`` endpoints,
 which write through ``ModelRegistry`` (the same code the bot uses). The
 approval page also writes: ``POST /api/requests/action`` queues an approve or
 reject decision in ``approvals.db``, and the bot worker executes it through
-NapCat. The overview aggregates counts, a day-by-day trend and alerts;
+NapCat. The sticker page can delete one sticker and block its perceptual hash
+for future uploads via ``POST /api/stickers/delete``. The overview aggregates
+counts, a day-by-day trend and alerts;
 ``/api/models``, ``/api/cards``, ``/api/tasks``, ``/api/feeds``,
 ``/api/stickers``, ``/api/requests`` and ``/api/system`` each expose one
 page's data;
@@ -60,6 +62,7 @@ from models import (
     ProviderRecord,
 )
 from sessions import SessionStore
+from stickers import StickerStore
 from usage import conversation_label
 
 log = logging.getLogger("qqbot.admin")
@@ -233,6 +236,46 @@ def _make_thumb(data: bytes) -> bytes | None:
     except Exception as exc:  # noqa: BLE001 - untrusted decoders raise anything
         log.debug("cannot thumbnail sticker: %s", exc)
         return None
+
+
+def sticker_store(config: dict[str, Any]) -> StickerStore:
+    section = config.get("stickers") or {}
+    return StickerStore(
+        str(section.get("database", "/var/lib/qqbot/stickers.db")),
+        sticker_directory(config),
+        phash_distance=max(0, min(64, int(section.get("phash_distance", 4)))),
+    )
+
+
+def delete_sticker(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Delete one sticker and optionally block its perceptual hash."""
+    try:
+        sticker_id = int(payload.get("id") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("id 必须是数字") from exc
+    if sticker_id <= 0:
+        raise ValueError("缺少表情 id")
+    raw_block = payload.get("block_similar", True)
+    if isinstance(raw_block, str):
+        block_similar = raw_block.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        block_similar = bool(raw_block)
+    store = sticker_store(config)
+    try:
+        deleted, blocked = store.delete_blocking(
+            sticker_id, block_similar=block_similar
+        )
+        remaining = store.count()
+    finally:
+        store.close()
+    if deleted == 0:
+        raise ValueError("表情不存在或已被删除")
+    return {
+        "id": sticker_id,
+        "deleted": deleted,
+        "blocked": blocked,
+        "remaining": remaining,
+    }
 
 
 def sticker_image(
@@ -1711,6 +1754,24 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"error": f"写入失败: {exc}"},
+                )
+                return
+            self._send_json(HTTPStatus.OK, result)
+            return
+
+        if path == "/api/stickers/delete":
+            if not self._api_guard() or not self._mutation_guard():
+                return
+            try:
+                result = delete_sticker(self.config, self._read_payload())
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except (OSError, sqlite3.Error) as exc:
+                log.exception("sticker delete failed")
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": f"删除失败: {exc}"},
                 )
                 return
             self._send_json(HTTPStatus.OK, result)
