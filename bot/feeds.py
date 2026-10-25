@@ -183,7 +183,7 @@ def feed_title(data: bytes) -> str:
     return ""
 
 
-def _error_detail(response: httpx.Response) -> str:
+def _error_detail(response: httpx.Response, url: str) -> str:
     """Pull RSSHub's "Error Message" out of its HTML error page, else a prefix."""
     body = re.sub(
         r"<(script|style)\b[^>]*>.*?</\1\s*>", " ", response.text or "",
@@ -195,7 +195,7 @@ def _error_detail(response: httpx.Response) -> str:
         body, re.IGNORECASE,
     )
     detail = match.group(1).strip() if match else ""
-    return (detail or body)[:300]
+    return feed_log_text(detail or body, url)[:300]
 
 
 async def fetch_feed(
@@ -233,7 +233,7 @@ async def fetch_feed(
             last_error = FeedError(
                 f"feed HTTP {response.status_code}",
                 status=response.status_code,
-                detail=_error_detail(response),
+                detail=_error_detail(response, url),
             )
             if response.status_code not in RETRY_STATUSES:
                 raise last_error
