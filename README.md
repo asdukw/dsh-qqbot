@@ -14,6 +14,7 @@
 - **订阅转发**：`/sub add <B站UID|空间链接|RSS>` 把 UP 动态或任意 RSS 转到当前群/私聊；B 站直连被机房 IP 风控，默认走可配置的 RSSHub 镜像；
 - **戳一戳**：被戳会像被叫到一样回应（8 秒冷却）；群里别人被戳会作为一条上下文 `[戳了戳 某人]` 记下来；
 - **定时任务**：管理员直接说"每天早上8点提醒我起床"即可创建，说"把喝水那个删了/暂停"也能管理（模型输出 `[定时: ...]` / `[定时列表|删除|暂停|恢复]`，adapter 解析 + Pydantic 校验）；任务绑定创建时的群/私聊，可显式选 here/private/group；支持 fixed/generate 两种文案（generate 到点按人设现写）；`/task list|delete|pause|resume|run`；
+- **每日日报**：每天 24:00 给当天活跃的群发一份趣味总结——水王榜、首条/末条、热词、复读现场、今日金句、今日宜忌，再加一段按角色卡口吻写的锐评；私聊可在 `[daily]` 里开关；`/daily [YYYY-MM-DD]` 可手动预览/补发；
 - **联网搜索**：DSH 官方的 `web_search` / `web_fetch` 工具；搜索 provider 用免密钥后端（与 OpenCode 自带 websearch 同类），不需要额外 API key；
 - **角色卡**：SillyTavern Character Card V1 / V2 / V3，支持 `.json` 和 `.png`（读取 `ccv3` → `chara` → `iTXt`）；SQLite 角色库，`/card search/install/use` 热切换
 - **DSH session**：每个 QQ 会话一份持久化 JSONL 历史，自动上下文压缩；`session-history` 插件让模型按需读取旧 generation
@@ -127,6 +128,7 @@ sudo journalctl -u qqbot -f
 - `/model <序号|model_id|provider/model>`：切换激活模型，立即热切换，无需重启；
 - `/card` 系列：角色卡库的搜索、安装、切换、删除（见[角色卡](#角色卡)）；
 - `/reset`（或 `/new`）：归档当前 DSH 会话，下一条消息开始新会话；
+- `/daily [YYYY-MM-DD]`：立即生成当前会话的每日日报（默认昨天，用于预览或补发）；
 - `/help`：显示帮助。
 
 命令不会写入对话历史，也不会送进模型。
@@ -136,7 +138,7 @@ sudo journalctl -u qqbot -f
 面板是 `admin/` 下的 Vite + React + Tailwind 应用，组件按 shadcn/ui 的方式直接放在 `src/components/ui/`，主题为蓝白。页面按内容分组，左侧导航 + hash 路由，每个功能独立成页：
 
 - **仪表盘**：今日消息 / Token、7 / 30 天趋势、订阅异常、最近消息、当前模型与角色卡；
-- **对话**：聊天分析（今日发言排行、词云、会话分布）；
+- **对话**：聊天分析（今日发言排行、词云、会话分布）；词云用前端 SVG 螺旋布局，字号 = 覆盖消息数，不依赖额外图表库；
 - **自动化**：定时任务、订阅推送；
 - **内容**：模型（供应商 → 模型两级管理，可新增、编辑、启停、切换当前模型）、角色卡、表情库；
 - **用量**：Token 用量，支持 7 / 30 / 90 天与按会话筛选；
@@ -153,8 +155,19 @@ Python 端只提供 JSON API 和静态文件：
 
 - `usage.db` 记录每次模型调用的非缓存输入、缓存输入和输出：DSH 的每个 assistant step、compaction summary，以及图片描述、表情打标、任务解析/文案等 thin client 调用。
 - Admin UI 的「Token 用量」支持 7/30/90 天和按群聊/好友筛选，展示缓存命中率、按用途、按 session 的排行。
-- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息；Admin UI 的「今日发言排行」「今日词云」按当天数据生成（词云优先用 jieba，未安装时回退到正则分词）。
+- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息；Admin UI 的「今日发言排行」「今日词云」按当天数据生成。词云按业界常用做法处理：jieba 词性标注后只保留名词/动词/形容词/成语/英文，丢弃代词、连词、介词、数词、量词、语气词等；再排除成员昵称、停用词和纯语气词。`count` 是「提到该词的消息数」而不是原始词频，同一条消息里重复只算一次；长区间用 `ROW_NUMBER()` 均匀抽样（最多 2000 条），并默认过滤只出现一次的词。未安装 jieba 时回退到正则分词 + 停用词。
 - 配置在 `[usage]`：`database`、`retention_days`、`event_retention_days`。
+
+## 每日日报
+
+每天 00:00（`[daily] hour/minute`，Asia/Shanghai）给「前一天有消息的会话」发一份日报；默认只发群，`private = true` 时私聊也发。
+
+- **统计是确定性的**：消息数、参与人数、活跃度星级、发言排行（水王/亚军/季军）、首条与末条、热词（按覆盖消息数，jieba/正则）、复读现场（同一句话由至少两个人连续刷 ≥ `min_repeat` 次）、随机金句、bot 自己的回复数、按日期和会话固定种子的「今日宜/忌」。
+- **锐评可选**：一次 thin client 调用，把统计和聊天节选交给当前模型，按角色卡口吻写 2-4 句；失败或超时就只发统计块，不影响日报本身。调用记录在 `usage.db`（purpose `daily_summary`）。
+- **不污染会话**：日报走 OneBot 直接发送，不写入 DSH session / `messages` 历史，也不进入模型上下文。
+- **去重与补发**：`daily.db` 记录每个 `(会话, 日期)` 的状态（`sent` / `skipped` / `failed`）；重启后在 `max_late_hours`（默认 6 小时）内会自动补发，已发送的不会重复。少于 `min_messages` 的会话标记为 skipped，不打扰冷清群。
+- **配置**：`database`、`enabled`、`hour`、`minute`、`groups`（空 = 所有群）、`private`、`min_messages`、`max_late_hours`、`check_seconds`、`sample_chars`、`max_chars`、`max_attempts`、`min_repeat`、`prompt`（追加的风格提示）。
+- **手动**：管理员在任意群/私聊发 `/daily` 生成昨天的日报，或 `/daily 2026-10-24` 指定日期。手动生成会忽略 `min_messages`。
 
 ## 角色卡
 

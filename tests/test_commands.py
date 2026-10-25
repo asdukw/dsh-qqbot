@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -247,6 +248,26 @@ class CommandRouterTests(unittest.TestCase):
     def test_unknown_command(self) -> None:
         self.run_command("/wat")
         self.assertIn("未知命令", self.bot.sent[0])
+
+    def test_daily_passes_the_requested_date(self) -> None:
+        calls = []
+
+        async def send_daily_report(event, day):
+            calls.append(day)
+            return True
+
+        self.bot.send_daily_report = send_daily_report
+        self.run_command("/daily 2026-10-24")
+        self.assertEqual(calls, [date(2026, 10, 24)])
+        self.assertEqual(self.bot.sent, [])
+
+    def test_daily_without_data_says_so(self) -> None:
+        async def send_daily_report(event, day):
+            return False
+
+        self.bot.send_daily_report = send_daily_report
+        self.run_command("/daily")
+        self.assertIn("没有可汇总", self.bot.sent[0])
 
     # ---------------------------------------------------------------- cards
 

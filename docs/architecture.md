@@ -215,6 +215,14 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 - 文案：`mode=fixed` 原样发送 `message`；`mode=generate` 到点用当前角色卡的系统提示词让模型现写一句，失败回落到 `message`。
 - 限制：`max_tasks` 总数、`max_per_chat` 每会话上限；`interval` 最小 5 分钟；消息最长 300 字；一次性任务迟到超过 12 小时直接丢弃而不是补发。
 
+## 每日日报（`bot/daily.py`）
+
+- 定时器每 `[daily] check_seconds`（默认 60s）调用 `report_day()`：以 `hour:minute`（默认 00:00）为边界，返回“上一个完整自然日”；超过 `max_late_hours` 不再补发。因此 00:00 的含义是“在一天结束时总结昨天”。
+- 会话与消息来自 `memory.db.chat_events`（只读连接），bot 自己的回复数来自同库的 `messages`；不在线时的日报不会丢：`daily.db` 的 `daily_reports` 按 `(conversation_id, day)` 记录 `sent` / `skipped` / `failed` 和尝试次数，重启后在迟到窗口内继续。
+- 先算确定性统计：消息数/人数、排行、首末条、热词（复用 `admin_insights.top_words`）、复读连刷、按会话+日期固定种子的金句与宜忌。少于 `min_messages` 的会话记为 `skipped`。
+- 锐评只调用一次 thin client（`purpose=daily_summary`，计入 `usage.db`），system prompt 用当前角色卡；聊天节选明确标注“只作素材”。生成失败、为空或超时都回落到固定文案，统计块照常发送。
+- 发送走 `Bot._send_daily` → `_send_to_chat`，按 `max_reply_chars` 拆条；不写 DSH session，也不写 `messages` 历史。管理员的 `/daily [YYYY-MM-DD]` 直接调用 `DailyReporter.send_now()`，忽略 `min_messages`，用于预览或补发。
+
 ## 赛程输出（`bot/schedule.py`）
 
 - 系统提示词要求模型把赛程问题写成 ```schedule 代码块，内容为 `{event, matches[{stage, start_time, team_a, team_b, best_of, note}]}`。
@@ -241,7 +249,7 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 
 - `usage.db` 的 `usage_events` 统一记录非缓存输入、缓存输入和输出。DSH 侧由 `DSHClient.run_with_events()` 返回本轮 events，`UsageStore.record_dsh()` 解析 `assistant/message` 和 `compaction/summary` 的 usage；thin client 侧由 `LLMClient.usage_sink` 上报图片描述、表情打标、任务解析/文案等调用。
 - 启动时 `UsageStore.backfill_dsh()` 从现有 DSH JSONL 回填历史 usage，按 session/seq 幂等去重；旧数据也能进入面板。
-- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息（发送者、文本、时间），供「今日发言排行」和「今日词云」使用；词云优先用 jieba，缺失时回退正则。
+- `memory.db` 的 `chat_events` 记录每条群聊/私聊入站消息（发送者、文本、时间），供「今日发言排行」和「今日词云」使用。词云按常用关键词抽取流程：`jieba.posseg` 词性过滤（只保留 n/v/a/i/j/l/eng），丢弃 r/c/p/d/m/q/u/y/e/o/w 等；再排除成员昵称、停用词、语气词和两字母英文噪声。`count` 是消息覆盖数（同一条消息里重复的词只算一次），长区间用 `ROW_NUMBER()` 均匀抽样最多 2000 条，样本 ≥20 时默认过滤只出现一次的词。未安装 jieba 时回退到正则分词 + 停用词。
 - Admin UI 的 `/api/usage` 支持 `days` 和 `conversation`（群/好友）筛选；`/api/fun` 支持 `conversation` 与 `start` / `end`（`YYYY-MM-DD`，北京时间，含首尾，缺省为今天），返回该范围的排行、词云和会话列表；聊天分析页提供「今天 / 近一周 / 近一月」快捷按钮和起止日日历。
 
 ## Admin UI 结构

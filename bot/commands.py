@@ -66,6 +66,7 @@ HELP = """可用命令:
 /reset          归档当前 DSH 会话，下一条消息开始新会话
 /sticker        表情库管理与导入
 /task           定时任务（仅管理员）
+/daily [YYYY-MM-DD]     生成当前会话的每日日报（默认昨天，仅管理员）
 /sub            RSS / B 站订阅（仅管理员）
 /relation       查看 bot 对你的印象（所有人可用）
 /help           显示帮助"""
@@ -148,6 +149,8 @@ class CommandRouter:
             await self._task(event, parts[1:])
         elif name in ("/sub", "/subs", "/subscribe"):
             await self._sub(event, parts[1:])
+        elif name in ("/daily", "/日报", "/summary"):
+            await self._daily(event, parts[1:])
         else:
             await self.bot.send_text(event, f"未知命令: {name}\n{HELP}")
 
@@ -545,6 +548,31 @@ class CommandRouter:
                 f"{status['day_count']}/{status['max_per_day']} 今天"
             )
         await self.bot.send_text(event, "\n".join(lines))
+
+    # --------------------------------------------------------------- daily
+
+    async def _daily(self, event: Any, args: list[str]) -> None:
+        day = None
+        if args:
+            try:
+                day = datetime.strptime(args[0], "%Y-%m-%d").date()
+            except ValueError:
+                await self.bot.send_text(event, "用法: /daily [YYYY-MM-DD]")
+                return
+        sender = getattr(self.bot, "send_daily_report", None)
+        if sender is None:
+            await self.bot.send_text(event, "每日日报没有启用。")
+            return
+        try:
+            sent = await sender(event, day)
+        except Exception as exc:  # noqa: BLE001 - tell the admin what broke
+            log.warning("daily report command failed: %s", exc)
+            await self.bot.send_text(event, f"日报生成失败：{exc}")
+            return
+        if not sent:
+            await self.bot.send_text(
+                event, "那天没有可汇总的聊天记录，或者日报功能没有启用。"
+            )
 
     # --------------------------------------------------------------- tasks
 
