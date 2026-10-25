@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import httpx
 
@@ -34,13 +34,23 @@ USER_AGENT = (
 MAX_SEEN = 50
 MAX_SUMMARY = 240
 
+# Public RSSHub mirrors answer 503 while their upstream is throttled or a
+# browser helper is down; retry these statuses, but fail fast on other 4xx.
+RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+RETRY_DELAYS = (1.0, 3.0)
+
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _TAG_RE = re.compile(r"<[^>]+>")
 _SPACE_RE = re.compile(r"\s+")
 
 
 class FeedError(RuntimeError):
-    pass
+    """A feed fetch/parse failure, with the HTTP status when there was one."""
+
+    def __init__(self, message: str, *, status: int | None = None, detail: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,36 @@ def strip_html(text: str, limit: int = MAX_SUMMARY) -> str:
     text = html.unescape(text)
     text = _SPACE_RE.sub(" ", text).strip()
     return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def feed_log_url(url: str) -> str:
+    """Keep the route useful for diagnosis without URL credentials or tokens."""
+    try:
+        parts = urlsplit(url)
+        return parts._replace(
+            netloc=parts.netloc.rsplit("@", 1)[-1],
+            query="[redacted]" if parts.query else "",
+            fragment="",
+        ).geturl()
+    except ValueError:
+        return "[invalid feed URL]"
+
+
+def feed_log_text(text: str, url: str) -> str:
+    """Redact URLs and source credentials echoed in upstream error messages."""
+    text = html.unescape(text)
+    text = text.replace(url, feed_log_url(url))
+    try:
+        parts = urlsplit(url)
+        secrets = {parts.username or "", parts.password or "", parts.fragment}
+        secrets.update(value for _, value in parse_qsl(parts.query))
+        secrets.update(part.partition("=")[2] for part in parts.query.split("&"))
+        secrets.update(unquote(value) for value in secrets.copy())
+    except ValueError:
+        return "[invalid feed URL]"
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
+    return re.sub(r"https?://[^\s<>]+", lambda match: feed_log_url(match.group()), text)
 
 
 def bilibili_feed_url(target: str, base_url: str = DEFAULT_RSSHUB_BASE) -> str:
@@ -143,24 +183,72 @@ def feed_title(data: bytes) -> str:
     return ""
 
 
+def _error_detail(response: httpx.Response) -> str:
+    """Pull RSSHub's "Error Message" out of its HTML error page, else a prefix."""
+    body = re.sub(
+        r"<(script|style)\b[^>]*>.*?</\1\s*>", " ", response.text or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    body = _SPACE_RE.sub(" ", html.unescape(_TAG_RE.sub(" ", body))).strip()
+    match = re.search(
+        r"Error Message\s*:\s*(.*?)(?=\s+(?:Full Route|Route|Node Version|Git Hash|Report)\s*:|$)",
+        body, re.IGNORECASE,
+    )
+    detail = match.group(1).strip() if match else ""
+    return (detail or body)[:300]
+
+
 async def fetch_feed(
-    url: str, timeout: float = 25.0, user_agent: str = USER_AGENT
+    url: str,
+    timeout: float = 25.0,
+    user_agent: str = USER_AGENT,
+    retries: int = 0,
 ) -> bytes:
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0),
-            follow_redirects=True,
-            headers={"User-Agent": user_agent, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"},
-        ) as client:
-            response = await client.get(url)
-    except httpx.HTTPError as exc:
-        raise FeedError(f"feed 请求失败: {exc}") from exc
-    if response.status_code != 200:
-        raise FeedError(f"feed HTTP {response.status_code}")
-    content_type = (response.headers.get("content-type") or "").lower()
-    if "html" in content_type:
-        raise FeedError("feed 返回了 HTML（镜像可能不可用或触发了风控）")
-    return response.content
+    """Fetch a feed, retrying transient RSSHub/mirror failures.
+
+    A public mirror answers 503 when its upstream is rate-limited (Bilibili
+    -412) or its browser helper is down. A bounded retry can recover from a
+    transient failure; 404/403 fail on the first attempt.
+    """
+    attempts = max(1, int(retries) + 1)
+    last_error: FeedError | None = None
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout, connect=min(10.0, timeout)),
+                follow_redirects=True,
+                headers={"User-Agent": user_agent, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"},
+            ) as client:
+                response = await client.get(url)
+        except httpx.HTTPError as exc:
+            last_error = FeedError(
+                f"feed 请求失败: {type(exc).__name__} {exc}".strip()
+            )
+        else:
+            if response.status_code == 200:
+                content_type = (response.headers.get("content-type") or "").lower()
+                if "html" in content_type:
+                    raise FeedError("feed 返回了 HTML（镜像可能不可用或触发了风控）")
+                return response.content
+            last_error = FeedError(
+                f"feed HTTP {response.status_code}",
+                status=response.status_code,
+                detail=_error_detail(response),
+            )
+            if response.status_code not in RETRY_STATUSES:
+                raise last_error
+        if attempt + 1 < attempts:
+            delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+            log.warning(
+                "feed %s attempt %d failed (%s); retrying in %.0fs",
+                feed_log_url(url),
+                attempt + 1,
+                feed_log_text(str(last_error), url),
+                delay,
+            )
+            await asyncio.sleep(delay)
+    assert last_error is not None
+    raise last_error
 
 
 def format_entry(title: str, entry: FeedEntry) -> str:
@@ -374,7 +462,7 @@ class FeedPoller:
                 data = await self._fetcher(url)
                 entries = parse_feed(data)
             except FeedError as exc:
-                log.warning("feed %s failed: %s", url, exc)
+                log.warning("feed %s failed: %s", feed_log_url(url), feed_log_text(str(exc), url))
                 for record in records:
                     self.store.mark_check(record.id, str(exc))
                 continue

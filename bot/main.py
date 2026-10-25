@@ -37,9 +37,12 @@ from daily import (
 )
 from dsh_client import DSHClient, DSHConfig, DSHError
 from feeds import (
+    FeedError,
     FeedPoller,
     FeedStore,
     bilibili_feed_url,
+    feed_log_text,
+    feed_log_url,
     feed_title,
     fetch_feed,
     format_entry,
@@ -1328,6 +1331,8 @@ class Bot:
             self._send_feed,
             check_seconds=self.config.feeds.check_seconds,
             max_new=self.config.feeds.max_new,
+            # A mirror hiccup should not mark the subscription as broken.
+            fetcher=lambda url: fetch_feed(url, retries=1),
         )
         self._feed_poller.start()
         log.info("feed poller started (%d subscription(s))", self.feeds.count())
@@ -1354,8 +1359,20 @@ class Bot:
             url = target
         else:
             raise ValueError("请给 B 站 UID、空间链接或 RSS 地址")
-        data = await fetch_feed(url)
-        entries = parse_feed(data)
+        try:
+            # Public mirrors return 503 while their upstream is throttled;
+            # allow two short retries before failing the subscription.
+            data = await fetch_feed(url, timeout=20.0, retries=2)
+            entries = parse_feed(data)
+        except FeedError as exc:
+            log.warning(
+                "subscription failed: url=%s status=%s error=%s detail=%r",
+                feed_log_url(url),
+                exc.status,
+                feed_log_text(str(exc), url),
+                feed_log_text(exc.detail, url)[:200],
+            )
+            raise
         title = feed_title(data) or url
         chat_type, chat_id = resolve_target(
             "here", event.message_type, event.user_id, event.group_id
@@ -1367,6 +1384,13 @@ class Bot:
             title=title,
             source=source,
             seen=tuple(entry.id for entry in entries),
+        )
+        log.info(
+            "subscription %s: #%s url=%s entries=%d",
+            "added" if created else "exists",
+            record.id,
+            feed_log_url(record.feed_url),
+            len(entries),
         )
         return record, created
 
