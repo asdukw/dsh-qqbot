@@ -199,7 +199,7 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 ## 订阅转发（`bot/feeds.py`）
 
 - `feeds.db` 存 `(chat_type, chat_id, feed_url)` 唯一订阅；`/sub add` 支持 B 站 UID/空间链接（拼成 RSSHub 动态路由）或任意 RSS/Atom 地址，首次添加时把当前条目记入 `seen` 作为基线，避免补发历史。
-- `FeedPoller` 每 `[feeds] check_seconds`（默认 300s）按 URL 去重抓取一次，RSS/Atom 由标准库解析；新条目按时间顺序转发，单次最多 `max_new` 条；失败写入 `last_error` 并在 `/sub list` 里显示。
+- `FeedPoller` 每 `[feeds] check_seconds`（默认 300s）按 URL 去重抓取一次，RSS/Atom 由标准库解析；新条目按时间顺序转发，单次最多 `max_new` 条；失败写入 `last_error` 并在 `/sub list` 里显示。抓取对 `408/425/429/500/502/503/504` 和网络异常做有界退避重试（轮询额外 1 次、`/sub add` 额外 2 次，间隔 1 秒、3 秒），`FeedError` 带上 HTTP 状态码和 RSSHub 错误页的诊断摘要供日志排查；添加、重复添加和抓取/解析失败均有日志，URL 凭据与查询参数在写日志前脱敏。
 - B 站对阿里云机房 IP 直接返回 `-412 request was banned`，因此默认 `rsshub_base = https://rsshub.liumingye.cn`（可换镜像）。
 
 ## 语音、梗图与记忆检索

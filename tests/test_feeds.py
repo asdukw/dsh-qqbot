@@ -5,6 +5,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
@@ -16,6 +19,7 @@ from feeds import (  # noqa: E402
     FeedStore,
     bilibili_feed_url,
     feed_title,
+    fetch_feed,
     format_entry,
     parse_feed,
     strip_html,
@@ -90,6 +94,135 @@ class ParseTests(unittest.TestCase):
         self.assertIn("new post", text)
         self.assertIn("hello world", text)
         self.assertIn("https://t.bilibili.com/2", text)
+
+
+class FakeResponse:
+    def __init__(
+        self, status: int, body: bytes = b"<rss/>", content_type: str = "application/xml"
+    ) -> None:
+        self.status_code = status
+        self.content = body
+        self.text = body.decode("utf-8", "replace")
+        self.headers = {"content-type": content_type}
+
+
+class FakeClient:
+    responses: list[FakeResponse | BaseException] = []
+    calls = 0
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def get(self, url):
+        type(self).calls += 1
+        result = type(self).responses.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+class FetchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        FakeClient.responses = []
+        FakeClient.calls = 0
+
+    def test_retries_transient_503(self) -> None:
+        FakeClient.responses = [
+            FakeResponse(503, b"<html>busy</html>", "text/html"),
+            FakeResponse(200, b"<rss>ok</rss>"),
+        ]
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock()
+        ):
+            body = asyncio.run(fetch_feed("https://example.com/feed", retries=1))
+        self.assertEqual(body, b"<rss>ok</rss>")
+        self.assertEqual(FakeClient.calls, 2)
+
+    def test_fails_fast_on_404(self) -> None:
+        FakeClient.responses = [FakeResponse(404, b"not found", "text/plain")]
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock()
+        ):
+            with self.assertRaises(FeedError) as raised:
+                asyncio.run(fetch_feed("https://example.com/feed", retries=3))
+        self.assertEqual(raised.exception.status, 404)
+        self.assertEqual(FakeClient.calls, 1)
+
+    def test_retry_exhaustion_keeps_status(self) -> None:
+        FakeClient.responses = [FakeResponse(503, b"busy", "text/plain")] * 2
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock()
+        ):
+            with self.assertRaises(FeedError) as raised:
+                asyncio.run(fetch_feed("https://example.com/feed", retries=1))
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(FakeClient.calls, 2)
+
+
+    def test_retries_timeout_then_succeeds(self) -> None:
+        FakeClient.responses = [httpx.ReadTimeout(""), FakeResponse(200, RSS_V1)]
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            body = asyncio.run(fetch_feed("https://example.com/feed", retries=1))
+        self.assertEqual(body, RSS_V1)
+        sleep.assert_awaited_once_with(1.0)
+
+    def test_timeout_error_names_the_exception(self) -> None:
+        FakeClient.responses = [httpx.ReadTimeout("")]
+        with patch("feeds.httpx.AsyncClient", FakeClient):
+            with self.assertRaises(FeedError) as raised:
+                asyncio.run(fetch_feed("https://example.com/feed"))
+        self.assertIn("ReadTimeout", str(raised.exception))
+        self.assertIsNone(raised.exception.status)
+
+    def test_two_retries_use_bounded_backoff(self) -> None:
+        FakeClient.responses = [
+            FakeResponse(503), FakeResponse(429), FakeResponse(200, RSS_V1)
+        ]
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            self.assertEqual(
+                asyncio.run(fetch_feed("https://example.com/feed", retries=2)), RSS_V1
+            )
+        self.assertEqual([c.args for c in sleep.await_args_list], [(1.0,), (3.0,)])
+        self.assertEqual(FakeClient.calls, 3)
+
+    def test_cancellation_is_not_retried(self) -> None:
+        FakeClient.responses = [asyncio.CancelledError()]
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(fetch_feed("https://example.com/feed", retries=2))
+        sleep.assert_not_awaited()
+        self.assertEqual(FakeClient.calls, 1)
+
+    def test_cancellation_during_backoff_is_not_swallowed(self) -> None:
+        FakeClient.responses = [FakeResponse(503)]
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(fetch_feed("https://example.com/feed", retries=2))
+        self.assertEqual(FakeClient.calls, 1)
+
+    def test_html_success_page_is_rejected_without_retry(self) -> None:
+        FakeClient.responses = [FakeResponse(200, b"<html>login</html>", "text/html")]
+        with patch("feeds.httpx.AsyncClient", FakeClient), patch(
+            "feeds.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            with self.assertRaises(FeedError):
+                asyncio.run(fetch_feed("https://example.com/feed", retries=2))
+        sleep.assert_not_awaited()
+        self.assertEqual(FakeClient.calls, 1)
 
 
 class StoreTests(unittest.TestCase):
