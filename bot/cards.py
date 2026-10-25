@@ -509,12 +509,10 @@ def _record(row: sqlite3.Row) -> CardRecord:
 
 
 class CardRegistry:
-    """SQLite character-card library with a single hot-swappable active card.
+    """Normalised V3 card library with a fallback default.
 
-    Cards are stored as normalised V3 payloads, so parsing a PNG/JSON file only
-    happens on install. ``active_signature()`` is cheap and lets the bot notice
-    ``/card use`` (in-process) or ``--use-card`` (another process) without a
-    restart.
+    Conversation bindings and durable switch requests live in personas.py;
+    changing a conversation never changes this library's default selection.
     """
 
     def __init__(self, path: str | Path):
@@ -776,8 +774,21 @@ class CardRegistry:
             raise ValueError(f"character card #{card_id} has no alias {wanted!r}")
         return self.set_aliases(card_id, remaining)
 
+    def _referenced(self, card_id: int) -> bool:
+        for table in ("persona_bindings", "persona_switches"):
+            exists = self._db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if exists and self._db.execute(
+                f"SELECT 1 FROM {table} WHERE card_id = ? LIMIT 1", (card_id,)
+            ).fetchone():
+                return True
+        return False
+
     def delete(self, card_id: int) -> bool:
         with self._lock, self._db:
+            if self._referenced(card_id):
+                raise ValueError("cannot delete a card referenced by a conversation or switch")
             # Conditional delete so a concurrent --use-card cannot make us remove
             # the row after we checked it; at most one row is ever active.
             cursor = self._db.execute(
@@ -831,6 +842,12 @@ class CardRegistry:
         data = card.payload["data"]
         digest = fingerprint(card.payload)
         with self._lock, self._db:
+            duplicate = self._db.execute(
+                "SELECT id FROM cards WHERE fingerprint = ? AND id != ?", (digest, active.id)
+            ).fetchone()
+            if self._referenced(active.id) or (duplicate and self._referenced(int(duplicate[0]))):
+                # Referenced versions are immutable; an explicit install creates a new version.
+                return False
             # If the edited file now equals another card, that copy is redundant.
             self._db.execute(
                 "DELETE FROM cards WHERE fingerprint = ? AND id != ?", (digest, active.id)

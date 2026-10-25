@@ -21,7 +21,7 @@ SillyTavern PNG/JSON 卡，这张卡是根据公开的 MIT 人设文本整理的
 ```bash
 M="sudo -u qqbot /opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/main.py"
 $M --install-card /opt/qqbot/cards/dafeiyu.json
-$M --use-card 大肥鱼
+$M --use-card 大肥鱼 --conversation group:123456
 ```
 
 或者在 QQ 里：
@@ -33,3 +33,5 @@ $M --use-card 大肥鱼
 
 注意：`deploy/install-bot.sh` 会把 `cards/` 复制到 `/opt/qqbot/cards/`，但不会自动
 安装；需要显式执行上面的命令。
+
+`/card use` 仅切换命令所在群/私聊；CLI 必须显式指定目标会话。原卡 `first_mes` 会在预告和切换后发送。

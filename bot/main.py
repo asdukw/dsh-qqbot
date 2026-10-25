@@ -69,6 +69,8 @@ from onebot import (
     OneBotError,
     OneBotWSClient,
 )
+from persona_runtime import PersonaRuntime
+from personas import PersonaStore
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
 from prompt import build_messages, build_system_prompt
 from relations import (
@@ -716,32 +718,14 @@ def make_llm_client(config: AppConfig, record: ModelRecord) -> LLMClient:
     ))
 
 
-def build_dsh_system_prompt(card) -> str:
-    prompt = build_system_prompt(card.data, card.name, "用户", datetime.now(TZ), [])
+def build_dsh_system_prompt() -> str:
     return (
-        prompt
-        + "\n\n[设定资料]\n角色设定资料保存在 memory/lore.md；需要时用 grep/read 查阅。"
+        "[会话隔离]\n角色与世界设定由当前会话专属段提供，不使用其他会话或旧角色作为当前身份。"
         + "\n\n[上下文说明]\n每一轮消息开头会给出当前时间、会话和发言者；时间和说话人以那一行为准。"
         + "\n\n[联网与赛程]\n有时效性的问题（赛事赛程、新闻、版本改动等）先用 web_search；需要网页正文再用 web_fetch。回答赛程/日程时不要写散文，改为只输出一个 ```schedule 代码块，内容是 JSON："
           '{"event":"赛事名","matches":[{"stage":"瑞士轮","start_time":"2026-10-24T01:00:00+08:00","team_a":"GEN","team_b":"IG","best_of":1}]}'
           "。start_time 用 ISO 8601 带时区（北京时间用 +08:00），best_of 可省略；不要附来源链接，代码块外最多一句话。其他话题不受此限制。"
     )
-
-
-def write_lore(card, workspace: str) -> None:
-    path = Path(workspace) / "memory" / "lore.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"# {card.name} 的设定资料", ""]
-    for entry in card.lorebook.entries:
-        if not entry.enabled or not entry.content.strip():
-            continue
-        keys = " / ".join(entry.keys) or "常驻"
-        lines.append(f"## {keys}\n\n{entry.content.strip()}\n")
-    if len(lines) == 2:
-        lines.append("（这张卡没有世界书条目。）")
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("\n".join(lines), encoding="utf-8")
-    tmp.replace(path)
 
 
 def _shrink_image(data: bytes, mime: str) -> tuple[bytes, str]:
@@ -796,7 +780,7 @@ def split_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
-class Bot:
+class Bot(PersonaRuntime):
     def __init__(
         self,
         config: AppConfig,
@@ -815,6 +799,8 @@ class Bot:
     ):
         self.config = config
         self.cards = cards
+        self.personas = PersonaStore(config.cards.database, cards)
+        self._persona_worker: asyncio.Task | None = None
         self.stickers = stickers
         self.tasks = tasks
         self.feeds = feeds
@@ -863,6 +849,7 @@ class Bot:
                 config.paths.database,
                 self._send_daily,
                 self._daily_commentary,
+                deliver=self._deliver_daily,
                 settings=config.daily,
                 ready=lambda: self.onebot.connected,
             )
@@ -916,6 +903,12 @@ class Bot:
         if self._closed:
             return
         self._closed = True
+        if self._persona_worker is not None:
+            self._persona_worker.cancel()
+            try:
+                await self._persona_worker
+            except asyncio.CancelledError:
+                pass
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
@@ -937,6 +930,7 @@ class Bot:
             self._usage.close()
         self.memory.close()
         self.sessions.close()
+        self.personas.close()
         self.cards.close()
         if self.stickers is not None:
             self.stickers.close()
@@ -1095,7 +1089,10 @@ class Bot:
         """
         if not self.config.bot.reply_group_at:
             return False
-        if self.proactive.named(text, self._card_names):
+        names = self._card_names
+        if event.group_id is not None and hasattr(self, "personas"):
+            names = self._persona_names(self.personas.effective(f"group:{event.group_id}"))
+        if self.proactive.named(text, names):
             return True
         if event.reply_to is not None and event.group_id is not None:
             return event.reply_to in self._own_messages.get(event.group_id, ())
@@ -1277,18 +1274,23 @@ class Bot:
             await self._send_to_chat(chat_type, chat_id, chunk)
             await asyncio.sleep(0.35)
 
+    async def _deliver_daily(self, stats: DayStats) -> str:
+        async with self._locks.setdefault(stats.conversation_id, asyncio.Lock()), self._global:
+            self._persona(stats.conversation_id)
+            reporter = self._daily
+            if reporter is None:
+                raise ValueError('daily reporter unavailable')
+            text = await reporter._compose(stats)
+            await self._send_daily(stats.chat_type, stats.chat_id, text)
+            return text
+
     async def _daily_commentary(self, stats: DayStats) -> str:
-        card = self._card
-        if card is None:
-            system = "你是一个幽默、俏皮的 QQ 聊天机器人，正在写每日聊天总结。"
-        else:
-            system = build_system_prompt(
-                card.data,
-                card.name,
-                "大家" if stats.chat_type == "group" else "对方",
-                datetime.now(TZ),
-                [],
-            )
+        card = self._persona(stats.conversation_id).card
+        lore = card.lorebook.select(str(stats), max_chars=self.config.bot.lore_max_chars)
+        system = build_system_prompt(
+            card.data, card.name, "大家" if stats.chat_type == "group" else "对方",
+            datetime.now(TZ), lore,
+        )
         return await write_commentary(
             self.client,
             system_prompt=system,
@@ -1314,6 +1316,12 @@ class Bot:
         return await reporter.send_now(conversation_id, target_day)
 
     async def _send_scheduled(self, task: Any) -> None:
+        conversation_id = f"{task.chat_type}:{task.chat_id}"
+        async with self._locks.setdefault(conversation_id, asyncio.Lock()), self._global:
+            self._persona(conversation_id)
+            await self._send_scheduled_locked(task)
+
+    async def _send_scheduled_locked(self, task: Any) -> None:
         text = task.message
         if getattr(task, "mode", "fixed") == "generate":
             text = await self._compose_task_message(task)
@@ -1408,20 +1416,22 @@ class Bot:
             f"{datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}，"
             "按人设完成这件事，只输出要发送的内容。"
         )
+        persona = self._persona(conversation_id)
         if self.dsh is not None:
+            task_session = f"task-{task.id}-p{persona.epoch}-{persona.record.fingerprint[:12]}"
+            self._prepare_persona(conversation_id, task_session, None, prompt)
             try:
                 reply = await asyncio.to_thread(
-                    self.dsh.run, f"task-{task.id}", prompt
+                    self.dsh.run, task_session, prompt
                 )
             except DSHError as exc:
                 log.warning("task #%s DSH generation failed: %s", task.id, exc)
             else:
                 if reply.strip():
                     return reply.strip()
-        card = self._card
-        if card is None:
-            return task.message
-        system = build_system_prompt(card.data, card.name, "群友", datetime.now(TZ), [])
+        card = persona.card
+        lore = card.lorebook.select(prompt, max_chars=self.config.bot.lore_max_chars)
+        system = build_system_prompt(card.data, card.name, "群友", datetime.now(TZ), lore)
         try:
             reply = await self.client.chat([
                 {
@@ -1777,7 +1787,8 @@ class Bot:
         else:
             return ""
         try:
-            rows = await self.memory.recall(conversation_id, text, limit=3)
+            persona = self._persona(conversation_id)
+            rows = await self.memory.recall(conversation_id, text, limit=3, after_id=persona.cutoff)
         except sqlite3.Error as exc:
             log.warning("memory recall failed: %s", exc)
             return ""
@@ -1935,10 +1946,6 @@ class Bot:
         except CardError as exc:
             log.error("cannot parse character card #%s: %s", record.id, exc)
             return False
-        try:
-            write_lore(card, self.config.dsh.workspace)
-        except OSError as exc:
-            log.error("cannot write lore file: %s", exc)
         self._card = card
         self._card_sig = signature
         self._card_names = tuple(
@@ -1952,7 +1959,7 @@ class Bot:
                 if isinstance(name, str) and name.strip()
             )
         )
-        self._system_prompt = build_dsh_system_prompt(card)
+        self._system_prompt = build_dsh_system_prompt()
         if self.dsh is not None:
             self.dsh.set_system_prompt(self._system_prompt)
         log.info("active character card: #%s %s", record.id, card.name)
@@ -2036,15 +2043,13 @@ class Bot:
         if not await self.ensure_card():
             return
 
-        session_id, _ = self._session_for(conversation_id, is_group=True)
-        if self.conversations is not None:
-            try:
-                await asyncio.to_thread(
-                    self.conversations.record,
-                    session_id, "group", event.user_id, event.group_id, event.sender_name,
-                )
-            except sqlite3.Error as exc:
-                log.error("cannot record conversation identity: %s", exc)
+        try:
+            self._persona(conversation_id)
+            session_id, _ = self._session_for(conversation_id, is_group=True)
+            self._prepare_persona(conversation_id, session_id, event, event.text)
+        except (ValueError, sqlite3.Error, DSHError):
+            log.exception("cannot prepare proactive persona")
+            return
 
         lines = self.group_context.peek(event.group_id, self.config.bot.group_context_messages)
         image_urls = self.group_context.images(
@@ -2060,6 +2065,7 @@ class Bot:
             )
             + self._sticker_hint()
         )
+        prompt += self._opening_context(conversation_id)
         images: list[str] = []
         prepared: list[PreparedImage] = []
         if image_urls:
@@ -2091,6 +2097,7 @@ class Bot:
         self.proactive.record(event.group_id, time.time())
         self.group_context.drain(event.group_id)
         await self.memory.add(conversation_id, "assistant", reply)
+        self.personas.consume_opening(conversation_id)
         await self._send_reply(event, conversation_id, reply, proactive=True)
         log.info("proactive reply processing finished: conv=%s total=%.1fs", conversation_id, time.time() - started)
 
@@ -2606,18 +2613,15 @@ class Bot:
             await self._send(event, self.config.bot.error_message)
             return
 
-        session_id, _ = self._session_for(
-            conversation_id, is_group=event.message_type == "group"
-        )
-        if self.conversations is not None:
-            # Explicit identity for the profile plugin; written before the turn starts.
-            try:
-                await asyncio.to_thread(
-                    self.conversations.record,
-                    session_id, event.message_type, event.user_id, event.group_id, event.sender_name,
-                )
-            except sqlite3.Error as exc:
-                log.error("cannot record conversation identity: %s", exc)
+        try:
+            self._persona(conversation_id)
+            session_id, _ = self._session_for(
+                conversation_id, is_group=event.message_type == "group"
+            )
+            self._prepare_persona(conversation_id, session_id, event, text)
+        except (ValueError, sqlite3.Error, DSHError):
+            log.exception("cannot prepare conversation persona")
+            return
 
         # Images are stored under the DSH workspace and referenced by text:
         # the model sees a description plus a path, not an image block that
@@ -2626,6 +2630,7 @@ class Bot:
         image_urls = self._turn_images(event)
         prompt, context_lines = self._turn_prompt(event, text)
         prompt += await self._recall_block(event, text)
+        prompt += self._opening_context(conversation_id)
         images: list[str] = []
         prepared: list[PreparedImage] = []
         if image_urls:
@@ -2661,6 +2666,7 @@ class Bot:
         log.info("DSH turn took %.1fs (images=%d, prompt=%d chars)", elapsed, image_count, len(prompt))
 
         await self.memory.add(conversation_id, "assistant", reply)
+        self.personas.consume_opening(conversation_id)
         await self._send_reply(event, conversation_id, reply)
         received = event.received_at or prep_start
         log.info(
@@ -2674,16 +2680,21 @@ class Bot:
 
     @request_context
     async def _reply_llm(self, conversation_id: str, event: MessageEvent, text: str) -> None:
-        if not await self.ensure_card() or self._card is None:
-            await self._send(event, self.config.bot.error_message)
+        try:
+            persona = self._persona(conversation_id)
+        except (ValueError, sqlite3.Error):
+            log.exception("cannot prepare fallback persona")
             return
-        card = self._card
-
+        card = persona.card
         data = card.data
-        history = await self.memory.history(conversation_id, self.config.bot.history_turns * 2)
+        history = await self.memory.history(conversation_id, self.config.bot.history_turns * 2,
+                                            after_id=persona.cutoff)
+        opening = self.personas.opening(conversation_id)
+        if opening:
+            history.insert(0, {"role": "assistant", "content": opening})
         await self.memory.add(conversation_id, "user", text)
 
-        if self.config.bot.greeting_on_first_chat and not history:
+        if self.config.bot.greeting_on_first_chat and not history and persona.epoch == 0:
             greeting = data.get("first_mes", "").strip()
             if greeting:
                 await self._send(event, greeting)
@@ -2752,6 +2763,7 @@ class Bot:
 
         elapsed = time.time() - started
         await self.memory.add(conversation_id, "assistant", reply)
+        self.personas.consume_opening(conversation_id)
         await self._send_reply(event, conversation_id, reply)
         log.info("reply processing finished: conv=%s llm=%.1fs", conversation_id, elapsed)
 
@@ -2811,9 +2823,12 @@ async def check_dsh(config: AppConfig) -> int:
             file=sys.stderr,
         )
         return 2
-    client = make_dsh_client(config, record, system_prompt="你是一个测试助手。")
+    client = make_dsh_client(config, record, system_prompt=build_dsh_system_prompt())
+    conversations = ConversationStore(config.paths.profile_db)
     try:
-        session_id = f"selftest-{int(time.time())}"
+        session_id = f"selftest-{time.time_ns()}"
+        conversations.record(session_id, 'private', '0', None, 'selftest')
+        conversations.prepare_persona(session_id, 'private:0', 'selftest', '你是一个测试助手。')
         reply = await asyncio.to_thread(client.run, session_id, "用一句话确认你能正常工作。")
         print(f"model: {record.key} (effort={record.effective_effort or 'default'})")
         print(f"reply: {reply}")
@@ -2823,6 +2838,7 @@ async def check_dsh(config: AppConfig) -> int:
         return 1
     finally:
         client.close()
+        conversations.close()
 
 
 async def check_onebot(config: AppConfig) -> int:
@@ -3009,6 +3025,7 @@ async def run_ws(config: AppConfig) -> int:
     bot.start_feeds()
     bot.start_daily()
     bot.start_approvals()
+    bot.start_personas()
     log.info("bot started (%s via WebSocket)", record.key)
     try:
         await stop.wait()
@@ -3060,8 +3077,18 @@ def print_cards(records: list[CardRecord]) -> None:
 
 def manage_cards(config: AppConfig, args: argparse.Namespace) -> int:
     registry = CardRegistry(config.cards.database)
+    personas = PersonaStore(config.cards.database, registry)
     try:
         registry.bootstrap(config.cards.bootstrap)
+        if getattr(args, 'switch_status', None):
+            print(json.dumps(personas.job(args.switch_status), ensure_ascii=False, indent=2))
+            return 0
+        if getattr(args, 'resume_switch', None):
+            personas.resume(args.resume_switch, delivered=args.opening_delivered)
+            print(f"reconciled: {args.resume_switch}")
+            return 0
+        if args.use_card and not getattr(args, 'conversation', None):
+            raise ValueError('--use-card requires --conversation group:<id> or private:<id>')
         if args.install_card:
             source = args.install_card
             if source.startswith(("http://", "https://", "data:")):
@@ -3078,7 +3105,9 @@ def manage_cards(config: AppConfig, args: argparse.Namespace) -> int:
             record = registry.resolve(args.use_card)
             if record is None:
                 raise ValueError(f"no such character card: {args.use_card}")
-            registry.use(record.id)
+            for conversation_id in dict.fromkeys(args.conversation):
+                job = personas.enqueue(conversation_id, record, actor='cli')
+                print(f"switch: {job['id']} {conversation_id} {job['phase']}")
         if args.add_card_alias or args.remove_card_alias:
             active = registry.active()
             if active is None:
@@ -3095,12 +3124,13 @@ def manage_cards(config: AppConfig, args: argparse.Namespace) -> int:
             or args.add_card_alias
             or args.remove_card_alias
         ):
-            print("the running bot picks this up on its next group message")
+            print("the running bot executes queued switches when OneBot is connected")
         return 0
     except (CardError, CardFetchError, OSError, sqlite3.Error, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:
+        personas.close()
         registry.close()
 
 
@@ -3143,7 +3173,11 @@ def main() -> int:
         help=f"create or update a model row and exit; fields: {', '.join(EDITABLE)}",
     )
     parser.add_argument("--list-cards", action="store_true", help="print the character card library and exit")
-    parser.add_argument("--use-card", metavar="ID|NAME", help="make a character card active and exit")
+    parser.add_argument("--use-card", metavar="ID|NAME", help="queue a conversation-scoped card switch")
+    parser.add_argument("--conversation", action="append", help="explicit group:<id> or private:<id>; repeat for fanout")
+    parser.add_argument("--switch-status", metavar="JOB", help="print durable switch status and receipts")
+    parser.add_argument("--resume-switch", metavar="JOB", help="explicitly retry an interrupted switch")
+    parser.add_argument("--opening-delivered", action="store_true", help="confirm opening already delivered; do not resend")
     parser.add_argument("--install-card", metavar="URL|PATH", help="install a character card and exit")
     parser.add_argument("--search-cards", metavar="QUERY", help="search the character card library and exit")
     parser.add_argument(
@@ -3192,6 +3226,8 @@ def main() -> int:
 
     if (
         args.list_cards
+        or args.switch_status
+        or args.resume_switch
         or args.use_card
         or args.install_card
         or args.search_cards

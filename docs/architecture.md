@@ -28,7 +28,7 @@
 - 解析消息段（text / at / image / face / record / poke 等），去重；
 - 决定是否回复：私聊全回；群聊在被 @、叫当前角色名、引用机器人消息或被戳一戳时回复，其余消息按主动策略参与；第三方之间的戳一戳只记入群上下文；
 - 把 QQ 会话映射成稳定的 DSH `session_id`；
-- 角色卡库（SQLite）与热切换、系统提示词构建、世界书落盘；
+- 角色卡库（SQLite）与热切换、会话角色绑定、独立系统提示词和世界书注入；
 - 长回复拆分、发送失败日志；
 - 好友/群请求的接收、去重和审批执行（`approvals.py`）；
 - 本地 SQLite 消息审计（不是 DSH 的上下文来源）。
@@ -177,12 +177,15 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 
 - SQLite `/var/lib/qqbot/characters.db`，表 `cards`，主键 `id`；部分唯一索引保证全表最多一行 `is_active = 1`。
 - 入库时统一归一化为 V3 `payload`（JSON），并抽出 `name` / `nickname` / `description` / `personality` / `scenario` / `tags` / `creator` 用于展示和搜索；`fingerprint` 是 payload 的 SHA-256，用于去重。
-- 别名单独存在 `aliases` 列（JSON 数组，最多 8 个、每个 2–32 字），不写进 payload，所以不影响 `fingerprint` 去重；`Bot.refresh_card()` 会把 `name` / `nickname` / 别名一起放进 `_card_names`，供「叫到名字」判定使用。
+- 别名单独存在 `aliases` 列（JSON 数组，最多 8 个、每个 2–32 字），不写进 payload，所以不影响 `fingerprint` 去重；名字寻址按当前会话的角色读取 `name` / `nickname` / 别名；别名本身仍是卡库共享元数据。
 - 搜索用 `LIKE` 逐字段匹配（关键词之间 AND、字段之间 OR），不依赖 FTS5 分词器，中文子串可以直接搜；`%` / `_` 会被转义。
 - 安装来源：`url`（`/card install <url>`、`--install-card`）、`image`（管理员发来的 PNG）、`file`（服务器路径）、`bootstrap`（旧版单卡文件）。下载上限 12 MB，只接受 PNG 或 JSON。
-- `active_signature()` 返回 `(id, updated_at, fingerprint)`，每轮消息只查一次；变化时 `Bot.refresh_card()` 重建 system prompt，并调用 `DSHClient.set_system_prompt()` 重启 DSH runtime。命令行的 `--use-card` 由同一机制在下一轮消息被发现。
-- `bootstrap` 兼容：库为空时导入 `[cards] bootstrap`；只要这张卡仍然激活，就按 mtime 重新导入，保留原来「改文件即热加载」的行为。
-- 命令行：`--list-cards`、`--search-cards <query>`、`--install-card <url|path>`、`--use-card <id|name>`、`--show-card`、`--add-card-alias <name>`、`--remove-card-alias <name>`。
+- `is_active` 只表示默认/回退卡。`bot/personas.py` 在同库保存 `persona_bindings`（会话、不可变 payload、epoch、memory cutoff）和 `persona_switches`（发送阶段、回执、错误）；`/card use` 不再修改全局默认。
+- `profile.db.session_personas` 由 Python 在每次 DSH 调用前准备；`dsh/persona.mjs` 为 agent 注册动态、禁止二次插值的专属 prompt。世界书由该卡 `lorebook.select()` 注入，不落共享文件，局部切换不重启 runtime。
+- `bot/persona_runtime.py` 持有每会话 guard 执行预告→绑定/轮换→opening，普通/主动回复、定时与日报 compose+send 共用 guard。切换队列由在线 OneBot 连接处理；发送超时为 unknown，不盲目重播。
+- 切换轮换 session generation，并使用消息 ID cutoff 隔离 fallback history 和自动 FTS/LIKE recall；旧档案保留，显式查询旧 session 时提示此前人设阶段。
+- `bootstrap` 兼容：库为空时导入 `[cards] bootstrap`；未引用的默认 bootstrap 卡按 mtime 重新导入；绑定/任务引用的版本不可原地改写或去重删除。
+- 命令行：`--list-cards`、`--search-cards <query>`、`--install-card <url|path>`、`--use-card <id|name> --conversation group:<id>`、`--switch-status <id>`、`--resume-switch <id>`、`--show-card`、`--add-card-alias <name>`、`--remove-card-alias <name>`。
 
 ## 表情包库（`bot/stickers.py`）
 

@@ -202,13 +202,13 @@ NapCat 实现的是 OneBot 11，好友请求和群请求都会以 `post_type=req
 
 | 命令 | 作用 |
 |---|---|
-| `/card` | 列出角色卡，`*` 为当前卡 |
+| `/card` | 列出角色卡，`*` 为全局默认；标题显示当前会话角色 |
 | `/card search <关键词>` | 搜索名称、昵称、简介、性格、场景、标签、作者；空格分词按 AND 处理 |
 | `/card install <url\|路径>` | 安装 JSON / PNG 卡，支持 `http(s)://`、`file://` 和服务器绝对路径 |
 | `/card install`（附图片） | 把管理员发送的 PNG 卡图片直接安装 |
-| `/card use <id\|名称>` | 切换当前卡，立即生效，DSH session 历史保留 |
+| `/card use <id\|名称>` | 仅切当前会话：预告 → 新角色 → 原卡开场白；其他群/私聊不变 |
 | `/card show <id\|名称>` | 查看来源、标签、作者、简介长度和世界书条目数 |
-| `/card delete <id\|名称>` | 从库中删除（当前卡需先切换） |
+| `/card delete <id\|名称>` | 从库中删除（默认、绑定或切换任务引用的卡不可删除） |
 | `/card alias` | 查看当前卡的名称与别名 |
 | `/card alias add <名称>` | 添加别名：群里直接叫它（至少 2 个字）也会被当成在找它 |
 | `/card alias remove <名称>` | 删除别名 |
@@ -221,7 +221,8 @@ M="sudo -u qqbot /opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/main.py"
 $M --list-cards
 $M --search-cards 图书
 $M --install-card https://example.com/card.png
-$M --use-card 2
+$M --use-card 2 --conversation group:123456
+$M --switch-status <任务ID>
 $M --add-card-alias 肥鱼
 $M --remove-card-alias 肥鱼
 ```
@@ -230,9 +231,11 @@ $M --remove-card-alias 肥鱼
 - 别名按卡保存（`cards.aliases`），和卡片自带的 `name` / `nickname` 一起参与「叫名字」判定；单字别名会被忽略；
 - 下载上限 12 MB；只接受 PNG 或 JSON，PNG 依次查找 `ccv3`、`chara` 的 `tEXt` / `iTXt` 块；
 - 卡里的 `description` / `personality` / `scenario` / `mes_example` / `system_prompt` 会渲染成 DSH 的系统提示词；
-- 世界书条目会原子写入 `memory/lore.md`，模型用 `grep` / `read` 查；
-- 换卡会让 DSH runtime 重启，但 session 历史保留；
-- **升级兼容**：库为空时自动导入 `[cards] bootstrap`（默认 `/etc/qqbot/character.json`）。只要这张卡仍是当前卡，修改文件仍会热加载；切到别的卡后文件不再影响运行中的机器人。
+- 每个会话独立绑定卡片版本，角色和世界书经 agent-scoped prompt 注入，不再共享 `memory/lore.md`；
+- 局部切卡不重启 DSH runtime；仅目标会话开启新 generation，并隔离旧人设的自动历史/recall。旧档案和用户画像不删除；
+- 安装只入库，不广播；CLI 切换必须显式 `--conversation group:<id>` 或 `private:<id>`，可重复参数向指定会话 fanout；
+- 同卡重复切换不重复开场。超时或发送中断记为投递未知，不自动重发；使用 `--switch-status` 检查回执，人工确认后才能继续（见运维文档）；
+- **升级兼容**：库为空时自动导入 `[cards] bootstrap`（默认 `/etc/qqbot/character.json`）。未被绑定/切换任务引用的默认 bootstrap 卡仍可热加载；被引用的版本保持不变，需要安装新版本再显式切换。
 - 仓库自带一张社区整理的示例卡 [`cards/dafeiyu.json`](cards/dafeiyu.json)（「大肥鱼」，DeepSeek 二创鲸鱼娘）；安装脚本会把它放到 `/opt/qqbot/cards/`，用 `--install-card` 或 `/card install` 入库。
 
 ## 表情库

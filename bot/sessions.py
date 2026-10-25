@@ -71,6 +71,11 @@ class SessionStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        columns = {row[1] for row in self._db.execute('PRAGMA table_info(session_state)')}
+        for name, definition in (("persona_token", "TEXT NOT NULL DEFAULT ''"),
+                                 ("persona_cutoff", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in columns:
+                self._db.execute(f'ALTER TABLE session_state ADD COLUMN {name} {definition}')
         self._db.commit()
 
     @staticmethod
@@ -221,6 +226,35 @@ class SessionStore:
         with self._lock:
             row = self._row(conversation_id)
         return self._state(row) if row is not None else None
+
+    def reconcile_persona(self, conversation_id: str, token: str, cutoff: int,
+                          *, explicit: bool = False) -> SessionState:
+        """Rotate once on a new persona, but adopt legacy default sessions intact."""
+        stamp = int(time.time())
+        with self._lock:
+            state = self._state(self._ensure(conversation_id, stamp))
+            row = self._db.execute(
+                'SELECT persona_token FROM session_state WHERE conversation_id = ?',
+                (conversation_id,),
+            ).fetchone()
+            previous = str(row[0])
+            if previous != token:
+                if previous or explicit:
+                    # Keep the generation and persona token in one commit.
+                    self._db.execute(
+                        'UPDATE session_state SET generation=generation+1, started_at=?, '
+                        'last_active=?, messages=0 WHERE conversation_id=?',
+                        (stamp, stamp, conversation_id),
+                    )
+                self._db.execute(
+                    'UPDATE session_state SET persona_token=?, persona_cutoff=? WHERE conversation_id=?',
+                    (token, cutoff, conversation_id),
+                )
+                self._db.commit()
+                row = self._row(conversation_id)
+                assert row is not None
+                state = self._state(row)
+            return state
 
     def close(self) -> None:
         with self._lock:

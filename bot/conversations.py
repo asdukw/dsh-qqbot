@@ -23,6 +23,13 @@ CREATE TABLE IF NOT EXISTS conversations (
     sender_name TEXT NOT NULL DEFAULT '',
     updated_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS session_personas (
+    session_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    persona_token TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 """
 
 
@@ -68,6 +75,18 @@ class ConversationStore:
                     None if group_id is None else str(group_id),
                     sender_name or "", int(time.time()),
                 ),
+            )
+
+    def prepare_persona(self, session_id: str, conversation_id: str,
+                        persona_token: str, prompt: str) -> None:
+        if not prompt.strip():
+            raise ValueError('empty persona prompt')
+        with self._lock, self._db:
+            self._db.execute(
+                'INSERT INTO session_personas VALUES (?, ?, ?, ?, ?) '
+                'ON CONFLICT(session_id) DO UPDATE SET conversation_id=excluded.conversation_id, '
+                'persona_token=excluded.persona_token, prompt=excluded.prompt, updated_at=excluded.updated_at',
+                (session_id, conversation_id, persona_token, prompt, int(time.time())),
             )
 
     def get(self, session_id: str) -> dict | None:
