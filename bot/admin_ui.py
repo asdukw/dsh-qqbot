@@ -1381,8 +1381,42 @@ class AdminHandler(BaseHTTPRequestHandler):
     static_dir: str = DEFAULT_STATIC_DIR
 
     # ------------------------------------------------------------- plumbing
+    def _safe_request_path(self) -> str:
+        try:
+            path = urlparse(getattr(self, "path", "")).path or "-"
+        except ValueError:
+            return "<invalid>"
+        if path in {
+            "/", "/index.html", "/login", "/logout", "/healthz",
+            "/api/login", "/api/logout", "/api/session",
+        }:
+            return path
+        if path.startswith("/api/"):
+            return "/api/*"
+        if path.startswith("/assets/"):
+            return "/assets/*"
+        return "<other>"
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        # The default implementation logs the raw request line, including its
+        # query string. Keep access logs useful without recording credentials.
+        method = getattr(self, "command", "-")
+        if method not in {"GET", "POST", "HEAD", "OPTIONS"}:
+            method = "OTHER"
+        status = str(code) if isinstance(code, int) and 100 <= code <= 599 else "-"
+        log.info(
+            "http request method=%s path=%s status=%s bytes=%s",
+            method, self._safe_request_path(), status, size,
+        )
+
     def log_message(self, format: str, *args: Any) -> None:
-        log.info("%s %s", self.address_string(), format % args)
+        # Fallback for malformed requests and server errors. Never format the
+        # parent class's arguments because they may contain a raw request line.
+        del format, args
+        log.warning("http event outcome=malformed_or_error")
+
+    def _log_login(self, outcome: str, *, level: int = logging.INFO) -> None:
+        log.log(level, "admin login outcome=%s ip=%s", outcome, self.client_address[0])
 
     def _send_raw(
         self,
@@ -1489,8 +1523,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             return len(window) < FAIL_LIMIT
 
     def _record_failure(self) -> None:
+        now = time.time()
         with self._fail_lock:
-            self._failures.setdefault(self.client_address[0], []).append(time.time())
+            failures = self._failures.setdefault(self.client_address[0], [])
+            count = sum(now - stamp < FAIL_WINDOW for stamp in failures)
+            failures.append(now)
+            # Emit once when entering the limited state, not on every 429.
+            if count == FAIL_LIMIT - 1:
+                self._log_login("rate_limited", level=logging.WARNING)
 
     # ----------------------------------------------------------------- routes
     def _is_api(self) -> bool:
@@ -1691,6 +1731,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             submitted = str(payload.get("password") or "")
             expected = self._password()
             if not expected:
+                self._log_login("password_not_configured", level=logging.DEBUG)
                 self._send_json(
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     {"error": "未设置 ADMIN_UI_PASSWORD"},
@@ -1698,9 +1739,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             if not hmac.compare_digest(submitted, expected):
                 self._record_failure()
+                self._log_login("invalid_password", level=logging.WARNING)
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "密码不对"})
                 return
             cookie = self._issue()
+            # This records session issuance, not receipt by the browser.
+            self._log_login("success")
             cookie_header = (
                 f"{COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict; "
                 f"Max-Age={int(self._session_hours() * 3600)}"

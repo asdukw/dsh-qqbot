@@ -1438,9 +1438,45 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(payload["end"], today.isoformat())
 
     def test_wrong_password_is_rejected(self) -> None:
-        _, response = self.login("nope")
-        self.assertEqual(response.status, 401)
-        self.assertIn("密码不对", response.read().decode())
+        with self.assertLogs("qqbot.admin", level="WARNING") as logs:
+            _, response = self.login("body-password-sentinel")
+        with response:
+            self.assertEqual(response.status, 401)
+            self.assertIn("密码不对", response.read().decode())
+        output = "\n".join(logs.output)
+        self.assertIn("admin login outcome=invalid_password", output)
+        self.assertNotIn("body-password-sentinel", output)
+
+    def test_access_log_redacts_query_and_records_success(self) -> None:
+        query_secret = "query-password-sentinel"
+        with self.assertLogs("qqbot.admin", level="INFO") as logs:
+            with self.get(f"/api/session?password={query_secret}") as response:
+                self.assertEqual(response.status, 200)
+                response.read()
+            _cookie, login_response = self.login()
+            with login_response:
+                self.assertEqual(login_response.status, 200)
+                login_response.read()
+        output = "\n".join(logs.output)
+        self.assertIn("path=/api/session", output)
+        self.assertIn("admin login outcome=success", output)
+        self.assertNotIn(query_secret, output)
+        self.assertNotIn("test-password", output)
+
+    def test_login_rate_limit_is_logged_without_request_data(self) -> None:
+        with self.assertLogs("qqbot.admin", level="WARNING") as logs:
+            for _ in range(5):
+                _cookie, response = self.login("wrong")
+                with response:
+                    self.assertEqual(response.status, 401)
+                    response.read()
+            _cookie, response = self.login("wrong")
+            with response:
+                self.assertEqual(response.status, 429)
+                response.read()
+        output = "\n".join(logs.output)
+        self.assertIn("admin login outcome=rate_limited", output)
+        self.assertNotIn('"password"', output)
 
     def test_static_assets_are_cached(self) -> None:
         response = self.get("/assets/app-abc.js")

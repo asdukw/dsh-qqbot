@@ -84,10 +84,10 @@ async def synthesize_stepfun(
         ) as client:
             response = await client.post("/v1/audio/speech", json=payload)
     except httpx.HTTPError as exc:
-        raise VoiceError(f"stepfun tts failed: {exc}") from exc
+        raise VoiceError(f"stepfun tts failed: {type(exc).__name__}") from exc
     if response.status_code != 200:
         raise VoiceError(
-            f"stepfun tts HTTP {response.status_code}: {response.text[:200]}"
+            f"stepfun tts HTTP {response.status_code}"
         )
     if not response.content:
         raise VoiceError("stepfun tts returned no audio")
@@ -134,10 +134,10 @@ async def synthesize_fish(
                 },
             )
     except httpx.HTTPError as exc:
-        raise VoiceError(f"fish tts failed: {exc}") from exc
+        raise VoiceError(f"fish tts failed: {type(exc).__name__}") from exc
     if response.status_code != 200:
         raise VoiceError(
-            f"fish tts HTTP {response.status_code}: {response.text[:200]}"
+            f"fish tts HTTP {response.status_code}"
         )
     if not response.content:
         raise VoiceError("fish tts returned no audio")

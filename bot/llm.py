@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from log_context import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -151,14 +151,14 @@ class LLMClient:
                     await asyncio.sleep(1.5 * (attempt + 1))
                 continue
             except httpx.HTTPError as exc:
-                last_error = LLMError(f"LLM connection error: {exc}")
-                log.warning("LLM connection error: %s", exc)
+                last_error = LLMError(f"LLM connection error: {type(exc).__name__}")
+                log.warning("LLM connection error: %s", type(exc).__name__)
                 if attempt + 1 < tries:
                     await asyncio.sleep(1.5 * (attempt + 1))
                 continue
 
             if response.status_code == 429 or response.status_code >= 500:
-                last_error = LLMError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
+                last_error = LLMError(f"LLM HTTP {response.status_code}")
                 log.warning(
                     "LLM HTTP %s (attempt %d/%d)%s",
                     response.status_code,
@@ -171,13 +171,13 @@ class LLMClient:
                 continue
 
             if response.status_code >= 400:
-                raise LLMError(f"LLM HTTP {response.status_code}: {response.text[:500]}")
+                raise LLMError(f"LLM HTTP {response.status_code}")
 
             try:
                 body = response.json()
                 content = body["choices"][0]["message"].get("content") or ""
             except (ValueError, KeyError, IndexError, TypeError) as exc:
-                raise LLMError(f"unexpected LLM response: {response.text[:300]}") from exc
+                raise LLMError("unexpected LLM response") from exc
 
             usage = body.get("usage") or {}
             if usage and self.usage_sink is not None:

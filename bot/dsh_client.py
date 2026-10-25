@@ -7,13 +7,14 @@ and passes the user's text through.
 
 from __future__ import annotations
 
-import logging
 import os
 import threading
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger(__name__)
+from log_context import get_logger
+
+log = get_logger(__name__)
 
 try:
     from deepseek_harness import DeepSeekHarness  # pyright: ignore[reportMissingImports]
@@ -171,9 +172,9 @@ class DSHClient:
             try:
                 result = self._run_locked(harness, session_id, text, images)
             except Exception as exc:  # noqa: BLE001 - reset for the next turn
-                log.exception("DSH run failed")
+                log.error("DSH run failed: %s", type(exc).__name__)
                 self._reset_locked()
-                raise DSHError(f"DSH run failed: {exc}") from exc
+                raise DSHError(f"DSH run failed: {type(exc).__name__}") from exc
             reply = self._reply_from_result(result)
             return reply, list(getattr(result, "events", None) or [])
 

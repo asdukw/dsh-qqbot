@@ -51,6 +51,7 @@ from feeds import (
 from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
 from images import ImageStore, StoredImage
 from llm import LLMClient, LLMConfig, LLMError
+from log_context import get_logger, request_context
 from meme import (
     MemeError,
     extract_meme_marker,
@@ -113,7 +114,7 @@ from voice import (
 
 from cards import CardError, CardRecord, CardRegistry, CharacterCard
 
-log = logging.getLogger("qqbot")
+log = get_logger("qqbot")
 TZ = ZoneInfo("Asia/Shanghai")
 
 # Model selection and parameters live in the registry; these env vars are ignored.
@@ -950,6 +951,7 @@ class Bot:
         if self.approvals is not None:
             self.approvals.close()
 
+    @request_context
     async def handle(self, event: MessageEvent) -> None:
         received = event.received_at or time.time()
         if event.sender_name:
@@ -1600,11 +1602,8 @@ class Bot:
             log.warning("cannot store sticker tags: %s", exc)
             return
         log.info(
-            "sticker #%s tagged: %s %s%s",
-            record.id,
-            description,
-            ",".join(tags) or "-",
-            "" if safe else " (banned by moderation)",
+            "sticker #%s tagged: chars=%d tags=%d safe=%s",
+            record.id, len(description), len(tags), safe,
         )
 
     def _sticker_hint(self) -> str:
@@ -1658,7 +1657,7 @@ class Bot:
         window.append(now)
         self._sticker_last[key] = now
         store.mark_used(record.id)
-        log.info("sent sticker #%s to %s (hint=%r)", record.id, key, hint)
+        log.info("sent sticker #%s to %s", record.id, key)
 
     async def _send_voice(self, event: MessageEvent, text: str) -> bool:
         config = self.config.voice
@@ -1764,7 +1763,7 @@ class Bot:
         self._meme_last[key] = now
         if base_record is not None and self.stickers is not None:
             self.stickers.mark_used(base_record.id)
-        log.info("meme sent to %s: %s", key, text)
+        log.info("meme sent to %s (chars=%d)", key, len(text))
         return True
 
     async def _recall_block(self, event: MessageEvent, text: str) -> str:
@@ -2006,6 +2005,7 @@ class Bot:
                 return
             await self._reply_proactive(conversation_id, event)
 
+    @request_context
     async def force_proactive(self, event: MessageEvent) -> None:
         """Admin test hook: run a proactive turn regardless of the policy."""
         if event.group_id is None:
@@ -2028,6 +2028,7 @@ class Bot:
         async with lock, self._global:
             await self._reply_proactive(conversation_id, event)
 
+    @request_context
     async def _reply_proactive(self, conversation_id: str, event: MessageEvent) -> None:
         dsh = self.dsh
         if dsh is None or event.group_id is None:
@@ -2072,8 +2073,8 @@ class Bot:
         image_count = len(prepared) if prepared else len(images)
         await self.memory.add(conversation_id, "user", f"{event.sender_name}: {event.text}")
         log.info(
-            "proactive reply: group=%s trigger=%s(%s) context=%d images=%d",
-            event.group_id, event.sender_name, event.user_id, len(lines), image_count,
+            "proactive reply: group=%s user=%s context=%d images=%d",
+            event.group_id, event.user_id, len(lines), image_count,
         )
         started = time.time()
         try:
@@ -2089,9 +2090,9 @@ class Bot:
 
         self.proactive.record(event.group_id, time.time())
         self.group_context.drain(event.group_id)
-        log.info("LLM turn took %.1fs (images=%d)", time.time() - started, image_count)
         await self.memory.add(conversation_id, "assistant", reply)
         await self._send_reply(event, conversation_id, reply, proactive=True)
+        log.info("proactive reply processing finished: conv=%s total=%.1fs", conversation_id, time.time() - started)
 
     async def _maybe_reload_model(self) -> None:
         """Pick up --use-model / --set-model changes on the next turn."""
@@ -2162,6 +2163,7 @@ class Bot:
             for _ in range(self._GLOBAL_LIMIT):
                 self._global.release()
 
+    @request_context
     async def _reply(self, conversation_id: str, event: MessageEvent, text: str) -> None:
         if self.dsh is None:
             await self._reply_llm(conversation_id, event, text)
@@ -2393,7 +2395,7 @@ class Bot:
             ) as client:
                 response = await client.get(raw)
             if response.status_code != 200:
-                log.warning("image download HTTP %s: %.120s", response.status_code, raw)
+                log.warning("image download HTTP %s", response.status_code)
                 return None
             data = response.content
             if len(data) > max_bytes:
@@ -2405,7 +2407,7 @@ class Bot:
                 mime = "image/jpeg"
             return data, mime
         except httpx.HTTPError as exc:
-            log.warning("image download failed: %s", exc)
+            log.warning("image download failed: %s", type(exc).__name__)
             return None
 
     async def _caption_image(
@@ -2549,7 +2551,7 @@ class Bot:
                 ) as client:
                     response = await client.get(raw)
                 if response.status_code != 200:
-                    log.warning("image download HTTP %s: %.120s", response.status_code, raw)
+                    log.warning("image download HTTP %s", response.status_code)
                     fetched.append(raw)
                     continue
                 data = response.content
@@ -2565,7 +2567,7 @@ class Bot:
                     f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
                 )
             except httpx.HTTPError as exc:
-                log.warning("image download failed: %s", exc)
+                log.warning("image download failed: %s", type(exc).__name__)
                 fetched.append(raw)
         return fetched
 
@@ -2595,6 +2597,7 @@ class Bot:
                 captions.append(caption)
         return captions
 
+    @request_context
     async def _reply_dsh(self, conversation_id: str, event: MessageEvent, text: str) -> None:
         dsh = self.dsh
         if dsh is None:
@@ -2638,8 +2641,8 @@ class Bot:
 
         await self.memory.add(conversation_id, "user", text)
         log.info(
-            "replying via DSH: conv=%s session=%s user=%s(%s) chars=%d group_context=%d images=%d",
-            conversation_id, session_id, event.sender_name, event.user_id, len(text),
+            "replying via DSH: conv=%s session=%s user=%s chars=%d group_context=%d images=%d",
+            conversation_id, session_id, event.user_id, len(text),
             context_lines, image_count,
         )
         started = time.time()
@@ -2661,7 +2664,7 @@ class Bot:
         await self._send_reply(event, conversation_id, reply)
         received = event.received_at or prep_start
         log.info(
-            "reply sent: conv=%s queue=%.1fs prep=%.1fs dsh=%.1fs total=%.1fs",
+            "reply processing finished: conv=%s queue=%.1fs prep=%.1fs dsh=%.1fs total=%.1fs",
             conversation_id,
             max(0.0, prep_start - received),
             prep_elapsed,
@@ -2669,6 +2672,7 @@ class Bot:
             time.time() - received,
         )
 
+    @request_context
     async def _reply_llm(self, conversation_id: str, event: MessageEvent, text: str) -> None:
         if not await self.ensure_card() or self._card is None:
             await self._send(event, self.config.bot.error_message)
@@ -2716,8 +2720,8 @@ class Bot:
                 )
 
         log.info(
-            "replying: conv=%s user=%s(%s) chars=%d history=%d lore=%d",
-            conversation_id, event.sender_name, event.user_id, len(text), len(history), len(lore),
+            "replying: conv=%s user=%s chars=%d history=%d lore=%d",
+            conversation_id, event.user_id, len(text), len(history), len(lore),
         )
 
         images = await self._image_urls(image_urls)
@@ -2746,8 +2750,10 @@ class Bot:
                 await self._send(event, self.config.bot.error_message)
             return
 
+        elapsed = time.time() - started
         await self.memory.add(conversation_id, "assistant", reply)
         await self._send_reply(event, conversation_id, reply)
+        log.info("reply processing finished: conv=%s llm=%.1fs", conversation_id, elapsed)
 
     async def _send(self, event: MessageEvent, text: str) -> None:
         if not text:

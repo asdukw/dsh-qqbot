@@ -72,7 +72,28 @@ $M --check            # 测试模型 API；[dsh] enabled = false 时走直连客
 - NapCat：`cd /opt/qqbot/napcat && docker compose logs --tail=200 napcat`；
 - DSH runtime 的启动、崩溃和模型错误也在 `qqbot` 单元里，搜索 `dsh` 或 `turn/end`。
 
-日志级别固定为 INFO（`websockets` / `httpx` 降到 WARNING），没有运行时开关。需要细节时用仓库里的 `deploy/napcat/diagnostics/` 脚本（在服务器上从仓库目录运行，脚本按 `/opt/qqbot/bot` 导入模块）：`check_debug.py` 带 DEBUG 连接 NapCat，`ws_probe.py` 探测 WS 消息，`test_endpoints.sh` 直接打模型端点。
+日志级别固定为 INFO（`websockets` / `httpx` 降到 WARNING），没有运行时开关。需要细节时用仓库里的 `deploy/napcat/diagnostics/` 脚本（在服务器上从仓库目录运行，脚本按 `/opt/qqbot/bot` 导入模块）：`check_debug.py` 带应用 DEBUG 连接 NapCat，`ws_probe.py` 探测 WS 消息，`test_endpoints.sh` 直接打模型端点。诊断脚本会保持 `websockets` 为 WARNING，避免握手 DEBUG 输出 Authorization 请求头；诊断输出仍只应在受限的运维环境中查看，不要直接公开分享。OneBot 凭据应使用独立 token 配置，不要嵌入 URL；接受 token 参数的探测脚本还有命令历史/进程参数暴露风险。
+
+消息处理、普通/主动回复及其图片、文本/媒体发送日志带本地 `rid=<12 位十六进制>`；同轮的 LLM 重试和 `asyncio.to_thread` 中的 DSH 适配器日志沿用它，可用 `journalctl -u qqbot | grep 'rid=...'` 串联排障。无消息上下文时为 `rid=-`。ID 不进入 QQ 回复、模型 prompt 或数据库；SDK 自建线程、DSH 子进程和独立后台定时任务不保证有同一 ID。`reply processing finished` 只表示回复处理流程结束，不代表所有文本分片/媒体已送达；发送失败仍有单独 ERROR。
+
+面板访问日志只记录白名单方法、路由类别和状态，不记录原始 URL/query、请求体、Cookie 或 Authorization。`admin login outcome=success` 表示会话已签发；错误密码为 WARNING，进入限流状态时每个来源每窗口记录一次 WARNING，后续 429 只保留普通访问日志。密码未配置的逐请求事件为 DEBUG，启动时仍有 WARNING。来源使用直连 IP，不信任 X-Forwarded-For。
+
+### 日志容量与保留
+
+主进程和面板使用 systemd journal；服务单元将 stdout/stderr 交给 journal（`deploy/qqbot.service`），不需要再给 Python 增加文件日志或用 logrotate 处理 journal 文件。部署后先只读检查主机边界：
+
+```bash
+journalctl --disk-usage
+systemd-analyze cat-config systemd/journald.conf
+cd /opt/qqbot/napcat && docker compose logs --tail=200 napcat
+docker system df
+```
+
+仓库没有替生产主机设置 journald 的容量和保留期限。若需要显式限制，请由主机管理员评估共享影响后添加 journald drop-in，例如 `[Journal]` 中的 `SystemMaxUse=200M`、`RuntimeMaxUse=50M`、`SystemKeepFree=1G` 和 `MaxRetentionSec=14day`；这些是示例，不代表当前有效配置，也不能保证至少保留 14 天：容量和时间限制先触发者优先。确认 `/var/log/journal`（持久日志）与 `/run/log/journal`（运行期日志）的实际配置后，再重启 `systemd-journald` 并复查占用。
+
+NapCat 的 Docker 日志、DSH 会话 JSONL 和 SQLite 数据均不受 journald 配额控制。Docker 轮转也不限制容器内另写的文件。当前 `deploy/napcat/setup-napcat.sh` 没有显式设置 Docker 日志轮转；如主机策略需要，可在 Compose 服务中由管理员加入 `json-file` 的 `max-size` / `max-file`，但变更需要重建容器，可能造成短暂断连，不由此文档自动执行。
+
+清理日志是破坏性操作：`journalctl --vacuum-time` / `--vacuum-size` 作用于整台主机的归档 journal，不是只删除 `qqbot`，也不会删除仍活动的 journal 文件；执行前先保留必要的排障记录，并确认不会影响其他服务。
 
 ## 备份与恢复
 

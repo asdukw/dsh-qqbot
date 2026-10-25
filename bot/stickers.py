@@ -181,9 +181,9 @@ async def download_image(url: str, max_bytes: int = MAX_BYTES) -> tuple[bytes, s
             ) as client:
                 response = await client.get(url)
         except httpx.HTTPError as exc:
-            raise StickerError(f"download failed: {exc}") from exc
+            raise StickerError(f"download failed: {type(exc).__name__}") from exc
         if response.status_code != 200:
-            raise StickerError(f"download HTTP {response.status_code}: {url[:120]}")
+            raise StickerError(f"download HTTP {response.status_code}")
         data = response.content
         mime = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
     if not data:

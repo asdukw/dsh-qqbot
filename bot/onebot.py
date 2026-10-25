@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import time
 from collections import deque
@@ -14,8 +13,9 @@ from typing import Any
 from urllib.parse import quote
 
 import websockets
+from log_context import get_logger, request_context
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 class OneBotError(RuntimeError):
@@ -432,6 +432,7 @@ class OneBotWSClient:
     def parse_request(self, payload: dict) -> RequestEvent | None:
         return self._parser.parse_request(payload)
 
+    @request_context
     async def _run_notice(self, payload: dict) -> None:
         if self.on_notice is None:
             return
@@ -448,6 +449,7 @@ class OneBotWSClient:
         except Exception:  # noqa: BLE001 - one bad request must not kill the loop
             log.exception("request handler failed")
 
+    @request_context
     async def _run_handler(self, message: MessageEvent) -> None:
         try:
             await self.on_message(message)
@@ -486,7 +488,10 @@ class OneBotWSClient:
             self._pending.pop(echo, None)
 
         if response.get("retcode") not in (0, None) or response.get("status") == "failed":
-            raise OneBotError(f"{action} failed: {response}")
+            retcode = response.get("retcode")
+            if type(retcode) is not int or not -(2**31) <= retcode < 2**31:
+                retcode = "unknown"
+            raise OneBotError(f"{action} failed (retcode={retcode})")
         return response.get("data") or {}
 
     async def send_private(self, user_id: int, text: str) -> dict:

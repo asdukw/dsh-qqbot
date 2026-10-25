@@ -94,7 +94,7 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
    - 返回 `final_response`。
 9. adapter 按 `max_reply_chars` 拆分并发送。
 10. 用户消息和助手回复同时写入本地 SQLite `messages` 表，仅作审计。
-11. 每条回复结束记录 `reply sent: conv=... queue=... prep=... dsh=... total=...`；在锁/信号量上等待超过 3 秒会额外打一条 warning，便于定位排队、图片准备或 DSH 生成造成的延迟。
+11. DSH 回复处理结束记录 `rid=... reply processing finished: conv=... queue=... prep=... dsh=... total=...`，直连 LLM 和主动回复也有相应结束日志；这不是全部内容已送达的证明，发送失败另记 ERROR。在锁/信号量上等待超过 3 秒会额外打一条 warning，便于定位排队、图片准备或 DSH 生成造成的延迟。
 
 ## 身份传递
 
