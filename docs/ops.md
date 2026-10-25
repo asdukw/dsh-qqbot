@@ -45,7 +45,7 @@ systemctl restart qqbot qqbot-admin
 | `/var/lib/qqbot/approvals.db` | 好友 / 群请求审批 | 否 |
 | `/var/lib/qqbot/daily.db` | 日报发送状态 | 否 |
 | `/var/lib/qqbot/dsh-home/sessions/` | DSH 会话 JSONL | 否 |
-| `/var/lib/qqbot/dsh-workspace/` | 模型可读写工作区（`memory/lore.md`、`notes/`、`spill/`） | 否 |
+| `/var/lib/qqbot/dsh-workspace/` | 模型可读写工作区（`notes/`、`spill/`；世界书通过会话 prompt 注入） | 否 |
 | `/var/lib/qqbot/backups/` | 每日备份归档 | — |
 | `/opt/qqbot/napcat/` | NapCat compose、`.env`、QQ 数据 | 否 |
 
@@ -175,3 +175,22 @@ systemctl restart qqbot qqbot-admin
 - 不要手工删除 `/var/lib/qqbot` 下的数据库；需要清理时先备份。
 - workspace 里的内容模型都能读到，不要放密钥或隐私文件。
 - QQ 账号风险、数据外发范围见 [SECURITY.md](../SECURITY.md)。
+
+## 会话角色切换
+
+安装与切换分开，现有默认卡不变：
+
+```bash
+$M --install-card /path/to/card.png
+$M --use-card 2 --conversation group:123456
+$M --switch-status <任务ID>
+```
+
+重复 `--conversation` 可向明确指定的会话 fanout。在线 bot 等旧回复全部发完后，发送预告、切换目标会话并发送原 `first_mes`。不会自动枚举群/好友，不发 `@全体成员`。
+
+任务 `unknown` 表示发送超时/中断，QQ 是否已收到无法确定；`paused` 表示已确认部分步骤但尚未完成。不要直接重建任务或清空数据库。检查 `receipts` 和目标会话后：
+
+- `--resume-switch <任务ID>`：显式允许继续，已保存回执的分片不重发；未知分片可能重复，必须先人工核实。
+- `--resume-switch <任务ID> --opening-delivered`：仅当已经绑定且确认完整开场白已投递时，直接完成本地状态，不发送消息。
+
+未完成切换会暂停目标的角色输出，不影响其他会话。`/reset` 只轮换当前 session，保留角色绑定。升级前备份 `characters.db`、`memory.db`、`profile.db`；旧自动生成 `memory/lore.md` 应移出模型 workspace 备份，用户 notes 不动。权限下放不属于此功能，现有管理员鉴权保持不变。

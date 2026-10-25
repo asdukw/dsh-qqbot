@@ -9,6 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
@@ -80,6 +81,10 @@ def make_bot(tmp: str) -> Bot:
     bot.client = FakeClient()
     bot.image_store = None
     bot.conversations = None
+    bot._persona = Mock()
+    bot._prepare_persona = Mock()
+    bot._opening_context = Mock(return_value="")
+    bot.personas = SimpleNamespace(consume_opening=Mock())
     bot.group_context = GroupContextBuffer(10)
     return bot
 

@@ -87,6 +87,8 @@
       name: '@deepseek-ai/dsh-llm-pi-ai'
       config:
         providers: {}
+    - id: conversation-persona
+      name: '/opt/qqbot/dsh/plugins/persona.mjs'
     - id: user-profile
       name: '/opt/qqbot/dsh/plugins/user-profile.mjs'
     # Read-only on-demand access to older DSH session JSONL and chat_events.

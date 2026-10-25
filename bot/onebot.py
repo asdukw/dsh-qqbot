@@ -22,6 +22,10 @@ class OneBotError(RuntimeError):
     pass
 
 
+class OneBotRejected(OneBotError):
+    """The server explicitly rejected an action (not an unknown timeout)."""
+
+
 @dataclass
 class OneBotConfig:
     url: str = "ws://127.0.0.1:3001"
@@ -491,7 +495,7 @@ class OneBotWSClient:
             retcode = response.get("retcode")
             if type(retcode) is not int or not -(2**31) <= retcode < 2**31:
                 retcode = "unknown"
-            raise OneBotError(f"{action} failed (retcode={retcode})")
+            raise OneBotRejected(f"{action} failed (retcode={retcode})")
         return response.get("data") or {}
 
     async def send_private(self, user_id: int, text: str) -> dict:

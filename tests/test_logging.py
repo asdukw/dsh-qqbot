@@ -136,6 +136,10 @@ class ReplyCorrelationTests(unittest.IsolatedAsyncioTestCase):
         bot._context_header = Mock(return_value="header")
         bot.memory = SimpleNamespace(add=AsyncMock(), history=AsyncMock(return_value=[]))
         bot._card = SimpleNamespace(data={}, name="test", lorebook=SimpleNamespace(select=Mock(return_value=[])))
+        persona = SimpleNamespace(card=bot._card, cutoff=0, epoch=0)
+        bot._persona = Mock(return_value=persona)
+        bot._prepare_persona = Mock(return_value=persona)
+        bot.personas = SimpleNamespace(opening=Mock(return_value=""), consume_opening=Mock())
         bot.group_context = GroupContextBuffer(10)
         bot.proactive = SimpleNamespace(record=Mock(), note_speaking=Mock())
         bot.onebot = SimpleNamespace(

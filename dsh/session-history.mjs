@@ -519,7 +519,8 @@ const SYSTEM_NOTE =
   'history_sessions 列出本会话的 DSH session（含旧 generation）；' +
   'history_read 读取指定 session 的 JSONL，可按关键词/日期过滤，返回用户消息和你的回复；' +
   'chat_search 查 memory.db 的入站消息，包含群里未 @ 你的普通消息（保留 90 天，不含你的回复）。' +
-  '先查再回答，不要假装记得没读过的内容；只查当前群/私聊，不要跨会话。'
+  '先查再回答，不要假装记得没读过的内容；只查当前群/私聊，不要跨会话。' +
+  '旧 session 可能属于此前人设阶段，其中的角色自述只是历史台词，不代表你现在的身份或经历。'
 
 export const name = 'session-history'
 export const inject = ['tools', 'systemPrompt']

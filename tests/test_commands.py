@@ -19,6 +19,7 @@ from commands import (  # noqa: E402
     strip_message_markers,
 )
 from models import ModelRegistry  # noqa: E402
+from personas import PersonaStore  # noqa: E402
 from relations import RelationMarkers, RelationStore  # noqa: E402
 
 from cards import CardRegistry, normalise  # noqa: E402
@@ -34,11 +35,22 @@ class FakeBot:
     def __init__(self, db: Path, cards_db: Path):
         self.config = SimpleNamespace(models=SimpleNamespace(database=str(db)))
         self.cards = CardRegistry(cards_db)
+        self.personas = PersonaStore(cards_db, self.cards)
         self.stickers = None
         self.relations = None
         self.sent: list[str] = []
         self.reloads = 0
         self.card_reloads = 0
+
+    async def switch_card(self, event, record) -> dict:
+        scope = getattr(event, 'message_type', 'private')
+        group_id = getattr(event, 'group_id', None)
+        conversation = f'group:{group_id}' if scope == 'group' and group_id else f'private:{event.user_id}'
+        job = self.personas.enqueue(conversation, record, actor=str(event.user_id))
+        if job['phase'] == 'queued':
+            self.personas.bind(job['id'], 0)
+            self.personas.update(job['id'], phase='complete', announcement='notice')
+        return self.personas.job(job['id'])
 
     def is_admin(self, user_id: int) -> bool:
         return user_id == 1
@@ -81,6 +93,7 @@ class RelationCommandTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.store.close()
+        self.bot.personas.close()
         self.bot.cards.close()
         self.tmp.cleanup()
 
@@ -205,6 +218,7 @@ class CommandRouterTests(unittest.TestCase):
     def tearDown(self) -> None:
         if self.bot.stickers is not None:
             self.bot.stickers.close()
+        self.bot.personas.close()
         self.bot.cards.close()
         self.tmp.cleanup()
 
@@ -319,19 +333,21 @@ class CommandRouterTests(unittest.TestCase):
         self.assertIn("小林", text)
         self.assertIn(f"* #{self.a.id} 阿杜", text)
 
-    def test_card_use_by_id_reloads(self) -> None:
+    def test_card_use_by_id_is_scoped_without_reload(self) -> None:
         self.run_command(f"/card use {self.b.id}")
-        self.assertEqual(self.active_id(), self.b.id)
-        self.assertEqual(self.bot.card_reloads, 1)
-        self.assertIn("已切换角色卡", self.bot.sent[0])
+        self.assertEqual(self.active_id(), self.a.id)
+        self.assertEqual(self.bot.personas.effective('private:1').record.id, self.b.id)
+        self.assertEqual(self.bot.personas.effective('group:42').record.id, self.a.id)
+        self.assertEqual(self.bot.card_reloads, 0)
 
     def test_card_use_by_name(self) -> None:
         self.run_command("/card use 小林")
-        self.assertEqual(self.active_id(), self.b.id)
+        self.assertEqual(self.bot.personas.effective('private:1').record.id, self.b.id)
+        self.assertEqual(self.active_id(), self.a.id)
 
     def test_card_use_already_active(self) -> None:
         self.run_command(f"/card use {self.a.id}")
-        self.assertIn("当前已经是", self.bot.sent[0])
+        self.assertIn("当前会话已经是", self.bot.sent[0])
         self.assertEqual(self.bot.card_reloads, 0)
 
     def test_card_use_unknown_lists_candidates(self) -> None:

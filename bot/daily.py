@@ -757,11 +757,13 @@ class DailyReporter:
         *,
         settings: DailySettings | None = None,
         ready: Callable[[], bool] | None = None,
+        deliver: Callable[[DayStats], Awaitable[str]] | None = None,
     ):
         self.store = store
         self.memory_db = str(memory_db)
         self._send = send
         self._generate = generate
+        self._deliver = deliver
         self.settings = settings or DailySettings()
         self._ready = ready
         self._stop = asyncio.Event()
@@ -813,6 +815,13 @@ class DailyReporter:
             commentary = fallback_commentary(stats)
         return render_report(stats, commentary)
 
+    async def _compose_and_send(self, stats: DayStats) -> str:
+        if self._deliver is not None:
+            return await self._deliver(stats)
+        text = await self._compose(stats)
+        await self._send(stats.chat_type, stats.chat_id, text)
+        return text
+
     async def tick(self, now: datetime) -> int:
         """Send due reports; returns how many were delivered (tests use this)."""
         if self._ready is not None and not self._ready():
@@ -853,11 +862,8 @@ class DailyReporter:
                 )
                 if stats is None:
                     continue
-                text = await self._compose(stats)
                 try:
-                    await self._send(
-                        conversation.chat_type, conversation.chat_id, text
-                    )
+                    text = await self._compose_and_send(stats)
                 except Exception:  # noqa: BLE001 - retried within the late window
                     log.exception(
                         "daily report send failed for %s",
@@ -907,8 +913,7 @@ class DailyReporter:
                 chat_id=stats.chat_id,
                 messages=stats.total,
             )
-            text = await self._compose(stats)
-            await self._send(conversation.chat_type, conversation.chat_id, text)
+            text = await self._compose_and_send(stats)
             self.store.mark_sent(
                 conversation, day, messages=stats.total, text=text
             )

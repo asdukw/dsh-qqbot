@@ -72,7 +72,7 @@ HELP = """可用命令:
 /help           显示帮助"""
 
 CARD_HELP = """/card                     列出角色卡
-/card use <id|名称>        切换角色卡（立即生效）
+/card use <id|名称>        仅切换当前会话（预告后发送开场白）
 /card show <id|名称>       查看详情
 /card search <关键词>      在角色库中搜索
 /card install <url|路径>   从 URL 或服务器路径安装；
@@ -268,6 +268,12 @@ class CommandRouter:
 
     # ------------------------------------------------------------ cards
 
+    def _current_card(self, event: Any) -> CardRecord:
+        scope = getattr(event, 'message_type', 'private')
+        group_id = getattr(event, 'group_id', None)
+        conversation_id = f"group:{group_id}" if scope == 'group' and group_id else f"private:{event.user_id}"
+        return self.bot.personas.effective(conversation_id).record
+
     async def _card(self, event: Any, args: list[str]) -> None:
         registry = self.bot.cards
         action = args[0].lower() if args else "list"
@@ -276,7 +282,7 @@ class CommandRouter:
 
         if action in ("list", "ls"):
             await self.bot.send_text(
-                event, self._render_cards(registry.list(), f"角色卡 (* = 当前，共 {registry.count()} 张):")
+                event, self._render_cards(registry.list(), f"角色卡 (* = 全局默认，共 {registry.count()} 张；本会话: {self._current_card(event).display_name}):")
             )
         elif action in ("search", "find"):
             if not target:
@@ -309,22 +315,17 @@ class CommandRouter:
         if record is None:
             await self.bot.send_text(event, await self._not_found(target))
             return
-        if record.is_active:
-            await self.bot.send_text(event, f"当前已经是 #{record.id} {record.display_name}")
-            return
         try:
-            self.bot.cards.use(record.id)
-        except ValueError as exc:
-            await self.bot.send_text(event, str(exc))
+            job = await self.bot.switch_card(event, record)
+        except (ValueError, sqlite3.Error) as exc:
+            await self.bot.send_text(event, f"切换失败: {exc}")
             return
-        if await self.bot.reload_card():
+        if job['phase'] != 'complete':
             await self.bot.send_text(
-                event, f"已切换角色卡: #{record.id} {record.display_name}（立即生效）"
+                event, f"切换任务 {job['id']}: {job['phase']}" + chr(10) + str(job['error'])
             )
-        else:
-            await self.bot.send_text(
-                event, f"已切换到 #{record.id}，但加载失败，详见日志"
-            )
+        elif not job['announcement']:
+            await self.bot.send_text(event, f"当前会话已经是 #{record.id} {record.display_name}")
 
     async def _show_card(self, event: Any, target: str) -> None:
         if not target:
@@ -341,7 +342,7 @@ class CommandRouter:
             return
         data = card.data
         lines = [
-            f"#{record.id} {record.display_name}" + ("（当前）" if record.is_active else ""),
+            f"#{record.id} {record.display_name}" + ("（全局默认）" if record.is_active else ""),
             f"来源: {record.source_kind} {record.source or '-'}",
             f"标签: {', '.join(record.tags) or '-'}",
             f"别名: {', '.join(record.aliases) or '-'}",
@@ -430,7 +431,7 @@ class CommandRouter:
             if not name:
                 await self.bot.send_text(event, "用法: /card alias add <名称>")
                 return
-            record = registry.active()
+            record = self._current_card(event)
             if record is None:
                 await self.bot.send_text(event, "还没有激活的角色卡。")
                 return
@@ -451,7 +452,7 @@ class CommandRouter:
             if not name:
                 await self.bot.send_text(event, "用法: /card alias remove <名称>")
                 return
-            record = registry.active()
+            record = self._current_card(event)
             if record is None:
                 await self.bot.send_text(event, "还没有激活的角色卡。")
                 return
@@ -478,14 +479,14 @@ class CommandRouter:
                 await self.bot.send_text(event, await self._not_found(target))
                 return
         else:
-            record = registry.active()
+            record = self._current_card(event)
             if record is None:
                 await self.bot.send_text(event, "还没有激活的角色卡。")
                 return
         await self.bot.send_text(
             event,
             f"#{record.id} {record.display_name}"
-            + ("（当前）" if record.is_active else "")
+            + ("（全局默认）" if record.is_active else "")
             + f"\n名称: {record.name}"
             + f"\n昵称: {record.nickname or '-'}"
             + f"\n别名: {', '.join(record.aliases) or '-'}"

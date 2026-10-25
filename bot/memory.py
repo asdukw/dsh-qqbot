@@ -176,18 +176,18 @@ class Memory:
             int(created_at if created_at is not None else time.time()),
         )
 
-    def _history_sync(self, conversation_id: str, limit: int) -> list[dict[str, str]]:
+    def _history_sync(self, conversation_id: str, limit: int, after_id: int = 0) -> list[dict[str, str]]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT role, content FROM messages WHERE conversation_id = ? "
+                "SELECT role, content FROM messages WHERE conversation_id = ? AND id > ? "
                 "ORDER BY id DESC LIMIT ?",
-                (conversation_id, limit),
+                (conversation_id, after_id, limit),
             ).fetchall()
         rows.reverse()
         return [{"role": role, "content": content} for role, content in rows]
 
-    async def history(self, conversation_id: str, limit: int) -> list[dict[str, str]]:
-        return await asyncio.to_thread(self._history_sync, conversation_id, limit)
+    async def history(self, conversation_id: str, limit: int, *, after_id: int = 0) -> list[dict[str, str]]:
+        return await asyncio.to_thread(self._history_sync, conversation_id, limit, after_id)
 
     def _caption_get_sync(self, digest: str) -> str:
         digest = str(digest or "").strip()
@@ -231,12 +231,12 @@ class Memory:
         )
 
     def _recall_sync(
-        self, conversation_id: str, query: str, limit: int
+        self, conversation_id: str, query: str, limit: int, after_id: int = 0
     ) -> list[tuple[str, str, int]]:
         # The trigram tokenizer only indexes 3-character sequences.
         terms = [term for term in recall_terms(query) if len(term) >= 3]
         if not terms:
-            return self._like_sync(conversation_id, query, limit)
+            return self._like_sync(conversation_id, query, limit, after_id)
         match = " OR ".join(f'"{term}"' for term in terms)
         rows = None
         with self._lock:
@@ -244,18 +244,18 @@ class Memory:
                 rows = self._db.execute(
                     "SELECT m.role, m.content, m.created_at "
                     "FROM messages_fts f JOIN messages m ON m.id = f.rowid "
-                    "WHERE messages_fts MATCH ? AND m.conversation_id = ? "
+                    "WHERE messages_fts MATCH ? AND m.conversation_id = ? AND m.id > ? "
                     "ORDER BY rank LIMIT ?",
-                    (match, conversation_id, limit),
+                    (match, conversation_id, after_id, limit),
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = None
         if rows is None:
-            return self._like_sync(conversation_id, query, limit)
+            return self._like_sync(conversation_id, query, limit, after_id)
         return [(row[0], row[1], int(row[2])) for row in rows]
 
     def _like_sync(
-        self, conversation_id: str, query: str, limit: int
+        self, conversation_id: str, query: str, limit: int, after_id: int = 0
     ) -> list[tuple[str, str, int]]:
         needle = f"%{query.strip()[:40]}%"
         if needle == "%%":
@@ -263,17 +263,17 @@ class Memory:
         with self._lock:
             rows = self._db.execute(
                 "SELECT role, content, created_at FROM messages "
-                "WHERE conversation_id = ? AND content LIKE ? "
+                "WHERE conversation_id = ? AND id > ? AND content LIKE ? "
                 "ORDER BY id DESC LIMIT ?",
-                (conversation_id, needle, limit),
+                (conversation_id, after_id, needle, limit),
             ).fetchall()
         return [(row[0], row[1], int(row[2])) for row in rows]
 
     async def recall(
-        self, conversation_id: str, query: str, limit: int = 3
+        self, conversation_id: str, query: str, limit: int = 3, *, after_id: int = 0
     ) -> list[tuple[str, str, int]]:
         return await asyncio.to_thread(
-            self._recall_sync, conversation_id, query, max(1, min(limit, 10))
+            self._recall_sync, conversation_id, query, max(1, min(limit, 10)), after_id
         )
 
     def _count_sync(self, conversation_id: str) -> int:
@@ -286,6 +286,14 @@ class Memory:
 
     async def count(self, conversation_id: str) -> int:
         return await asyncio.to_thread(self._count_sync, conversation_id)
+
+    def last_id(self, conversation_id: str) -> int:
+        with self._lock:
+            row = self._db.execute(
+                'SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?',
+                (conversation_id,),
+            ).fetchone()
+        return int(row[0])
 
     def close(self) -> None:
         with self._lock:
