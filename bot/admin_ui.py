@@ -9,9 +9,12 @@ from ADMIN_UI_PASSWORD with an HMAC-signed session cookie.
 Every page reads SQLite directly. The model page is the exception: it can add
 providers and models through authenticated ``POST /api/models/*`` endpoints,
 which write through ``ModelRegistry`` (the same code the bot uses). The
-overview aggregates counts, a day-by-day trend and alerts; ``/api/models``,
-``/api/cards``, ``/api/tasks``, ``/api/feeds``, ``/api/stickers`` and
-``/api/system`` each expose one page's data;
+approval page also writes: ``POST /api/requests/action`` queues an approve or
+reject decision in ``approvals.db``, and the bot worker executes it through
+NapCat. The overview aggregates counts, a day-by-day trend and alerts;
+``/api/models``, ``/api/cards``, ``/api/tasks``, ``/api/feeds``,
+``/api/stickers``, ``/api/requests`` and ``/api/system`` each expose one
+page's data;
 ``/api/cards/<id>`` returns one card's full V3 payload for the detail view;
 ``/api/stickers/<id>/image`` streams a sticker file (``?thumb=1`` for a
 bounded JPEG thumbnail) so the panel can show the images themselves.
@@ -48,6 +51,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from admin_insights import clean_conversation, fun_data, usage_data
+from approvals import ApprovalRecord, ApprovalStore
 from models import (
     BUILTIN_PROVIDERS,
     PROVIDER_PRESETS,
@@ -160,6 +164,11 @@ def db_paths(config: dict[str, Any]) -> dict[str, str]:
         ),
         "usage": str(
             (config.get("usage") or {}).get("database", "/var/lib/qqbot/usage.db")
+        ),
+        "approvals": str(
+            (config.get("approvals") or {}).get(
+                "database", "/var/lib/qqbot/approvals.db"
+            )
         ),
     }
 
@@ -1096,6 +1105,81 @@ def tasks_data(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def approvals_data(config: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool((config.get("approvals") or {}).get("enabled", True))
+    path = db_paths(config)["approvals"]
+    if not enabled or not Path(path).is_file():
+        return {
+            "generated_at": int(time.time()),
+            "enabled": enabled,
+            "pending": 0,
+            "requests": [],
+        }
+    try:
+        store = ApprovalStore(path, readonly=True)
+    except (OSError, sqlite3.Error):
+        return {
+            "generated_at": int(time.time()),
+            "enabled": enabled,
+            "pending": 0,
+            "requests": [],
+        }
+    try:
+        records = store.list(limit=200)
+        pending = store.active_count()
+    except sqlite3.Error:
+        records = []
+        pending = 0
+    finally:
+        store.close()
+    return {
+        "generated_at": int(time.time()),
+        "enabled": enabled,
+        "pending": pending,
+        "requests": [_approval_payload(record) for record in records],
+    }
+
+
+def _approval_payload(record: ApprovalRecord) -> dict[str, Any]:
+    """Public shape for the admin page; the OneBot flag stays server-side."""
+    return {
+        "id": record.id,
+        "kind": record.kind,
+        "user_id": record.user_id,
+        "group_id": record.group_id,
+        "group_name": record.group_name,
+        "requester_name": record.requester_name,
+        "comment": record.comment,
+        "status": record.status,
+        "action": record.action,
+        "error": record.error,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "handled_at": record.handled_at,
+    }
+
+
+def queue_approval(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Queue an approve/reject decision; the bot worker executes it."""
+    try:
+        request_id = int(payload.get("id") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("id 必须是数字") from exc
+    if request_id <= 0:
+        raise ValueError("缺少请求 id")
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in ("approve", "reject"):
+        raise ValueError("action 必须是 approve 或 reject")
+    if not bool((config.get("approvals") or {}).get("enabled", True)):
+        raise ValueError("审批功能未启用（[approvals] enabled = false）")
+    store = ApprovalStore(db_paths(config)["approvals"])
+    try:
+        record = store.queue(request_id, action)
+    finally:
+        store.close()
+    return _approval_payload(record)
+
+
 def feeds_data(config: dict[str, Any]) -> dict[str, Any]:
     path = db_paths(config)["feeds"]
     feeds = []
@@ -1428,6 +1512,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/tasks": tasks_data,
             "/api/feeds": feeds_data,
             "/api/stickers": stickers_data,
+            "/api/requests": approvals_data,
         }
         if path in resources:
             if not self._api_guard():
@@ -1609,6 +1694,24 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             except ProviderModelsError as exc:
                 self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, result)
+            return
+
+        if path == "/api/requests/action":
+            if not self._api_guard() or not self._mutation_guard():
+                return
+            try:
+                result = queue_approval(self.config, self._read_payload())
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except (OSError, sqlite3.Error) as exc:
+                log.exception("approval action failed")
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": f"写入失败: {exc}"},
+                )
                 return
             self._send_json(HTTPStatus.OK, result)
             return

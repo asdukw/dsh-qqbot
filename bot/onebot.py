@@ -39,6 +39,20 @@ class PokeEvent:
 
 
 @dataclass
+class RequestEvent:
+    """A friend request or group invitation/join request (post_type=request)."""
+
+    kind: str  # friend | group_invite | group_add
+    flag: str
+    user_id: int
+    group_id: int | None = None
+    group_name: str = ""
+    requester_name: str = ""
+    comment: str = ""
+    received_at: float = 0.0
+
+
+@dataclass
 class MessageEvent:
     message_type: str
     user_id: int
@@ -162,6 +176,66 @@ class MessageParser:
             return None
         return PokeEvent(user_id=user_id, target_id=target_id, group_id=group_id)
 
+    def parse_request(self, event: dict) -> RequestEvent | None:
+        """Parse OneBot 11 friend/group request events.
+
+        ``request_type=friend`` is a friend request. ``request_type=group``
+        with ``sub_type=invite`` means the bot was invited to a group;
+        ``sub_type=add`` is someone asking to join a group. NapCat emits the
+        standard OneBot 11 shape, so no vendor-specific fields are required.
+        """
+        if event.get("post_type") != "request":
+            return None
+        request_type = str(event.get("request_type") or "").strip().lower()
+        try:
+            user_id = int(event.get("user_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        flag = str(event.get("flag") or "").strip()
+        if not user_id or not flag:
+            return None
+        comment = " ".join(str(event.get("comment") or "").split())[:500]
+        raw_sender = event.get("sender")
+        sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
+        requester_name = " ".join(
+            str(
+                event.get("nickname")
+                or sender.get("nickname")
+                or sender.get("card")
+                or ""
+            ).split()
+        )[:100]
+
+        group_id: int | None = None
+        group_name = ""
+        if request_type in ("friend", "friend_request"):
+            kind = "friend"
+        elif request_type in ("group", "group_request"):
+            try:
+                group_id = int(event.get("group_id") or 0)
+            except (TypeError, ValueError):
+                return None
+            if not group_id:
+                return None
+            sub_type = str(event.get("sub_type") or "add").strip().lower()
+            kind = "group_invite" if sub_type == "invite" else "group_add"
+            group_name = " ".join(
+                str(event.get("group_name") or "").split()
+            )[:100]
+        else:
+            return None
+
+        return RequestEvent(
+            kind=kind,
+            flag=flag[:200],
+            user_id=user_id,
+            group_id=group_id,
+            group_name=group_name,
+            requester_name=requester_name,
+            comment=comment,
+            received_at=time.time(),
+        )
+
     def _extract_text(
         self, message: Any
     ) -> tuple[str, bool, list[str], int | None, list[str]]:
@@ -250,10 +324,12 @@ class OneBotWSClient:
         config: OneBotConfig,
         on_message: Callable[[MessageEvent], Awaitable[None]],
         on_notice: Callable[[dict], Awaitable[None]] | None = None,
+        on_request: Callable[[dict], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.on_message = on_message
         self.on_notice = on_notice
+        self.on_request = on_request
         self._parser = MessageParser(config.self_id)
         self._ws: Any = None
         self._pending: dict[str, asyncio.Future] = {}
@@ -321,6 +397,9 @@ class OneBotWSClient:
                     elif self.on_notice is not None and payload.get("post_type") == "notice":
                         task = asyncio.create_task(self._run_notice(payload))
                         task.add_done_callback(self._log_handler_error)
+                    elif self.on_request is not None and payload.get("post_type") == "request":
+                        task = asyncio.create_task(self._run_request(payload))
+                        task.add_done_callback(self._log_handler_error)
         finally:
             self._connected.clear()
             self._ws = None
@@ -350,6 +429,9 @@ class OneBotWSClient:
     def parse_notice(self, payload: dict) -> PokeEvent | None:
         return self._parser.parse_notice(payload)
 
+    def parse_request(self, payload: dict) -> RequestEvent | None:
+        return self._parser.parse_request(payload)
+
     async def _run_notice(self, payload: dict) -> None:
         if self.on_notice is None:
             return
@@ -357,6 +439,14 @@ class OneBotWSClient:
             await self.on_notice(payload)
         except Exception:  # noqa: BLE001 - one bad notice must not kill the loop
             log.exception("notice handler failed")
+
+    async def _run_request(self, payload: dict) -> None:
+        if self.on_request is None:
+            return
+        try:
+            await self.on_request(payload)
+        except Exception:  # noqa: BLE001 - one bad request must not kill the loop
+            log.exception("request handler failed")
 
     async def _run_handler(self, message: MessageEvent) -> None:
         try:

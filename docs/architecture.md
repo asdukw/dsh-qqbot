@@ -30,6 +30,7 @@
 - 把 QQ 会话映射成稳定的 DSH `session_id`；
 - 角色卡库（SQLite）与热切换、系统提示词构建、世界书落盘；
 - 长回复拆分、发送失败日志；
+- 好友/群请求的接收、去重和审批执行（`approvals.py`）；
 - 本地 SQLite 消息审计（不是 DSH 的上下文来源）。
 
 不负责：模型调用、历史管理、工具执行、画像存储。这些在 DSH 里。
@@ -215,6 +216,13 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 - 自然语言管理：同一套标记协议还支持 `[定时列表]`、`[定时删除: 关键词]`、`[定时暂停: 关键词]`、`[定时恢复: 关键词]`；adapter 只在当前会话的任务里按 id/关键词匹配，非管理员直接剥掉标记。
 - 文案：`mode=fixed` 原样发送 `message`；`mode=generate` 到点用当前角色卡的系统提示词让模型现写一句，失败回落到 `message`。
 - 限制：`max_tasks` 总数、`max_per_chat` 每会话上限；`interval` 最小 5 分钟；消息最长 300 字；一次性任务迟到超过 12 小时直接丢弃而不是补发。
+
+## 好友/群请求审批（`bot/approvals.py`）
+
+- NapCat 通过 OneBot 11 推送 `post_type=request`：好友请求 `request_type=friend`；群邀请 `request_type=group, sub_type=invite`；入群申请 `request_type=group, sub_type=add`。`MessageParser.parse_request()` 统一转成 `RequestEvent`，adapter 写入 `approvals.db`，按 `(kind, flag)` 唯一去重。
+- 管理面板「审批」页读取 `approval_requests` 表，`POST /api/requests/action` 只把决定写成 `queued`（登录 + JSON + 同源校验，与模型写入接口一致）。
+- `ApprovalWorker` 在 bot 进程里每 `[approvals] check_seconds` 抢一次 `queued` 行（`BEGIN IMMEDIATE` + `executing`），通过 bot 已有的 OneBot WS 执行 `set_friend_add_request` 或 `set_group_add_request`（群邀请带 `sub_type=invite`，入群申请带 `sub_type=add`），然后写回 `approved` / `rejected` / `failed`。Admin UI 不需要 NapCat 的 HTTP 端口或 token。
+- 失败可重试；bot 重启时 `reset_executing()` 把中断的 `executing` 行重新排队。表里保留 `flag`、申请人/群、验证消息、时间、错误，供面板展示和排障。
 
 ## 每日日报（`bot/daily.py`）
 

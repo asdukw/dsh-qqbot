@@ -15,6 +15,7 @@
 - **戳一戳**：被戳会像被叫到一样回应（8 秒冷却）；群里别人被戳会作为一条上下文 `[戳了戳 某人]` 记下来；
 - **定时任务**：管理员直接说"每天早上8点提醒我起床"即可创建，说"把喝水那个删了/暂停"也能管理（模型输出 `[定时: ...]` / `[定时列表|删除|暂停|恢复]`，adapter 解析 + Pydantic 校验）；任务绑定创建时的群/私聊，可显式选 here/private/group；支持 fixed/generate 两种文案（generate 到点按人设现写）；`/task list|delete|pause|resume|run`；
 - **每日日报**：每天 24:00 给当天活跃的群发一份趣味总结——水王榜、首条/末条、热词、复读现场、今日金句、今日宜忌，再加一段按角色卡口吻写的锐评；私聊可在 `[daily]` 里开关；`/daily [YYYY-MM-DD]` 可手动预览/补发；
+- **入群/好友审批**：NapCat 推送的好友请求、群邀请和入群申请会进入管理面板「审批」页；管理员点同意/拒绝后由 bot 通过 OneBot 执行，`approvals.db` 负责去重、状态和失败重试；
 - **联网搜索**：DSH 官方的 `web_search` / `web_fetch` 工具；搜索 provider 用免密钥后端（与 OpenCode 自带 websearch 同类），不需要额外 API key；
 - **角色卡**：SillyTavern Character Card V1 / V2 / V3，支持 `.json` 和 `.png`（读取 `ccv3` → `chara` → `iTXt`）；SQLite 角色库，`/card search/install/use` 热切换
 - **DSH session**：每个 QQ 会话一份持久化 JSONL 历史，自动上下文压缩；`session-history` 插件让模型按需读取旧 generation
@@ -139,7 +140,7 @@ sudo journalctl -u qqbot -f
 
 - **仪表盘**：今日消息 / Token、7 / 30 天趋势、订阅异常、最近消息、当前模型与角色卡；
 - **对话**：聊天分析（今日发言排行、词云、会话分布）；词云用前端 SVG 螺旋布局，字号 = 覆盖消息数，不依赖额外图表库；
-- **自动化**：定时任务、订阅推送；
+- **自动化**：审批、定时任务、订阅推送；
 - **内容**：模型（供应商 → 模型两级管理，可新增、编辑、启停、切换当前模型）、角色卡、表情库；
 - **用量**：Token 用量，支持 7 / 30 / 90 天与按会话筛选；
 - **系统**：数据库路径与大小、DSH 路径、面板配置。
@@ -147,7 +148,7 @@ sudo journalctl -u qqbot -f
 Python 端只提供 JSON API 和静态文件：
 
 - 本地构建：`cd admin && npm install && npm run build`；产物在 `admin/dist/`（已随仓库提交，便于纯 Python 部署）。
-- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。读取接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/models`、`/api/cards`（点开单张卡时用 `/api/cards/<id>` 取完整 V3 payload）、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。模型页的写入接口（需登录、JSON、同源）：`POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
+- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。读取接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/models`、`/api/cards`（点开单张卡时用 `/api/cards/<id>` 取完整 V3 payload）、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/requests`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。模型页的写入接口（需登录、JSON、同源）：`POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`；审批页的写入接口是 `POST /api/requests/action`（同样需要登录、JSON 和同源）。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
 - 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
 - 模型页可写，其余页面只读；每 60 秒自动刷新，右上角「刷新」会立即重拉当前页。API Key 直接在供应商表单里填写，保存在 `models.db`（权限 600）且不会回显。
 
@@ -168,6 +169,22 @@ Python 端只提供 JSON API 和静态文件：
 - **去重与补发**：`daily.db` 记录每个 `(会话, 日期)` 的状态（`sent` / `skipped` / `failed`）；重启后在 `max_late_hours`（默认 6 小时）内会自动补发，已发送的不会重复。少于 `min_messages` 的会话标记为 skipped，不打扰冷清群。
 - **配置**：`database`、`enabled`、`hour`、`minute`、`groups`（空 = 所有群）、`private`、`min_messages`、`max_late_hours`、`check_seconds`、`sample_chars`、`max_chars`、`max_attempts`、`min_repeat`、`prompt`（追加的风格提示）。
 - **手动**：管理员在任意群/私聊发 `/daily` 生成昨天的日报，或 `/daily 2026-10-24` 指定日期。手动生成会忽略 `min_messages`。
+
+## 入群/好友审批
+
+NapCat 实现的是 OneBot 11，好友请求和群请求都会以 `post_type=request` 事件推给 adapter：
+
+| 事件 | OneBot 字段 | 页面类型 |
+|---|---|---|
+| 好友请求 | `request_type=friend`，`user_id` / `comment` / `flag` | 好友请求 |
+| 邀请 bot 入群 | `request_type=group`，`sub_type=invite`，`group_id` / `user_id` / `flag` | 群邀请 |
+| 申请加入群 | `request_type=group`，`sub_type=add`，`group_id` / `user_id` / `comment` / `flag` | 入群申请 |
+
+- adapter 解析后写入 `approvals.db`，按 `(kind, flag)` 去重；重复推送不会产生多条记录。
+- 管理面板「审批」页列出待处理 / 全部请求，显示申请人、群、验证消息、状态和执行错误。
+- 点「同意」/「拒绝」只是把决定写成 `queued`；bot 进程里的 worker 每 `[approvals] check_seconds`（默认 3 秒）通过现有 OneBot WS 调用 `set_friend_add_request` / `set_group_add_request`，成功后标记 `approved` / `rejected`，失败标记 `failed`（可重试）。这样 Admin UI 不需要额外的 NapCat 端口或 token。
+- 状态：`pending` → `queued` → `executing` → `approved` / `rejected` / `failed`。bot 重启时会把中断的 `executing` 重新排队。
+- 配置：`[approvals] enabled`、`database`、`check_seconds`；事件本身不需要改 NapCat 配置。
 
 ## 角色卡
 

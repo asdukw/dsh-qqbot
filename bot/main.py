@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from admins import parse_admin_ids
+from approvals import ApprovalStore, ApprovalWorker
 from card_fetch import CardFetchError, fetch_card_bytes_sync
 from commands import CommandRouter, strip_leading_mention, strip_message_markers
 from conversations import ConversationStore
@@ -313,6 +314,15 @@ class DailySection(DailySettings):
 
 
 @dataclass
+class ApprovalSection:
+    # Friend/group request inbox. The bot stores incoming OneBot "request"
+    # events; the admin UI queues decisions and the bot executes them.
+    enabled: bool = True
+    database: str = "/var/lib/qqbot/approvals.db"
+    check_seconds: float = 3.0
+
+
+@dataclass
 class UsageSection:
     # Token ledger + per-message analytics used by the admin UI.
     database: str = "/var/lib/qqbot/usage.db"
@@ -331,6 +341,7 @@ class AppConfig:
     stickers: StickersSection = field(default_factory=StickersSection)
     tasks: TasksSection = field(default_factory=TasksSection)
     daily: DailySection = field(default_factory=DailySection)
+    approvals: ApprovalSection = field(default_factory=ApprovalSection)
     voice: VoiceSection = field(default_factory=VoiceSection)
     meme: MemeSection = field(default_factory=MemeSection)
     feeds: FeedsSection = field(default_factory=FeedsSection)
@@ -539,6 +550,16 @@ def load_config(path: str | Path) -> AppConfig:
         prompt=str(daily_raw.get("prompt") or ""),
     )
 
+    approvals_raw = _section(table, "approvals")
+    approvals = ApprovalSection(
+        database=(
+            os.environ.get("APPROVALS_DB", "").strip()
+            or str(approvals_raw.get("database", "/var/lib/qqbot/approvals.db"))
+        ),
+        enabled=bool(approvals_raw.get("enabled", True)),
+        check_seconds=max(1.0, float(approvals_raw.get("check_seconds", 3.0))),
+    )
+
     usage_raw = _section(table, "usage")
     usage = UsageSection(
         database=(
@@ -581,6 +602,7 @@ def load_config(path: str | Path) -> AppConfig:
         stickers=stickers,
         tasks=tasks,
         daily=daily,
+        approvals=approvals,
         voice=voice,
         meme=meme,
         feeds=feeds,
@@ -785,6 +807,7 @@ class Bot:
         usage: UsageStore | None = None,
         relations: RelationStore | None = None,
         daily: DailyStore | None = None,
+        approvals: ApprovalStore | None = None,
     ):
         self.config = config
         self.cards = cards
@@ -792,6 +815,7 @@ class Bot:
         self.tasks = tasks
         self.feeds = feeds
         self.relations = relations
+        self.approvals = approvals
         self.memory = memory
         self.client = client
         self.dsh = dsh
@@ -820,7 +844,13 @@ class Bot:
             )
         self.conversations = conversations
         self.group_context = GroupContextBuffer(config.bot.group_context_messages)
-        self.onebot = OneBotWSClient(config.onebot, self.handle, self.handle_notice)
+        self.onebot = OneBotWSClient(
+            config.onebot,
+            self.handle,
+            self.handle_notice,
+            on_request=self.handle_request,
+        )
+        self._approval_worker: ApprovalWorker | None = None
         self.daily_store = daily
         self._daily: DailyReporter | None = None
         if daily is not None:
@@ -891,6 +921,8 @@ class Bot:
             await self._feed_poller.stop()
         if self._daily is not None:
             await self._daily.stop()
+        if self._approval_worker is not None:
+            await self._approval_worker.stop()
         await self.onebot.close()
         if self.dsh is not None:
             self.dsh.close()
@@ -912,6 +944,8 @@ class Bot:
             self.feeds.close()
         if self.daily_store is not None:
             self.daily_store.close()
+        if self.approvals is not None:
+            self.approvals.close()
 
     async def handle(self, event: MessageEvent) -> None:
         received = event.received_at or time.time()
@@ -1015,6 +1049,38 @@ class Bot:
                 received_at=time.time(),
             )
         )
+
+    async def handle_request(self, payload: dict) -> None:
+        """Store friend/group requests for the admin approval page."""
+        store = self.approvals
+        if store is None:
+            return
+        event = self.onebot.parse_request(payload)
+        if event is None:
+            return
+        try:
+            record, created = await asyncio.to_thread(
+                store.add,
+                kind=event.kind,
+                flag=event.flag,
+                user_id=event.user_id,
+                group_id=event.group_id,
+                group_name=event.group_name,
+                requester_name=event.requester_name,
+                comment=event.comment,
+                created_at=int(event.received_at) if event.received_at else None,
+            )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            log.warning("cannot store approval request: %s", exc)
+            return
+        if created:
+            log.info(
+                "approval request #%s kind=%s user=%s group=%s",
+                record.id,
+                record.kind,
+                record.user_id,
+                record.group_id or "-",
+            )
 
     def _addresses_bot(self, event: MessageEvent, text: str) -> bool:
         """Name mentions and quote-replies to the bot count as being addressed.
@@ -1183,6 +1249,22 @@ class Bot:
             self.config.daily.minute,
             groups,
             "on" if self.config.daily.private else "off",
+        )
+
+    def start_approvals(self) -> None:
+        if self.approvals is None or not self.config.approvals.enabled:
+            return
+        worker = ApprovalWorker(
+            self.approvals,
+            self.onebot.call,
+            check_seconds=self.config.approvals.check_seconds,
+            ready=lambda: self.onebot.connected,
+        )
+        self._approval_worker = worker
+        worker.start()
+        log.info(
+            "approval worker started (%d active request(s))",
+            self.approvals.active_count(),
         )
 
     async def _send_daily(self, chat_type: str, chat_id: int, text: str) -> None:
@@ -2846,9 +2928,25 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
         log.error("cannot open the daily report store: %s", exc)
         daily = None
 
+    approvals: ApprovalStore | None
+    try:
+        approvals = (
+            ApprovalStore(config.approvals.database)
+            if config.approvals.enabled
+            else None
+        )
+        if approvals is not None:
+            log.info(
+                "approval store loaded: %d active request(s)",
+                approvals.active_count(),
+            )
+    except (OSError, sqlite3.Error) as exc:
+        log.error("cannot open the approval store: %s", exc)
+        approvals = None
+
     bot = Bot(
         config, cards, memory, client, dsh_client, conversations, stickers, tasks,
-        feeds, usage, relations, daily,
+        feeds, usage, relations, daily, approvals,
     )
     if not bot.refresh_card(force=True):
         log.error("cannot load the active character card")
@@ -2880,6 +2978,7 @@ async def run_ws(config: AppConfig) -> int:
     bot.start_scheduler()
     bot.start_feeds()
     bot.start_daily()
+    bot.start_approvals()
     log.info("bot started (%s via WebSocket)", record.key)
     try:
         await stop.wait()

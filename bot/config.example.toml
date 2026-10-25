@@ -183,6 +183,14 @@ max_attempts = 3            # generation/send retries within the late window
 min_repeat = 3              # messages in a row to call out a 复读现场
 prompt = ""                 # extra style hint appended to the commentary prompt
 
+[approvals]
+# Friend requests, group invitations and group join requests pushed by NapCat
+# as OneBot 11 "request" events. The bot stores them in SQLite; the admin UI
+# queues approve/reject actions and the bot executes them over OneBot.
+enabled = true
+database = "/var/lib/qqbot/approvals.db"
+check_seconds = 3          # how often queued admin decisions are executed
+
 [bot]
 # Admin QQ numbers. The ADMIN_QQ_IDS env var (comma/space separated) wins;
 # this list is the fallback for local runs.

@@ -36,6 +36,7 @@ from admin_ui import (  # noqa: E402
     sticker_target,
     valid_session,
 )
+from approvals import ApprovalStore  # noqa: E402
 from usage import UsageStore  # noqa: E402
 
 # 1×1 transparent PNG: a real file the image endpoint can decode.
@@ -415,6 +416,18 @@ class HttpTests(unittest.TestCase):
             conn.close()
             self.dbs[name] = str(path)
 
+        approvals_path = root / "approvals.db"
+        approval_store = ApprovalStore(approvals_path)
+        self.approval, _ = approval_store.add(
+            kind="friend",
+            flag="flag-1",
+            user_id=123,
+            requester_name="小王",
+            comment="我是小王",
+        )
+        approval_store.close()
+        self.dbs["approvals"] = str(approvals_path)
+
         now = int(time.time())
         conn = sqlite3.connect(self.dbs["models"])
         conn.execute(
@@ -569,6 +582,7 @@ class HttpTests(unittest.TestCase):
                 "directory": str(self.sticker_dir),
             },
             "usage": {"database": str(root / "usage.db"), "retention_days": 90},
+            "approvals": {"database": self.dbs["approvals"]},
             "dsh": {
                 "home": str(root / "dsh-home"),
                 "workspace": str(root / "dsh-workspace"),
@@ -1232,6 +1246,60 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(dbs["memory"]["exists"])
         self.assertGreater(dbs["memory"]["size"], 0)
         self.assertEqual(dbs["usage"]["path"], str(Path(self.tmp.name) / "usage.db"))
+
+    def test_approval_endpoints(self) -> None:
+        self.assertEqual(self.get("/api/requests").status, 401)
+        cookie, _ = self.login()
+
+        response = self.get("/api/requests", cookie)
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode())
+        self.assertEqual(payload["pending"], 1)
+        row = payload["requests"][0]
+        self.assertEqual(row["kind"], "friend")
+        self.assertEqual(row["requester_name"], "小王")
+        self.assertNotIn("flag", row)
+
+        anonymous = self.post(
+            "/api/requests/action", {"id": row["id"], "action": "approve"}
+        )
+        self.assertEqual(anonymous.status, 401)
+
+        bad = self.post(
+            "/api/requests/action",
+            {"id": row["id"], "action": "maybe"},
+            cookie,
+        )
+        self.assertEqual(bad.status, 400)
+
+        approved = self.post(
+            "/api/requests/action",
+            {"id": row["id"], "action": "approve"},
+            cookie,
+        )
+        self.assertEqual(approved.status, 200)
+        result = json.loads(approved.read().decode())
+        self.assertEqual((result["status"], result["action"]), ("queued", "approve"))
+
+        again = self.post(
+            "/api/requests/action",
+            {"id": row["id"], "action": "approve"},
+            cookie,
+        )
+        self.assertEqual(again.status, 200)
+        self.assertEqual(json.loads(again.read().decode())["status"], "queued")
+
+        conflict = self.post(
+            "/api/requests/action",
+            {"id": row["id"], "action": "reject"},
+            cookie,
+        )
+        self.assertEqual(conflict.status, 400)
+
+        after = self.get("/api/requests", cookie)
+        payload = json.loads(after.read().decode())
+        self.assertEqual(payload["pending"], 1)
+        self.assertEqual(payload["requests"][0]["status"], "queued")
 
     def test_usage_and_fun_can_filter_conversation(self) -> None:
         self.assertEqual(self.get("/api/usage?days=7").status, 401)

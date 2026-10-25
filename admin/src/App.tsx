@@ -20,6 +20,7 @@ import FeedsPage from "@/pages/FeedsPage";
 import InsightsPage from "@/pages/InsightsPage";
 import ModelsPage from "@/pages/ModelsPage";
 import OverviewPage from "@/pages/OverviewPage";
+import RequestsPage from "@/pages/RequestsPage";
 import StickersPage from "@/pages/StickersPage";
 import SystemPage from "@/pages/SystemPage";
 import TasksPage from "@/pages/TasksPage";
@@ -51,7 +52,7 @@ function LoginScreen({
               <Waves className="h-7 w-7" />
             </div>
             <CardTitle className="text-xl">大肥鱼 Admin</CardTitle>
-            <CardDescription>QQ bot 运行面板 · 模型可管理</CardDescription>
+            <CardDescription>QQ bot 运行面板 · 模型/审批可管理</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <form className="space-y-3" onSubmit={onSubmit}>
@@ -108,6 +109,8 @@ function Page({
   switch (route) {
     case "insights":
       return <InsightsPage refreshKey={refreshKey} />;
+    case "requests":
+      return <RequestsPage refreshKey={refreshKey} />;
     case "tasks":
       return <TasksPage refreshKey={refreshKey} />;
     case "feeds":

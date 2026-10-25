@@ -71,6 +71,38 @@ export type FunData = {
   conversation_total: number;
 };
 
+export type ApprovalKind = "friend" | "group_invite" | "group_add";
+export type ApprovalStatus =
+  | "pending"
+  | "queued"
+  | "executing"
+  | "approved"
+  | "rejected"
+  | "failed";
+
+export type ApprovalRow = {
+  id: number;
+  kind: ApprovalKind;
+  user_id: number;
+  group_id: number | null;
+  group_name: string;
+  requester_name: string;
+  comment: string;
+  status: ApprovalStatus;
+  action: "approve" | "reject" | "";
+  error: string;
+  created_at: number;
+  updated_at: number;
+  handled_at: number;
+};
+
+export type ApprovalsData = {
+  generated_at: number;
+  enabled: boolean;
+  pending: number;
+  requests: ApprovalRow[];
+};
+
 export type TrendPoint = {
   day: string;
   messages: number;

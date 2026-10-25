@@ -62,6 +62,64 @@ class MessageParserTests(unittest.TestCase):
         self.assertFalse(parsed.at_me)
         self.assertIsNone(parsed.reply_to)
 
+    def test_friend_request(self) -> None:
+        parsed = self.parser.parse_request({
+            "post_type": "request",
+            "request_type": "friend",
+            "user_id": 12345,
+            "comment": "我是小王",
+            "flag": "friend-flag",
+        })
+        assert parsed is not None
+        self.assertEqual(parsed.kind, "friend")
+        self.assertEqual(parsed.user_id, 12345)
+        self.assertEqual(parsed.comment, "我是小王")
+        self.assertEqual(parsed.flag, "friend-flag")
+        self.assertIsNone(parsed.group_id)
+
+    def test_group_invite_and_join_request(self) -> None:
+        invite = self.parser.parse_request({
+            "post_type": "request",
+            "request_type": "group",
+            "sub_type": "invite",
+            "group_id": 42,
+            "group_name": "测试群",
+            "user_id": 7,
+            "comment": "来玩",
+            "flag": "invite-flag",
+        })
+        assert invite is not None
+        self.assertEqual(invite.kind, "group_invite")
+        self.assertEqual(invite.group_id, 42)
+        self.assertEqual(invite.group_name, "测试群")
+
+        join = self.parser.parse_request({
+            "post_type": "request",
+            "request_type": "group",
+            "sub_type": "add",
+            "group_id": 43,
+            "user_id": 8,
+            "flag": "add-flag",
+        })
+        assert join is not None
+        self.assertEqual(join.kind, "group_add")
+        self.assertEqual(join.group_id, 43)
+
+    def test_invalid_requests_are_ignored(self) -> None:
+        self.assertIsNone(self.parser.parse_request({"post_type": "message"}))
+        self.assertIsNone(self.parser.parse_request({
+            "post_type": "request", "request_type": "friend", "flag": "",
+            "user_id": 1,
+        }))
+        self.assertIsNone(self.parser.parse_request({
+            "post_type": "request", "request_type": "group", "flag": "x",
+            "user_id": 1,
+        }))
+        self.assertIsNone(self.parser.parse_request({
+            "post_type": "request", "request_type": "unknown", "flag": "x",
+            "user_id": 1,
+        }))
+
     def test_parse_records_receive_time(self) -> None:
         before = time.time()
         parsed = self.parser.parse(event([{"type": "text", "data": {"text": "在吗"}}]))
