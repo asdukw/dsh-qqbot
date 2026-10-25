@@ -182,6 +182,10 @@ class DSHSection:
     image_max_bytes: int = 8 * 1024 * 1024
     image_keep_days: int = 14
     image_max_files: int = 1000
+    # Optional vision captions must never hold a reply hostage: they run in
+    # parallel per image, with a short per-call timeout and one attempt.
+    image_caption_timeout: float = 15.0
+    image_prepare_timeout: float = 30.0
     # DSH session rotation. Generation 0 keeps the historical session id;
     # later generations append -gN. Old JSONL files are never deleted.
     session_rotate_idle_hours: float = 24.0
@@ -392,6 +396,8 @@ def load_config(path: str | Path) -> AppConfig:
         image_max_bytes=max(1024, int(dsh_raw.get("image_max_bytes", 8 * 1024 * 1024))),
         image_keep_days=max(0, int(dsh_raw.get("image_keep_days", 14))),
         image_max_files=max(0, int(dsh_raw.get("image_max_files", 1000))),
+        image_caption_timeout=max(1.0, float(dsh_raw.get("image_caption_timeout", 15.0))),
+        image_prepare_timeout=max(5.0, float(dsh_raw.get("image_prepare_timeout", 30.0))),
         session_rotate_idle_hours=max(0.0, float(dsh_raw.get("session_rotate_idle_hours", 24.0))),
         session_rotate_idle_hours_private=max(0.0, float(dsh_raw.get("session_rotate_idle_hours_private", 168.0))),
         session_rotate_max_hours=max(0.0, float(dsh_raw.get("session_rotate_max_hours", 0.0))),
@@ -908,6 +914,7 @@ class Bot:
             self.daily_store.close()
 
     async def handle(self, event: MessageEvent) -> None:
+        received = event.received_at or time.time()
         if event.sender_name:
             self._names[event.user_id] = event.sender_name
         text = event.text[: self.config.bot.max_input_chars]
@@ -966,6 +973,11 @@ class Bot:
         await self._maybe_reload_model()
         lock = self._locks.setdefault(conversation_id, asyncio.Lock())
         async with lock, self._global:
+            queued = time.time() - received
+            if queued >= 3.0:
+                log.warning(
+                    "reply queued %.1fs: conv=%s", queued, conversation_id
+                )
             await self._reply(conversation_id, event, text)
 
     async def handle_notice(self, payload: dict) -> None:
@@ -1000,6 +1012,7 @@ class Bot:
                 at_me=poke.group_id is not None,
                 sender_name=name,
                 group_id=poke.group_id,
+                received_at=time.time(),
             )
         )
 
@@ -2303,16 +2316,22 @@ class Bot:
             return cached
         uri = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
         try:
-            caption = await self.client.chat([
-                {"role": "system", "content": "你是一个图片描述助手。"},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": self.config.dsh.caption_prompt},
-                        {"type": "image_url", "image_url": {"url": uri}},
-                    ],
-                },
-            ], purpose="image_caption", conversation_id=conversation_id)
+            caption = await self.client.chat(
+                [
+                    {"role": "system", "content": "你是一个图片描述助手。"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self.config.dsh.caption_prompt},
+                            {"type": "image_url", "image_url": {"url": uri}},
+                        ],
+                    },
+                ],
+                purpose="image_caption",
+                conversation_id=conversation_id,
+                timeout=self.config.dsh.image_caption_timeout,
+                attempts=1,
+            )
         except LLMError as exc:
             log.warning("image caption failed: %s", exc)
             return ""
@@ -2335,33 +2354,65 @@ class Bot:
         limit: int = 4,
         conversation_id: str = "",
     ) -> list[PreparedImage]:
-        """Store each image once and return its path plus description."""
-        prepared: list[PreparedImage] = []
+        """Store each image once and return its path plus description.
+
+        Images are prepared concurrently, and each one is bounded by
+        ``[dsh] image_prepare_timeout``. A slow vision model therefore adds at
+        most one timeout to the reply instead of one per image and per retry.
+        """
+        if not urls:
+            return []
+        tasks = [
+            self._prepare_image(raw, conversation_id=conversation_id)
+            for raw in urls[:limit]
+        ]
+        results = await asyncio.gather(*tasks)
+        return [item for item in results if item is not None]
+
+    async def _prepare_image(
+        self, raw: str, *, conversation_id: str = ""
+    ) -> PreparedImage | None:
+        try:
+            return await asyncio.wait_for(
+                self._prepare_image_inner(raw, conversation_id=conversation_id),
+                timeout=self.config.dsh.image_prepare_timeout,
+            )
+        except TimeoutError:
+            log.warning(
+                "image preparation timed out after %.0fs; using the text-only path",
+                self.config.dsh.image_prepare_timeout,
+            )
+            return None
+        except Exception:  # noqa: BLE001 - one bad image must not fail the turn
+            log.exception("image preparation failed")
+            return None
+
+    async def _prepare_image_inner(
+        self, raw: str, *, conversation_id: str = ""
+    ) -> PreparedImage | None:
         store = self._image_store()
-        for raw in urls[:limit]:
-            fetched = await self._fetch_image(raw)
-            if fetched is None:
-                continue
-            data, mime = fetched
-            data, mime = await asyncio.to_thread(_shrink_image, data, mime)
-            try:
-                stored = await asyncio.to_thread(store.save, data, mime)
-            except (OSError, ValueError) as exc:
-                log.warning("cannot store image: %s", exc)
-                continue
-            description = ""
-            if self.config.dsh.image_caption:
-                description = await self._caption_image(
-                    stored, data, mime, conversation_id=conversation_id
-                )
-            prepared.append(PreparedImage(
-                sha1=stored.sha1,
-                relative=stored.relative,
-                mime=mime,
-                description=description,
-                data_uri=f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
-            ))
-        return prepared
+        fetched = await self._fetch_image(raw)
+        if fetched is None:
+            return None
+        data, mime = fetched
+        data, mime = await asyncio.to_thread(_shrink_image, data, mime)
+        try:
+            stored = await asyncio.to_thread(store.save, data, mime)
+        except (OSError, ValueError) as exc:
+            log.warning("cannot store image: %s", exc)
+            return None
+        description = ""
+        if self.config.dsh.image_caption:
+            description = await self._caption_image(
+                stored, data, mime, conversation_id=conversation_id
+            )
+        return PreparedImage(
+            sha1=stored.sha1,
+            relative=stored.relative,
+            mime=mime,
+            description=description,
+            data_uri=f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+        )
 
     def _image_hint(self, images: list[PreparedImage]) -> str:
         """Tell the model where each image went and that it can read it on demand."""
@@ -2462,6 +2513,7 @@ class Bot:
         # Images are stored under the DSH workspace and referenced by text:
         # the model sees a description plus a path, not an image block that
         # would be replayed from the session on every later turn.
+        prep_start = time.time()
         image_urls = self._turn_images(event)
         prompt, context_lines = self._turn_prompt(event, text)
         prompt += await self._recall_block(event, text)
@@ -2476,6 +2528,7 @@ class Bot:
                 )
                 prompt += self._image_hint(prepared)
         image_count = len(prepared) if prepared else len(images)
+        prep_elapsed = time.time() - prep_start
 
         await self.memory.add(conversation_id, "user", text)
         log.info(
@@ -2500,6 +2553,15 @@ class Bot:
 
         await self.memory.add(conversation_id, "assistant", reply)
         await self._send_reply(event, conversation_id, reply)
+        received = event.received_at or prep_start
+        log.info(
+            "reply sent: conv=%s queue=%.1fs prep=%.1fs dsh=%.1fs total=%.1fs",
+            conversation_id,
+            max(0.0, prep_start - received),
+            prep_elapsed,
+            elapsed,
+            time.time() - received,
+        )
 
     async def _reply_llm(self, conversation_id: str, event: MessageEvent, text: str) -> None:
         if not await self.ensure_card() or self._card is None:

@@ -28,6 +28,11 @@ caption_prompt = "用一两句中文客观描述这张图片；其中有文字�
 image_max_bytes = 8388608
 image_keep_days = 14
 image_max_files = 1000
+# Optional vision captions run in parallel per image; a slow model must not
+# delay the reply. Each image is capped at image_prepare_timeout seconds and
+# each caption call gets image_caption_timeout seconds with no retry.
+image_caption_timeout = 15
+image_prepare_timeout = 30
 # DSH session rotation. Generation 0 keeps the historical id; later
 # generations append -gN. Old JSONL files are kept on disk.
 # Groups rotate after this much idle time, or at the first message after

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -60,6 +61,12 @@ class MessageParserTests(unittest.TestCase):
         assert parsed is not None
         self.assertFalse(parsed.at_me)
         self.assertIsNone(parsed.reply_to)
+
+    def test_parse_records_receive_time(self) -> None:
+        before = time.time()
+        parsed = self.parser.parse(event([{"type": "text", "data": {"text": "在吗"}}]))
+        assert parsed is not None
+        self.assertGreaterEqual(parsed.received_at, before)
 
     def test_bare_at_still_produces_an_event(self) -> None:
         parsed = self.parser.parse(event([{"type": "at", "data": {"qq": "999"}}]))
