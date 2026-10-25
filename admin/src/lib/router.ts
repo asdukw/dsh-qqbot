@@ -10,11 +10,13 @@ import {
   Settings2,
   Sparkles,
   Sticker,
+  UserCheck,
 } from "lucide-react";
 
 export type RouteId =
   | "overview"
   | "insights"
+  | "requests"
   | "tasks"
   | "feeds"
   | "models"
@@ -47,6 +49,12 @@ export const ROUTES: RouteMeta[] = [
     label: "聊天分析",
     description: "今天的发言排行、词云与会话分布",
     icon: Sparkles,
+  },
+  {
+    id: "requests",
+    label: "审批",
+    description: "好友请求、群邀请与入群申请",
+    icon: UserCheck,
   },
   {
     id: "tasks",
@@ -97,7 +105,7 @@ const ROUTE_MAP = new Map(ROUTES.map((route) => [route.id, route]));
 export const NAV_GROUPS: NavGroup[] = [
   { label: "概览", items: [ROUTE_MAP.get("overview")!] },
   { label: "对话", items: [ROUTE_MAP.get("insights")!] },
-  { label: "自动化", items: [ROUTE_MAP.get("tasks")!, ROUTE_MAP.get("feeds")!] },
+  { label: "自动化", items: [ROUTE_MAP.get("requests")!, ROUTE_MAP.get("tasks")!, ROUTE_MAP.get("feeds")!] },
   { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("stickers")!] },
   { label: "用量", items: [ROUTE_MAP.get("usage")!] },
   { label: "系统", items: [ROUTE_MAP.get("system")!] },

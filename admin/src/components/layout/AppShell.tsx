@@ -27,7 +27,7 @@ function Brand({ compact = false }: { compact?: boolean }) {
           <span className="truncate text-base font-semibold tracking-tight text-slate-900">
             大肥鱼 Admin
           </span>
-          <Badge variant="secondary">模型可管理</Badge>
+          <Badge variant="secondary">模型/审批</Badge>
         </div>
         <p className="truncate text-xs text-muted-foreground">QQ bot 运行面板</p>
       </div>
@@ -86,7 +86,7 @@ function SidebarNav({
 function SidebarFoot() {
   return (
     <div className="px-5 py-4 text-[11px] leading-relaxed text-slate-400">
-      模型配置可编辑 · 其余只读
+      模型与审批可编辑 · 其余只读
       <br />
       每 60 秒自动刷新
     </div>
