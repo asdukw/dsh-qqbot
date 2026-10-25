@@ -123,28 +123,51 @@ class LLMClient:
         *,
         purpose: str = "chat",
         conversation_id: str = "",
+        timeout: float | None = None,
+        attempts: int = 3,
     ) -> str:
+        """One chat-completions call.
+
+        ``timeout`` overrides the client timeout for this request, and
+        ``attempts=1`` makes optional calls (image captions) fail fast instead
+        of blocking a reply for three 60-second timeouts.
+        """
         payload = self._payload(messages)
         last_error: Exception | None = None
+        tries = max(1, int(attempts))
 
-        for attempt in range(3):
+        for attempt in range(tries):
             try:
-                response = await self._client.post("/chat/completions", json=payload)
+                if timeout is not None:
+                    response = await self._client.post(
+                        "/chat/completions", json=payload, timeout=timeout
+                    )
+                else:
+                    response = await self._client.post("/chat/completions", json=payload)
             except httpx.TimeoutException:
                 last_error = LLMError("LLM request timed out")
-                log.warning("LLM timeout (attempt %d/3)", attempt + 1)
-                await asyncio.sleep(1.5 * (attempt + 1))
+                log.warning("LLM timeout (attempt %d/%d)", attempt + 1, tries)
+                if attempt + 1 < tries:
+                    await asyncio.sleep(1.5 * (attempt + 1))
                 continue
             except httpx.HTTPError as exc:
                 last_error = LLMError(f"LLM connection error: {exc}")
                 log.warning("LLM connection error: %s", exc)
-                await asyncio.sleep(1.5 * (attempt + 1))
+                if attempt + 1 < tries:
+                    await asyncio.sleep(1.5 * (attempt + 1))
                 continue
 
             if response.status_code == 429 or response.status_code >= 500:
                 last_error = LLMError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
-                log.warning("LLM HTTP %s (attempt %d/3), retrying", response.status_code, attempt + 1)
-                await asyncio.sleep(2.0 * (attempt + 1))
+                log.warning(
+                    "LLM HTTP %s (attempt %d/%d)%s",
+                    response.status_code,
+                    attempt + 1,
+                    tries,
+                    ", retrying" if attempt + 1 < tries else "",
+                )
+                if attempt + 1 < tries:
+                    await asyncio.sleep(2.0 * (attempt + 1))
                 continue
 
             if response.status_code >= 400:

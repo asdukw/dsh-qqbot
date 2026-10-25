@@ -83,7 +83,7 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 4. 读取角色卡库的 active signature（`id` / `updated_at` / `fingerprint`）；变化时重新生成系统提示词、原子写 `memory/lore.md`、重启 DSH runtime（session 保留）。`/card use` 会直接触发这次刷新；`[cards] bootstrap` 文件被修改时也会被检测到。
 5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
 6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称(QQ号): 内容`；每行都带发言者 QQ 号（群名片相同的人也能区分），消息头的发言者若还有不同的 QQ 昵称会额外注明。
-7. 图片：进入 DSH 历史的内容只有文字。图片下载后按 SHA-1 存到 `<dsh.workspace>/images/<sha1>.<ext>`（`bot/images.py`），用当前模型生成一次描述并缓存到 `memory.db` 的 `image_captions` 表；prompt 里只放 `[图片附件] 描述 + 相对路径`，模型需要细节时用 `read_image` 工具按路径读取原图（`tool-fs.readImage = true`）。同一张图重复出现只调用一次视觉模型。`[dsh] image_mode = "inline"` 可回退到旧的图片块行为；thin client 路径仍然使用 `image_url`。
+7. 图片：进入 DSH 历史的内容只有文字。图片下载后按 SHA-1 存到 `<dsh.workspace>/images/<sha1>.<ext>`（`bot/images.py`），用当前模型生成一次描述并缓存到 `memory.db` 的 `image_captions` 表；prompt 里只放 `[图片附件] 描述 + 相对路径`，模型需要细节时用 `read_image` 工具按路径读取原图（`tool-fs.readImage = true`）。同一张图重复出现只调用一次视觉模型。图片准备是并行的，每张最多 `[dsh] image_prepare_timeout`（默认 30s）；描述调用 `image_caption_timeout`（默认 15s）且不重试，超时就退化为文字 + 原图路径，不会让回复等上几分钟。`[dsh] image_mode = "inline"` 可回退到旧的图片块行为；thin client 路径仍然使用 `image_url`。
 8. `asyncio.to_thread(dsh.run, session_id, prompt)`：
    - DSH 启动/复用 runtime；
    - 加载或创建 `session_id` 的 JSONL 历史；
@@ -93,6 +93,7 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
    - 返回 `final_response`。
 9. adapter 按 `max_reply_chars` 拆分并发送。
 10. 用户消息和助手回复同时写入本地 SQLite `messages` 表，仅作审计。
+11. 每条回复结束记录 `reply sent: conv=... queue=... prep=... dsh=... total=...`；在锁/信号量上等待超过 3 秒会额外打一条 warning，便于定位排队、图片准备或 DSH 生成造成的延迟。
 
 ## 身份传递
 

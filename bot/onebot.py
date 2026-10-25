@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -54,6 +55,8 @@ class MessageEvent:
     # The sender's QQ nickname; sender_name prefers the group card, so this can
     # differ and tells the model who is actually behind a joke card.
     sender_nickname: str = ""
+    # Local receive time, used to report queueing/preparation latency.
+    received_at: float = 0.0
 
 
 _CQ_IMAGE_RE = re.compile(r"\[CQ:image,([^\]]*)\]")
@@ -131,6 +134,7 @@ class MessageParser:
                 reply_to=reply_to,
                 stickers=tuple(stickers[:_MAX_IMAGES]),
                 sender_nickname=sender_nickname,
+                received_at=time.time(),
             )
         except (TypeError, ValueError) as exc:
             log.warning("malformed message event: %s", exc)

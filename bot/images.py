@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +66,7 @@ class ImageStore:
         name = f"{digest}{ext}"
         target = self.root / name
         if not target.exists():
-            tmp = self.root / f".{name}.{os.getpid()}.tmp"
+            tmp = self.root / f".{name}.{os.getpid()}.{threading.get_ident()}.tmp"
             try:
                 tmp.write_bytes(data)
                 tmp.replace(target)
