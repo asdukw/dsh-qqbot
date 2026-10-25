@@ -76,6 +76,8 @@ max_bytes = 8388608        # 8 MB per sticker
 max_stored = 500           # oldest/least-used are evicted beyond this
 # Re-encoded copies of the same sticker are merged when their 64-bit dHash
 # differs by at most this many bits (0 = only pixel-identical images).
+# Deleting a sticker with "block similar" stores its dHash in sticker_blocks;
+# later uploads within this distance are rejected at collection time.
 phash_distance = 4
 # The model asks to send one with a trailing "[表情: 语气词]" line; the adapter
 # picks a sticker whose tags/description match and sends it after the text.

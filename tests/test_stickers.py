@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
 from stickers import (  # noqa: E402
+    StickerBlocked,
     StickerError,
     StickerStore,
     dhash_hex,
@@ -236,6 +237,55 @@ class StickerStoreTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(self.store.count(), 0)
         self.assertFalse(self.store.delete(record.id))
+
+    def test_delete_blocking_removes_and_blocks_similar(self) -> None:
+        record, _ = self.store.add_bytes(patterned_image())
+        path = Path(record.path)
+        deleted, blocked = self.store.delete_blocking(
+            record.id, block_similar=True
+        )
+        self.assertEqual((deleted, blocked), (1, True))
+        self.assertFalse(path.exists())
+        self.assertEqual(self.store.count(), 0)
+        with self.assertRaises(StickerBlocked):
+            self.store.add_bytes(patterned_image("JPEG", quality=50))
+        self.store.add_bytes(striped_image())
+        self.assertEqual(self.store.count(), 1)
+
+    def test_delete_without_block_allows_similar(self) -> None:
+        record, _ = self.store.add_bytes(patterned_image())
+        deleted, blocked = self.store.delete_blocking(
+            record.id, block_similar=False
+        )
+        self.assertEqual((deleted, blocked), (1, False))
+        _again, created = self.store.add_bytes(
+            patterned_image("JPEG", quality=50)
+        )
+        self.assertTrue(created)
+
+    def test_delete_blocking_removes_legacy_similar_rows(self) -> None:
+        first, _ = self.store.add_bytes(patterned_image())
+        jpg = patterned_image("JPEG", quality=50)
+        other_path = self.store.directory / "legacy.jpg"
+        other_path.write_bytes(jpg)
+        conn = sqlite3.connect(self.store.path)
+        conn.execute(
+            "INSERT INTO stickers "
+            "(sha1, path, mime, size, source, source_kind, created_at, phash) "
+            "VALUES (?, ?, ?, ?, '', 'chat', 0, ?)",
+            ("legacy-sha", str(other_path), "image/jpeg", len(jpg), dhash_hex(jpg)),
+        )
+        conn.commit()
+        conn.close()
+        deleted, blocked = self.store.delete_blocking(
+            first.id, block_similar=True
+        )
+        self.assertEqual((deleted, blocked), (2, True))
+        self.assertFalse(other_path.exists())
+        self.assertEqual(self.store.count(), 0)
+
+    def test_delete_blocking_unknown_returns_zero(self) -> None:
+        self.assertEqual(self.store.delete_blocking(999), (0, False))
 
     def test_pick_prefers_matching_tags(self) -> None:
         first, _ = self.store.add_bytes(PNG)

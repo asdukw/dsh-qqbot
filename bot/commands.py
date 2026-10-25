@@ -111,7 +111,7 @@ STICKER_HELP = """/sticker                     列出最近收藏的表情包
 /sticker import               导入 QQ 账号的收藏表情
 /sticker tag <id> <描述>      手动写描述（供发送时按语境挑选）
 /sticker send <id>            手动发一张，测试发送链路
-/sticker delete <id>          删除（同时删文件）
+/sticker delete <id> [block]  删除；带 block 同时屏蔽相似图片
 /sticker ban|unban <id>       禁用/恢复，禁用的不会被发送
 /sticker stats                数量与占用空间"""
 
@@ -804,11 +804,18 @@ class CommandRouter:
         if action in ("delete", "rm", "remove"):
             record = store.get(int(rest[0])) if rest and rest[0].isdigit() else None
             if record is None:
-                await self.bot.send_text(event, "用法: /sticker delete <id>")
+                await self.bot.send_text(event, "用法: /sticker delete <id> [block]")
                 return
-            store.delete(record.id)
+            block = len(rest) > 1 and rest[1].lower() in (
+                "block", "ban", "similar", "1", "true", "yes",
+            )
+            deleted, blocked = store.delete_blocking(
+                record.id, block_similar=block
+            )
+            suffix = "，并屏蔽了相似图片" if blocked else ""
             await self.bot.send_text(
-                event, f"已删除 #{record.id}（剩 {store.count()} 张）"
+                event,
+                f"已删除 #{record.id}{suffix}（共 {deleted} 张，剩 {store.count()} 张）",
             )
             return
 

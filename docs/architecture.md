@@ -189,7 +189,8 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 - SQLite `/var/lib/qqbot/stickers.db` + 文件目录 `/var/lib/qqbot/stickers/`；一行一张图，`sha1` 唯一，按内容去重。入库时再计算 64-bit dHash（首帧、灰度、透明区域铺白），与已有 hash 的 Hamming 距离 ≤ `[stickers] phash_distance`（默认 4）视为同一张并复用已有记录；首次入库会回填旧记录的 phash。
 - 入站判定：OneBot `image` 段带 `summary="[动画表情]"` 或 `sub_type=1` 时视为表情包；解析器同时把它标成 `[表情包]` 写进文本，`MessageEvent.stickers` 单独带出 URL。
 - 只收群聊，私聊不收；下载异步执行，不阻塞回复；每个群每小时有收藏上限（`[stickers] max_per_hour`），单张上限 `max_bytes`，只接受 PNG/JPEG/GIF/WebP（按魔数判断，不信任 Content-Type）。
-- 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。Admin UI 的表情库页直接展示图片（见下文 Admin UI 结构）。
+- 管理：`/sticker list|search|show|add|import|delete|ban|unban|stats`；`import` 走 NapCat 的 `fetch_custom_face`，把账号里已收藏的表情拉进库。Admin UI 的表情库页直接展示图片，详情弹窗可删除并选择是否屏蔽相似图片（见下文 Admin UI 结构）。
+- 屏蔽：`sticker_blocks` 表保存被删除图片的 64-bit dHash。`StickerStore.add_bytes()` 在入库前检查新图与屏蔽哈希的 Hamming 距离，≤ `phash_distance` 直接抛 `StickerBlocked`；删除时 `delete_blocking()` 会一并删除库中所有相似行和文件。`/sticker delete <id> block` 与面板的删除按钮共用这条路径。
 - 收进来后用视觉模型打标：一次调用同时给描述和 1-3 个情绪标签，写进 `description` / `tags`；打标失败不影响入库。
 - 发送：prompt 里带一句约定，模型想发表情时在回复最后写 `[表情: 语气词]`；adapter 用 `extract_sticker_marker` 摘掉标记，按标签/描述匹配（`StickerStore.pick`）挑一张，以 `base64://` 图片段跟在文字后面发出，并受每会话冷却/小时上限约束。
 - 图片输入默认走占位符（见“一条消息的路径”第 7 步）：原图存 workspace、描述缓存、prompt 只带描述和路径；`read_image` 按需读原图。`[dsh] image_mode = "inline"` 时才使用 DSH content block；thin client 路径和打标仍用 `image_url`。
@@ -264,7 +265,7 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 ## Admin UI 结构
 
 - `bot/admin_ui.py` 只做 JSON API + 静态文件；React 端用 hash 路由（`#/tasks` 等）分组，服务端不需要额外的路由配置。
-- 资源接口各自读一个 SQLite：`/api/models`、`/api/cards`、`/api/tasks`、`/api/feeds`、`/api/stickers`；`/api/stickers` 返回每张表情的元数据和 `has_image`（文件是否仍在库目录内），`/api/stickers/<id>/image` 流式返回原图，`?thumb=1` 用 Pillow 生成 320px 的 JPEG 缩略图并做进程内 LRU 缓存；两个接口都会校验文件路径位于 `[stickers] directory` 之下，越界或缺失一律 404；`/api/cards` 只返回列表摘要，`/api/cards/<id>` 额外解析出库里存的 V3 payload，供角色卡详情页按 V3 字段分栏展示（内嵌的 `data:` 资产只保留前缀）；仪表盘的会话计数仍由 `conversations_data` 合并 `memory.db` 的 `chat_events` / `session_state`、`profile.db` 的 `conversations` 与 `usage.db` 的按会话汇总，但不再暴露独立的会话接口和页面。
+- 资源接口各自读一个 SQLite：`/api/models`、`/api/cards`、`/api/tasks`、`/api/feeds`、`/api/stickers`；`/api/stickers` 返回每张表情的元数据和 `has_image`（文件是否仍在库目录内），`/api/stickers/<id>/image` 流式返回原图，`?thumb=1` 用 Pillow 生成 320px 的 JPEG 缩略图并做进程内 LRU 缓存；两个接口都会校验文件路径位于 `[stickers] directory` 之下，越界或缺失一律 404；`POST /api/stickers/delete` 删除一张表情，`block_similar` 为真时同时删除相似行并把 dHash 写入屏蔽表；`/api/cards` 只返回列表摘要，`/api/cards/<id>` 额外解析出库里存的 V3 payload，供角色卡详情页按 V3 字段分栏展示（内嵌的 `data:` 资产只保留前缀）；仪表盘的会话计数仍由 `conversations_data` 合并 `memory.db` 的 `chat_events` / `session_state`、`profile.db` 的 `conversations` 与 `usage.db` 的按会话汇总，但不再暴露独立的会话接口和页面。
 - `POST /api/models/provider-models` 用已保存的供应商 `base_url` 和 API key 拉取 OpenAI-compatible `/models`，供模型表单的「获取模型」按钮生成模型 ID 下拉列表；接口只返回 id / owned_by，不返回也不记录密钥。
 - `/api/models` 通过 `ModelRegistry` 打开 `models.db`（会执行与机器人相同的迁移），返回 `providers`、`models`、`presets` 以及每个供应商的 `api_key_set` / `api_key_source`（`stored` / `env` / `missing`；不返回密钥本身）。模型页的写入走 `POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`；这些接口要求登录 cookie、`Content-Type: application/json` 和同源 `Origin`，并复用 `ModelRegistry` 的校验（不能禁用/删除激活模型、不能删除仍有模型的供应商等）。
 - `/api/overview` 返回仪表盘所需的计数、今日指标、按自然日（Asia/Shanghai）的活动趋势、订阅异常和最近消息；`/api/system` 返回数据库路径/大小与面板配置。

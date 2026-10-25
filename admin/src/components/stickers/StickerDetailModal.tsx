@@ -1,8 +1,10 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, Trash2 } from "lucide-react";
 
-import { Modal } from "@/components/models/Modal";
+import { CheckboxRow, Modal } from "@/components/models/Modal";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { StickerRow } from "@/lib/analytics";
 import { formatBytes, formatNumber, formatTs } from "@/lib/format";
 
@@ -20,12 +22,17 @@ function MetaRow({ label, children }: { label: string; children: ReactNode }) {
 export function StickerDetailModal({
   sticker,
   refreshKey = 0,
+  deleting = false,
+  onDelete,
   onClose,
 }: {
   sticker: StickerRow | null;
   refreshKey?: number;
+  deleting?: boolean;
+  onDelete: (sticker: StickerRow, blockSimilar: boolean) => void;
   onClose: () => void;
 }) {
+  const [blockSimilar, setBlockSimilar] = useState(true);
   if (!sticker) return null;
   const banned = sticker.status === "banned";
 
@@ -36,6 +43,25 @@ export function StickerDetailModal({
       title={`表情 #${sticker.id}`}
       description={sticker.description || "还没有打标"}
       onClose={onClose}
+      footer={
+        <>
+          <CheckboxRow
+            label="同时屏蔽相似图片"
+            hint="删除同款并阻止以后入库"
+            checked={blockSimilar}
+            onChange={setBlockSimilar}
+            disabled={deleting}
+          />
+          <Button
+            variant="destructive"
+            onClick={() => onDelete(sticker, blockSimilar)}
+            disabled={deleting}
+          >
+            <Trash2 className="h-4 w-4" />
+            {deleting ? "删除中…" : "删除表情"}
+          </Button>
+        </>
+      }
     >
       <div className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_16rem]">
         <div className="flex min-h-[14rem] items-center justify-center overflow-hidden rounded-xl border border-blue-50 bg-[radial-gradient(circle_at_50%_35%,rgba(219,234,254,0.6),rgba(248,250,252,0.9))] p-4">
