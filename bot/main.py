@@ -26,7 +26,9 @@ import httpx
 from admins import parse_admin_ids
 from approvals import ApprovalStore, ApprovalWorker
 from card_fetch import CardFetchError, fetch_card_bytes_sync
+from card_service import CardService, DeferredCardSwitch
 from commands import CommandRouter, strip_leading_mention, strip_message_markers
+from content_policy import SAFE_PROMPT, require_safe
 from conversations import ConversationStore
 from daily import (
     DailyReporter,
@@ -78,6 +80,7 @@ from relations import (
     RelationStore,
     extract_relation_markers,
 )
+from relationship_rules import parse_chat_proposal
 from schedule import extract_schedule, render_schedule
 from sessions import SessionStore
 from stickers import (
@@ -88,6 +91,9 @@ from stickers import (
     parse_tags,
     preview_jpeg,
 )
+from story_models import StorySettings
+from story_runtime import StoryRuntime
+from story_store import StoryStore
 from tasks import (
     TZ as TASK_TZ,
 )
@@ -352,6 +358,7 @@ class AppConfig:
     meme: MemeSection = field(default_factory=MemeSection)
     feeds: FeedsSection = field(default_factory=FeedsSection)
     relation: RelationSection = field(default_factory=RelationSection)
+    story: StorySettings = field(default_factory=StorySettings)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -613,6 +620,7 @@ def load_config(path: str | Path) -> AppConfig:
         meme=meme,
         feeds=feeds,
         relation=relation,
+        story=StorySettings.model_validate(_section(table, "story")),
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -720,7 +728,7 @@ def make_llm_client(config: AppConfig, record: ModelRecord) -> LLMClient:
 
 def build_dsh_system_prompt() -> str:
     return (
-        "[会话隔离]\n角色与世界设定由当前会话专属段提供，不使用其他会话或旧角色作为当前身份。"
+        SAFE_PROMPT + "\n\n[会话隔离]\n角色与世界设定由当前会话专属段提供，不使用其他会话或旧角色作为当前身份。"
         + "\n\n[上下文说明]\n每一轮消息开头会给出当前时间、会话和发言者；时间和说话人以那一行为准。"
         + "\n\n[联网与赛程]\n有时效性的问题（赛事赛程、新闻、版本改动等）先用 web_search；需要网页正文再用 web_fetch。回答赛程/日程时不要写散文，改为只输出一个 ```schedule 代码块，内容是 JSON："
           '{"event":"赛事名","matches":[{"stage":"瑞士轮","start_time":"2026-10-24T01:00:00+08:00","team_a":"GEN","team_b":"IG","best_of":1}]}'
@@ -796,6 +804,7 @@ class Bot(PersonaRuntime):
         relations: RelationStore | None = None,
         daily: DailyStore | None = None,
         approvals: ApprovalStore | None = None,
+        story_store: StoryStore | None = None,
     ):
         self.config = config
         self.cards = cards
@@ -853,6 +862,7 @@ class Bot(PersonaRuntime):
                 settings=config.daily,
                 ready=lambda: self.onebot.connected,
             )
+        self.story = StoryRuntime(self, story_store, config.story) if story_store is not None else None
         self.commands = CommandRouter(self)
         self.proactive = ProactivePolicy(config.bot.proactive)
         self._closed = False
@@ -876,6 +886,7 @@ class Bot(PersonaRuntime):
         self._voice_last: dict[int, float] = {}
         self._meme_last: dict[int, float] = {}
         self._system_prompt = ""
+        self.card_service: CardService | None = None
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
         self._scheduler: TaskScheduler | None = None
@@ -903,6 +914,9 @@ class Bot(PersonaRuntime):
         if self._closed:
             return
         self._closed = True
+        service = getattr(self, 'card_service', None)
+        if service is not None:
+            await service.close()
         if self._persona_worker is not None:
             self._persona_worker.cancel()
             try:
@@ -932,6 +946,8 @@ class Bot(PersonaRuntime):
         self.sessions.close()
         self.personas.close()
         self.cards.close()
+        if self.story is not None:
+            self.story.store.close()
         if self.stickers is not None:
             self.stickers.close()
         if self.relations is not None:
@@ -955,7 +971,8 @@ class Bot(PersonaRuntime):
             return
 
         self._log_chat_event(event, text)
-        if self.relations is not None:
+        story = getattr(self, "story", None)
+        if self.relations is not None and (story is None or not story.enabled):
             try:
                 await asyncio.to_thread(
                     self.relations.touch, event.user_id, event.sender_name
@@ -966,6 +983,14 @@ class Bot(PersonaRuntime):
         if self.commands.is_command(command_text):
             await self.commands.handle(event, command_text)
             return
+        story = getattr(self, "story", None)
+        if story is not None:
+            try:
+                if await story.maybe_choice(event, text):
+                    return
+            except (ValueError, OneBotError, TimeoutError, LLMError):
+                await self._send(event, '剧情处理未完成；进度不会重复生效，请 /story continue。')
+                return
 
         if event.message_type == "group":
             if event.group_id is None:
@@ -1011,7 +1036,16 @@ class Bot(PersonaRuntime):
                 log.warning(
                     "reply queued %.1fs: conv=%s", queued, conversation_id
                 )
-            await self._reply(conversation_id, event, text)
+            deferred = await self._reply(conversation_id, event, text)
+        if deferred is not None:
+            service = getattr(self, 'card_service', None)
+            if service is not None:
+                # Reacquire only for the final synchronous token check/publication.
+                async with lock:
+                    try:
+                        service.commit(deferred)
+                    except (ValueError, sqlite3.Error):
+                        log.warning('deferred card switch discarded: authority or persona changed')
 
     async def handle_notice(self, payload: dict) -> None:
         """Turn poke notices into context lines or a direct reply."""
@@ -1229,6 +1263,7 @@ class Bot(PersonaRuntime):
         log.info("task scheduler started (%d task(s))", self.tasks.count())
 
     async def _send_to_chat(self, chat_type: str, chat_id: int, text: str) -> None:
+        require_safe(text)
         if chat_type == "group":
             data = await self.onebot.send_group(chat_id, text)
             self._remember_own_message(chat_id, int(data.get("message_id") or 0))
@@ -1647,6 +1682,7 @@ class Bot(PersonaRuntime):
         record = await asyncio.to_thread(store.pick, hint)
         if record is None:
             return
+        require_safe(str(getattr(record, 'description', '') or ''))
         try:
             data = await asyncio.to_thread(Path(record.path).read_bytes)
         except OSError as exc:
@@ -1670,6 +1706,7 @@ class Bot(PersonaRuntime):
         log.info("sent sticker #%s to %s", record.id, key)
 
     async def _send_voice(self, event: MessageEvent, text: str) -> bool:
+        require_safe(text)
         config = self.config.voice
         if not config.enabled:
             log.info("voice skipped: disabled")
@@ -1727,6 +1764,7 @@ class Bot(PersonaRuntime):
         return True
 
     async def _send_meme(self, event: MessageEvent, text: str) -> bool:
+        require_safe(text)
         config = self.config.meme
         if not config.enabled:
             return False
@@ -1812,10 +1850,19 @@ class Bot(PersonaRuntime):
         reply: str,
         *,
         proactive: bool = False,
+        strict_receipts: bool = False,
     ) -> None:
-        """Send the visible text, then an optional trailing sticker."""
+        """Send visible text; deferred card switches require acknowledged text."""
+        story = getattr(self, 'story', None)
+        reply = require_safe(reply)
+        reply, proposal = parse_chat_proposal(reply)
         reply, relation_markers = extract_relation_markers(reply)
-        if relation_markers.has_update and self.relations is not None:
+        if story is not None and story.enabled and not proactive and proposal is not None:
+            persona = self._persona(conversation_id)
+            relation = story.store.relation(conversation_id, persona.record.character_id, str(event.user_id))
+            action = f'{conversation_id}:{event.user_id}:chat:{event.message_id}'
+            story.store.chat(relation, proposal, action, story.settings)
+        if (story is None or not story.enabled) and relation_markers.has_update and self.relations is not None:
             try:
                 updated = await asyncio.to_thread(
                     self.relations.apply,
@@ -1856,11 +1903,18 @@ class Bot(PersonaRuntime):
             wants_voice = True
             log.info("voice roll hit for a proactive reply")
         voice_sent = (
-            await self._send_voice(event, spoken) if wants_voice and spoken else False
+            await self._send_voice(event, spoken) if wants_voice and spoken and not strict_receipts else False
         )
         if not voice_sent:
             for chunk in split_text(visible, self.config.bot.max_reply_chars):
-                await self._send(event, chunk)
+                if strict_receipts:
+                    scope = event.message_type
+                    chat = event.group_id if scope == 'group' else event.user_id
+                    if chat is None:
+                        raise OneBotError('missing reply target')
+                    await self._send_receipt(scope, chat, chunk)
+                else:
+                    await self._send(event, chunk)
                 await asyncio.sleep(0.35)
         meme_sent = (
             await self._send_meme(event, meme_text) if meme_text is not None else False
@@ -2171,11 +2225,11 @@ class Bot(PersonaRuntime):
                 self._global.release()
 
     @request_context
-    async def _reply(self, conversation_id: str, event: MessageEvent, text: str) -> None:
+    async def _reply(self, conversation_id: str, event: MessageEvent, text: str) -> DeferredCardSwitch | None:
         if self.dsh is None:
             await self._reply_llm(conversation_id, event, text)
-        else:
-            await self._reply_dsh(conversation_id, event, text)
+            return None
+        return await self._reply_dsh(conversation_id, event, text)
 
     def _turn_images(self, event: MessageEvent) -> list[str]:
         """Images this turn should see: its own plus recent ones from the group.
@@ -2605,7 +2659,7 @@ class Bot(PersonaRuntime):
         return captions
 
     @request_context
-    async def _reply_dsh(self, conversation_id: str, event: MessageEvent, text: str) -> None:
+    async def _reply_dsh(self, conversation_id: str, event: MessageEvent, text: str) -> DeferredCardSwitch | None:
         dsh = self.dsh
         if dsh is None:
             return
@@ -2651,15 +2705,40 @@ class Bot(PersonaRuntime):
             context_lines, image_count,
         )
         started = time.time()
+        service = getattr(self, 'card_service', None)
+        lease = None
         try:
-            reply, events = await asyncio.to_thread(
-                self._dsh_turn, dsh, session_id, prompt, images
-            )
+            if self.is_admin(event.user_id) and event.message_id > 0 and isinstance(dsh, DSHClient):
+                if service is None:
+                    service = self.card_service = CardService(self)
+                await service.start()
+                lease = service.open(event, conversation_id, session_id, text,
+                                     self.personas.effective(conversation_id).token)
+                worker = asyncio.create_task(asyncio.to_thread(
+                    dsh.run_authorized, session_id, prompt, images, service.env(lease)
+                ))
+                try:
+                    reply, events = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    service.revoke(lease)
+                    # Keep this session's guard until the child actually closes.
+                    try:
+                        await asyncio.shield(worker)
+                    except (DSHError, asyncio.CancelledError):
+                        pass
+                    raise
+            else:
+                reply, events = await asyncio.to_thread(
+                    self._dsh_turn, dsh, session_id, prompt, images
+                )
         except DSHError as exc:
             log.error("DSH failed after %.1fs: %s", time.time() - started, exc)
             if self.config.bot.notify_errors:
                 await self._send(event, self.config.bot.error_message)
             return
+        finally:
+            if lease is not None and service is not None:
+                service.revoke(lease)
         self._record_dsh_usage(conversation_id, session_id, "chat", events)
         elapsed = time.time() - started
         self._touch_session(conversation_id)
@@ -2667,7 +2746,15 @@ class Bot(PersonaRuntime):
 
         await self.memory.add(conversation_id, "assistant", reply)
         self.personas.consume_opening(conversation_id)
-        await self._send_reply(event, conversation_id, reply)
+        deferred = lease.deferred if lease is not None else None
+        try:
+            if deferred is not None:
+                await self._send_reply(event, conversation_id, reply, strict_receipts=True)
+            else:
+                await self._send_reply(event, conversation_id, reply)
+        except (OneBotError, OSError):
+            log.warning('reply delivery failed; deferred card switch discarded')
+            return None
         received = event.received_at or prep_start
         log.info(
             "reply processing finished: conv=%s queue=%.1fs prep=%.1fs dsh=%.1fs total=%.1fs",
@@ -2677,9 +2764,13 @@ class Bot(PersonaRuntime):
             elapsed,
             time.time() - received,
         )
+        return deferred
 
     @request_context
     async def _reply_llm(self, conversation_id: str, event: MessageEvent, text: str) -> None:
+        if self.is_admin(event.user_id) and re.search(r'角色卡|人物卡|character\s*card|\bcard\b', text, re.I):
+            await self._send(event, '当前 DSH 语义角色工具不可用，未执行角色操作。请使用 /card 命令；联网搜索下载需启用 DSH。')
+            return
         try:
             persona = self._persona(conversation_id)
         except (ValueError, sqlite3.Error):
@@ -2719,7 +2810,12 @@ class Bot(PersonaRuntime):
             lore_chunks=lore,
             max_history_chars=self.config.bot.max_history_chars,
         )
-        if self.relations is not None:
+        if messages:
+            messages[0]['content'] += chr(10) * 2 + SAFE_PROMPT
+        story = getattr(self, 'story', None)
+        if story is not None and story.enabled:
+            messages[0]['content'] += '\n\n' + story.context(conversation_id, persona, str(event.user_id))
+        elif self.relations is not None:
             relation_text = self.relations.prompt_context(
                 event.user_id,
                 scope="group" if event.message_type == "group" else "private",
@@ -2768,6 +2864,7 @@ class Bot(PersonaRuntime):
         log.info("reply processing finished: conv=%s llm=%.1fs", conversation_id, elapsed)
 
     async def _send(self, event: MessageEvent, text: str) -> None:
+        require_safe(text)
         if not text:
             return
         try:
@@ -2992,7 +3089,7 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
 
     bot = Bot(
         config, cards, memory, client, dsh_client, conversations, stickers, tasks,
-        feeds, usage, relations, daily, approvals,
+        feeds, usage, relations, daily, approvals, StoryStore(config.paths.profile_db),
     )
     if not bot.refresh_card(force=True):
         log.error("cannot load the active character card")

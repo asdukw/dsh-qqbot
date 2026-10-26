@@ -651,6 +651,34 @@ class HttpTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc
 
+    def test_story_auth_mutation_guard_and_body_limit(self) -> None:
+        self.assertEqual(self.get('/api/story').status, 401)
+        cookie, _ = self.login()
+        response = self.get('/api/story', cookie)
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.read())
+        self.assertFalse(body['settings']['enabled'])
+        response = self.post('/api/story/action', {'kind': 'settings', 'data': {'enabled': True}}, cookie)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.read())['status'], 'queued')
+        self.assertEqual(self.post('/api/story/action', {'kind': 'settings', 'data': {}}, cookie, 'text/plain').status, 415)
+        self.assertEqual(self.post('/api/story/action', {'padding': 'x' * 5000}, cookie).status, 413)
+        request = urllib.request.Request(self.base + '/api/story/action',
+            data=b'{"kind":"settings","data":{}}', method='POST',
+            headers={'Content-Type': 'application/json', 'Cookie': cookie, 'Origin': 'https://other.example'})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(caught.exception.code, 403)
+
+    def test_readyz_reports_transport_offline_separately_from_liveness(self) -> None:
+        with patch('admin_ui.transport_health', return_value={'ready': False, 'state': 'login_required'}):
+            response = self.get('/readyz')
+            self.assertEqual(response.status, 503)
+            self.assertEqual(json.loads(response.read())['state'], 'login_required')
+            self.assertEqual(self.get('/healthz').status, 200)
+        with patch('admin_ui.transport_health', return_value={'ready': True, 'state': 'online'}):
+            self.assertEqual(self.get('/readyz').status, 200)
+
     def test_healthz_needs_no_auth(self) -> None:
         response = self.get("/healthz")
         self.assertEqual(response.status, 200)

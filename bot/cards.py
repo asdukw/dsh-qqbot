@@ -16,12 +16,15 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_CARD_METADATA = 2 * 1024 * 1024
+MAX_REMOTE_CARD_BYTES = 12 * 1024 * 1024
 
 V3_DEFAULTS: dict[str, Any] = {
     "name": "",
@@ -195,7 +198,7 @@ def _decode_payload(payload: bytes) -> dict[str, Any] | None:
     for candidate in candidates:
         try:
             obj = json.loads(candidate.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
             continue
         if isinstance(obj, dict):
             return obj
@@ -225,7 +228,10 @@ def _read_png_card_stream(fh: Any, label: str = "PNG card") -> dict[str, Any]:
                 continue
             if compression_flag in (b"1", b"\x01"):
                 try:
-                    payload = zlib.decompress(payload)
+                    inflater = zlib.decompressobj()
+                    payload = inflater.decompress(payload, MAX_CARD_METADATA + 1)
+                    if len(payload) > MAX_CARD_METADATA or not inflater.eof or inflater.unused_data:
+                        raise CardError('PNG card metadata exceeds limit or is incomplete')
                 except zlib.error:
                     continue
         else:
@@ -298,6 +304,82 @@ def normalise(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_remote_bytes(data: bytes) -> None:
+    if len(data) > MAX_REMOTE_CARD_BYTES:
+        raise CardError('remote character card exceeds file limit')
+    if data.startswith(PNG_SIGNATURE):
+        stream = io.BytesIO(data[8:])
+        while True:
+            header = stream.read(8)
+            if len(header) != 8:
+                raise CardError('truncated PNG')
+            length, kind = int.from_bytes(header[:4], 'big'), header[4:]
+            if length > MAX_REMOTE_CARD_BYTES:
+                raise CardError('PNG chunk exceeds limit')
+            body, crc = stream.read(length), stream.read(4)
+            if len(body) != length or len(crc) != 4 or int.from_bytes(crc, 'big') != zlib.crc32(kind + body) & 0xffffffff:
+                raise CardError('invalid PNG chunk')
+            if kind in (b'tEXt', b'iTXt', b'zTXt') and length > MAX_CARD_METADATA:
+                raise CardError('PNG metadata exceeds limit')
+            if kind == b'IEND':
+                break
+    elif len(data) > MAX_CARD_METADATA:
+        raise CardError('JSON card exceeds metadata limit')
+    # Bound JSON nesting before parsing; JSON strings may contain braces.
+    if not data.startswith(PNG_SIGNATURE):
+        quoted = escaped = False
+        depth = 0
+        for byte in data:
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif byte == 92:
+                    escaped = True
+                elif byte == 34:
+                    quoted = False
+            elif byte == 34:
+                quoted = True
+            elif byte in (91, 123):
+                depth += 1
+                if depth > 32:
+                    raise CardError('card JSON is too deeply nested')
+            elif byte in (93, 125):
+                depth -= 1
+
+
+def _validate_remote_payload(raw: dict[str, Any]) -> None:
+    wrapped = 'data' in raw
+    if wrapped and raw.get('spec') not in ('chara_card_v2', 'chara_card_v3'):
+        raise CardError('unrecognized remote card specification')
+    src = raw.get('data') if wrapped else raw
+    if not isinstance(src, dict):
+        raise CardError('remote card data is not an object')
+    name = src.get('name', src.get('char_name'))
+    if not isinstance(name, str) or not name.strip() or len(name) > 256:
+        raise CardError('remote card needs a valid character name')
+    fields = ('description', 'personality', 'scenario', 'first_mes', 'char_persona', 'char_greeting')
+    if not any(isinstance(src.get(key), str) and src[key].strip() for key in fields):
+        raise CardError('remote response has no character content')
+    pending: list[tuple[Any, int]] = [(raw, 0)]
+    nodes = 0
+    while pending:
+        value, depth = pending.pop()
+        nodes += 1
+        if depth > 32 or nodes > 20000:
+            raise CardError('card structure exceeds limits')
+        if isinstance(value, dict):
+            pending.extend((v, depth + 1) for v in value.values())
+        elif isinstance(value, list):
+            if len(value) > 2000:
+                raise CardError('card array exceeds limit')
+            pending.extend((v, depth + 1) for v in value)
+        elif isinstance(value, str) and len(value) > 256000:
+            raise CardError('card field exceeds limit')
+    for key in _STRING_FIELDS:
+        if key in src and not isinstance(src[key], str):
+            raise CardError(f'invalid remote card field: {key}')
+
+
 @dataclass
 class CharacterCard:
     path: Path
@@ -331,8 +413,10 @@ class CharacterCard:
         )
 
     @classmethod
-    def from_bytes(cls, data: bytes, source: str = "download") -> CharacterCard:
-        """Parse a card straight from bytes: PNG (ccv3/chara) or JSON."""
+    def from_bytes(cls, data: bytes, source: str = "download", *, strict: bool = False) -> CharacterCard:
+        """Parse PNG or JSON, optionally requiring a bounded remote character card."""
+        if strict:
+            _validate_remote_bytes(data)
         if data[: len(PNG_SIGNATURE)] == PNG_SIGNATURE:
             raw = _read_png_card_stream(io.BytesIO(data), source)
         else:
@@ -344,6 +428,8 @@ class CharacterCard:
                 ) from exc
         if not isinstance(raw, dict):
             raise CardError(f"character card in {source} is not a JSON object")
+        if strict:
+            _validate_remote_payload(raw)
         return cls.from_payload(normalise(raw), path=source)
 
     @classmethod
@@ -366,6 +452,8 @@ class CharacterCard:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id      TEXT NOT NULL DEFAULT '',
+    story_referenced  INTEGER NOT NULL DEFAULT 0,
     name              TEXT NOT NULL,
     nickname          TEXT NOT NULL DEFAULT '',
     aliases           TEXT NOT NULL DEFAULT '[]',
@@ -434,6 +522,7 @@ def _normalise_aliases(
 @dataclass(frozen=True)
 class CardRecord:
     id: int
+    character_id: str
     name: str
     nickname: str
     aliases: tuple[str, ...]
@@ -487,6 +576,7 @@ def _record(row: sqlite3.Row) -> CardRecord:
     )
     return CardRecord(
         id=int(row["id"]),
+        character_id=row["character_id"],
         name=row["name"] or "Assistant",
         nickname=row["nickname"] or "",
         aliases=aliases,
@@ -528,6 +618,12 @@ class CardRegistry:
             self._db.execute(
                 "ALTER TABLE cards ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'"
             )
+        if "character_id" not in columns:
+            self._db.execute("ALTER TABLE cards ADD COLUMN character_id TEXT NOT NULL DEFAULT ''")
+        if "story_referenced" not in columns:
+            self._db.execute("ALTER TABLE cards ADD COLUMN story_referenced INTEGER NOT NULL DEFAULT 0")
+        for row in self._db.execute("SELECT id FROM cards WHERE character_id='' ").fetchall():
+            self._db.execute("UPDATE cards SET character_id=? WHERE id=?", (uuid.uuid4().hex, row[0]))
         self._db.commit()
 
     # --------------------------------------------------------------- reads
@@ -664,10 +760,12 @@ class CardRegistry:
                     now,
                 ),
             )
+            created = cursor.rowcount > 0
+            self._db.execute("UPDATE cards SET character_id=? WHERE fingerprint=? AND character_id=''",
+                             (uuid.uuid4().hex, digest))
             row = self._db.execute(
                 "SELECT * FROM cards WHERE fingerprint = ? ORDER BY id LIMIT 1", (digest,)
             ).fetchone()
-            created = cursor.rowcount > 0
         return _record(row), created
 
     def install_card(
@@ -774,7 +872,27 @@ class CardRegistry:
             raise ValueError(f"character card #{card_id} has no alias {wanted!r}")
         return self.set_aliases(card_id, remaining)
 
+    def mark_story(self, card_id: int) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE cards SET story_referenced=1 WHERE id=?", (card_id,))
+
+    def link_character(self, card_id: int, original_id: int) -> CardRecord:
+        with self._lock, self._db:
+            row = self._db.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+            source = self._db.execute("SELECT character_id FROM cards WHERE id=?", (original_id,)).fetchone()
+            if row is None or source is None:
+                raise ValueError('unknown character card')
+            if self._referenced(card_id):
+                raise ValueError('cannot relink a referenced character version')
+            self._db.execute('UPDATE cards SET character_id=? WHERE id=?', (source[0], card_id))
+        result = self.get(card_id)
+        assert result is not None
+        return result
+
     def _referenced(self, card_id: int) -> bool:
+        row = self._db.execute("SELECT story_referenced FROM cards WHERE id=?", (card_id,)).fetchone()
+        if row and row[0]:
+            return True
         for table in ("persona_bindings", "persona_switches"):
             exists = self._db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)

@@ -20,6 +20,7 @@ export type RouteId =
   | "tasks"
   | "feeds"
   | "models"
+  | "story"
   | "cards"
   | "stickers"
   | "usage"
@@ -74,6 +75,7 @@ export const ROUTES: RouteMeta[] = [
     description: "供应商、SQLite 模型注册表与当前 DSH route",
     icon: Server,
   },
+  { id: "story", label: "剧情与关系", description: "个人剧情、关系存档与投递恢复", icon: Sparkles },
   {
     id: "cards",
     label: "角色卡",
@@ -106,7 +108,7 @@ export const NAV_GROUPS: NavGroup[] = [
   { label: "概览", items: [ROUTE_MAP.get("overview")!] },
   { label: "对话", items: [ROUTE_MAP.get("insights")!] },
   { label: "自动化", items: [ROUTE_MAP.get("requests")!, ROUTE_MAP.get("tasks")!, ROUTE_MAP.get("feeds")!] },
-  { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("stickers")!] },
+  { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("story")!, ROUTE_MAP.get("stickers")!] },
   { label: "用量", items: [ROUTE_MAP.get("usage")!] },
   { label: "系统", items: [ROUTE_MAP.get("system")!] },
 ];

@@ -79,6 +79,13 @@ class LLMConfig:
     reasoning_effort: str = ""  # "", "low", "medium", "high"
 
 
+@dataclass(frozen=True)
+class ChatResult:
+    content: str
+    finish_reason: str
+    usage: dict[str, Any]
+
+
 class LLMClient:
     def __init__(self, config: LLMConfig):
         if not config.base_url:
@@ -132,7 +139,25 @@ class LLMClient:
         ``attempts=1`` makes optional calls (image captions) fail fast instead
         of blocking a reply for three 60-second timeouts.
         """
+        result = await self.complete(messages, purpose=purpose, conversation_id=conversation_id,
+                                     timeout=timeout, attempts=attempts)
+        return result.content
+
+    async def complete(
+        self, messages: list[dict[str, Any]], *, purpose: str = "chat",
+        conversation_id: str = "", timeout: float | None = None, attempts: int = 1,
+        json_mode: bool = False, max_tokens: int | None = None,
+        json_schema: dict[str, Any] | None = None,
+    ) -> ChatResult:
+        """Opt-in metadata/JSON output; regular chat requests remain unchanged."""
         payload = self._payload(messages)
+        if json_schema is not None:
+            payload['response_format'] = {'type': 'json_schema', 'json_schema': {
+                'name': 'story_response', 'strict': True, 'schema': json_schema}}
+        elif json_mode:
+            payload['response_format'] = {'type': 'json_object'}
+        if max_tokens is not None:
+            payload['max_tokens'] = max_tokens
         last_error: Exception | None = None
         tries = max(1, int(attempts))
 
@@ -175,7 +200,12 @@ class LLMClient:
 
             try:
                 body = response.json()
-                content = body["choices"][0]["message"].get("content") or ""
+                message = body["choices"][0]["message"]
+                if message.get('refusal'):
+                    raise LLMError('LLM refused the request')
+                content = message.get("content") or ""
+                if not isinstance(content, str):
+                    raise LLMError('unexpected LLM content')
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise LLMError("unexpected LLM response") from exc
 
@@ -192,7 +222,7 @@ class LLMClient:
             content = content.strip()
             if not content:
                 raise LLMError("LLM returned an empty reply")
-            return content
+            return ChatResult(content, str(body['choices'][0].get('finish_reason') or ''), usage)
 
         raise last_error or LLMError("LLM request failed")
 

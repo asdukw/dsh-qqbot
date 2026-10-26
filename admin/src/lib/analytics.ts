@@ -291,6 +291,7 @@ export type CardDetail = {
   creator: string;
   character_version: string;
   fingerprint: string;
+  character_id?: string;
   source_kind: string;
   source: string;
   installed_by: string;
@@ -372,6 +373,7 @@ export type StickersData = {
 };
 
 export type SystemData = {
+  transport?: { ready: boolean; state: string; online?: boolean; checked_at: number };
   generated_at: number;
   started_at: number;
   uptime_seconds: number;

@@ -60,11 +60,12 @@ def main() -> None:
             root = Path(tmp)
             store = ConversationStore(root / 'profile.db')
             plugin = (Path(__file__).resolve().parents[1] / 'dsh' / 'persona.mjs').as_uri()
+            profile_plugin = (Path(__file__).resolve().parents[1] / 'dsh' / 'user-profile.mjs').as_uri()
             patch = root / 'persona.patch.json'
             patch.write_text(json.dumps([
                 {'id': 'session-log-deepseek', 'config': {'enabled': False}},
                 {'id': 'session-telemetry-otel', 'disabled': True},
-                {'insert': [{'id': 'conversation-persona', 'name': plugin}]},
+                {'insert': [{'id': 'conversation-persona', 'name': plugin}, {'id': 'scoped-profile', 'name': profile_plugin}]},
             ]), encoding='utf-8')
             config: dict[str, Any] = dict(
                 provider='deepseek-official', model='smoke-model', profile='sdk-minimal',
@@ -72,13 +73,13 @@ def main() -> None:
                 api_key='local-fake-key', base_url=f'http://127.0.0.1:{server.server_port}',
                 request_timeout_seconds=30,
                 env={'USER_PROFILE_DB': str(root / 'profile.db'), 'DSH_SYSTEM_PROMPT': 'neutral operational rules',
-                     'DSH_TELEMETRY_DISABLED': '1', 'HOME': str(root), 'USERPROFILE': str(root)},
+                     'QQBOT_RELATION_ENABLED': '0', 'DSH_TELEMETRY_DISABLED': '1', 'HOME': str(root), 'USERPROFILE': str(root)},
             )
             try:
                 store.record('group-42', 'group', 1, 42, 'A')
                 store.record('group-43', 'group', 2, 43, 'B')
-                store.prepare_persona('group-42', 'group:42', '1:a', 'ALICE_SENTINEL WORLD_A {{unsupported_literal}}')
-                store.prepare_persona('group-43', 'group:43', '1:b', 'FISH_SENTINEL WORLD_B')
+                store.prepare_persona('group-42', 'group:42', '1:a', 'ALICE_SENTINEL WORLD_A {{unsupported_literal}}', 'RELATION_A_SENTINEL')
+                store.prepare_persona('group-43', 'group:43', '1:b', 'FISH_SENTINEL WORLD_B', 'RELATION_B_SENTINEL')
                 with DeepSeekHarness(**config) as harness:
                     for session, expected, forbidden in [
                         ('group-42', 'ALICE_SENTINEL', 'FISH_SENTINEL'),
@@ -89,10 +90,14 @@ def main() -> None:
                         assert result.final_response == 'PERSONA_OK', str(result)
                         prompt = system_text(REQUESTS[-1])
                         assert expected in prompt and forbidden not in prompt, prompt
-                    store.prepare_persona('group-42', 'group:42', '1:a', 'ALICE_UPDATED WORLD_A')
+                        relation = 'RELATION_A_SENTINEL' if session == 'group-42' else 'RELATION_B_SENTINEL'
+                        assert relation in prompt, prompt
+                        assert '[好感+2]' not in prompt, prompt
+                    store.prepare_persona('group-42', 'group:42', '1:a', 'ALICE_UPDATED WORLD_A', 'RELATION_UPDATED_SENTINEL')
                     result = harness.run('Reply PERSONA_OK', session_id='group-42')
                     assert result.final_response == 'PERSONA_OK', str(result)
                     assert 'ALICE_UPDATED' in system_text(REQUESTS[-1])
+                    assert 'RELATION_UPDATED_SENTINEL' in system_text(REQUESTS[-1])
                     before = len(REQUESTS)
                     try:
                         result = harness.run('No persona should fail', session_id='unprepared')

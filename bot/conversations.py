@@ -44,6 +44,9 @@ class ConversationStore:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA)
+        columns = {row[1] for row in self._db.execute('PRAGMA table_info(session_personas)')}
+        if 'relation_prompt' not in columns:
+            self._db.execute("ALTER TABLE session_personas ADD COLUMN relation_prompt TEXT NOT NULL DEFAULT ''")
         self._db.commit()
 
     def record(
@@ -78,15 +81,15 @@ class ConversationStore:
             )
 
     def prepare_persona(self, session_id: str, conversation_id: str,
-                        persona_token: str, prompt: str) -> None:
+                        persona_token: str, prompt: str, relation_prompt: str = '') -> None:
         if not prompt.strip():
             raise ValueError('empty persona prompt')
         with self._lock, self._db:
             self._db.execute(
-                'INSERT INTO session_personas VALUES (?, ?, ?, ?, ?) '
+                'INSERT INTO session_personas(session_id,conversation_id,persona_token,prompt,updated_at,relation_prompt) VALUES (?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(session_id) DO UPDATE SET conversation_id=excluded.conversation_id, '
-                'persona_token=excluded.persona_token, prompt=excluded.prompt, updated_at=excluded.updated_at',
-                (session_id, conversation_id, persona_token, prompt, int(time.time())),
+                'persona_token=excluded.persona_token, prompt=excluded.prompt, updated_at=excluded.updated_at, relation_prompt=excluded.relation_prompt',
+                (session_id, conversation_id, persona_token, prompt, int(time.time()), relation_prompt),
             )
 
     def get(self, session_id: str) -> dict | None:

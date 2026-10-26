@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { requestJson, setUnauthorizedHandler, Unauthorized } from "@/lib/api";
 import { useHashRoute, type RouteId } from "@/lib/router";
+import StoryPage from "@/pages/StoryPage";
 import CardsPage from "@/pages/CardsPage";
 import FeedsPage from "@/pages/FeedsPage";
 import InsightsPage from "@/pages/InsightsPage";
@@ -117,6 +118,8 @@ function Page({
       return <FeedsPage refreshKey={refreshKey} />;
     case "models":
       return <ModelsPage refreshKey={refreshKey} />;
+    case "story":
+      return <StoryPage refreshKey={refreshKey} />;
     case "cards":
       return <CardsPage refreshKey={refreshKey} />;
     case "stickers":

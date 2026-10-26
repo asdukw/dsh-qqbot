@@ -7,7 +7,6 @@ and passes the user's text through.
 
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -85,14 +84,16 @@ class DSHClient:
             self._harness = None
             self._sessions.clear()
 
-    def _ensure_locked(self):
+    def _ensure_locked(self, turn_env: dict[str, str] | None = None):
         if self._harness is not None:
             return self._harness
         if DeepSeekHarness is None:
             raise DSHError("deepseek-harness-sdk is not installed in this venv")
 
-        os.environ["DSH_SYSTEM_PROMPT"] = self._system_prompt
-        os.environ.setdefault("DSH_HOME", self.config.home)
+        env = {"DSH_SYSTEM_PROMPT": self._system_prompt,
+               "QQBOT_CARD_BRIDGE": "", "QQBOT_CARD_SECRET": "", "QQBOT_CARD_LEASE": ""}
+        if turn_env:
+            env.update(turn_env)
         log.info(
             "starting DSH runtime (home=%s profile=%s provider=%s model=%s)",
             self.config.home, self.config.profile, self.config.provider, self.config.model,
@@ -111,6 +112,7 @@ class DSHClient:
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
                 request_timeout_seconds=self.config.request_timeout,
+                env=env,
                 **kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the bot
@@ -177,6 +179,25 @@ class DSHClient:
                 raise DSHError(f"DSH run failed: {type(exc).__name__}") from exc
             reply = self._reply_from_result(result)
             return reply, list(getattr(result, "events", None) or [])
+
+    def run_authorized(
+        self, session_id: str, text: str, images: Any, turn_env: dict[str, str],
+    ) -> tuple[str, list[Any]]:
+        """A dedicated child has an immutable nonce; close before releasing the lock.
+
+        Cancelling the async caller does not stop this thread. Its nonce is revoked
+        by the caller, and no later turn can reuse this child's environment.
+        """
+        with self._lock:
+            self._reset_locked()
+            try:
+                harness = self._ensure_locked(turn_env)
+                result = self._run_locked(harness, session_id, text, images)
+                return self._reply_from_result(result), list(getattr(result, "events", None) or [])
+            except Exception as exc:
+                raise DSHError(f"DSH authorized turn failed: {type(exc).__name__}") from exc
+            finally:
+                self._reset_locked()
 
     def run(self, session_id: str, text: str, images: Any = ()) -> str:
         return self.run_with_events(session_id, text, images)[0]

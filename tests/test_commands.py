@@ -10,6 +10,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
@@ -43,9 +44,14 @@ class FakeBot:
         self.card_reloads = 0
 
     async def switch_card(self, event, record) -> dict:
-        scope = getattr(event, 'message_type', 'private')
+        scope = getattr(event, 'message_type', None)
         group_id = getattr(event, 'group_id', None)
-        conversation = f'group:{group_id}' if scope == 'group' and group_id else f'private:{event.user_id}'
+        if scope == 'group' and group_id:
+            conversation = f'group:{group_id}'
+        elif scope == 'private':
+            conversation = f'private:{event.user_id}'
+        else:
+            raise ValueError('unknown conversation')
         job = self.personas.enqueue(conversation, record, actor=str(event.user_id))
         if job['phase'] == 'queued':
             self.personas.bind(job['id'], 0)
@@ -222,17 +228,20 @@ class CommandRouterTests(unittest.TestCase):
         self.bot.cards.close()
         self.tmp.cleanup()
 
-    def run_command(self, text: str, user_id: int = 1, images: tuple[str, ...] = ()) -> None:
-        event = SimpleNamespace(user_id=1 if user_id == 1 else user_id, images=images)
+    def run_command(self, text: str, user_id: int = 1, images: tuple[str, ...] = (),
+                    message_type: str | None = "private", group_id: int | None = None) -> None:
+        event = SimpleNamespace(user_id=user_id, images=images, group_id=group_id)
+        if message_type is not None:
+            event.message_type = message_type
         asyncio.run(self.router.handle(event, text))
 
     def active_id(self) -> int | None:
         active = self.bot.cards.active()
         return active.id if active else None
 
-    def test_non_admin_is_ignored(self) -> None:
-        self.run_command("/model 2", user_id=2)
-        self.run_command("/card use 2", user_id=2)
+    def test_non_admin_management_commands_are_ignored(self) -> None:
+        for text in ("/model 2", "/reset", "/help", "/task list", "/sub list"):
+            self.run_command(text, user_id=2)
         self.assertEqual(self.bot.sent, [])
         self.assertEqual(self.bot.reloads, 0)
         self.assertEqual(self.bot.card_reloads, 0)
@@ -284,6 +293,127 @@ class CommandRouterTests(unittest.TestCase):
         self.assertIn("没有可汇总", self.bot.sent[0])
 
     # ---------------------------------------------------------------- cards
+
+    def assert_public_card_response(self, text: str) -> None:
+        for command in ("/card install", "/card delete", "/card alias"):
+            self.assertNotIn(command, text)
+
+    def test_private_player_card_browsing_aliases(self) -> None:
+        for prefix in ("/card", "/cards", "/CaRdS"):
+            for action in ("", "list", "ls", "LIST", "search 图书", "find 图书",
+                           f"show {self.a.id}", f"info {self.a.id}", "help", "?"):
+                with self.subTest(prefix=prefix, action=action):
+                    self.bot.sent.clear()
+                    self.run_command(f"{prefix} {action}", user_id=2)
+                    self.assertEqual(len(self.bot.sent), 1)
+                    self.assert_public_card_response(self.bot.sent[0])
+                    if action not in ("help", "?"):
+                        self.assertIn("阿杜", self.bot.sent[0])
+
+    def test_private_player_switches_by_id_name_and_alias_only_self(self) -> None:
+        self.bot.cards.add_alias(self.b.id, "登山伙伴")
+        before = {key: self.bot.personas.effective(key).token
+                  for key in ("private:1", "private:3", "group:42")}
+        for prefix in ("/card", "/cards"):
+            for action in ("use", "switch", "USE"):
+                for target in (str(self.b.id), "小林", "登山伙伴"):
+                    with self.subTest(prefix=prefix, action=action, target=target):
+                        self.run_command(f"/card use {self.a.id}", user_id=2)
+                        self.run_command(f"{prefix} {action} {target}", user_id=2)
+                        self.assertEqual(self.bot.personas.effective("private:2").record.id, self.b.id)
+                        self.assertEqual(self.active_id(), self.a.id)
+                        self.assertEqual({key: self.bot.personas.effective(key).token for key in before}, before)
+        self.run_command("/card", user_id=2)
+        self.assertIn("本会话: 小林", self.bot.sent[-1])
+        self.assertEqual(self.bot.card_reloads, 0)
+
+    def test_non_admin_card_commands_require_explicit_private_event(self) -> None:
+        with patch.object(self.bot, "switch_card", new_callable=AsyncMock) as switch:
+            for scope in ("group", None, "unknown", ""):
+                for command in ("/card", "/cards search 图书", "/card show 1", "/card help", "/card use 2"):
+                    with self.subTest(scope=scope, command=command):
+                        self.run_command(command, user_id=2, message_type=scope, group_id=42)
+            switch.assert_not_awaited()
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual(self.bot.personas.queued(), [])
+
+    def test_private_player_cannot_access_management_actions(self) -> None:
+        self.bot.cards.add_alias(self.a.id, "保留别名")
+        before = self.bot.cards.list()
+        commands = [f"{action} {source}" for action in ("install", "add", "INSTALL")
+                    for source in ("", "https://example.com/card.png", "/server/private.json")]
+        commands += [f"{action} {self.b.id}" for action in ("delete", "rm", "remove")]
+        commands += [f"{action} {operation} 保留别名" for action in ("alias", "aliases", "nick")
+                     for operation in ("", "list", "ls", "add", "+", "remove", "rm", "del", "delete", "-")]
+        with (patch("commands.fetch_card_bytes", new_callable=AsyncMock) as fetch,
+              patch("commands.Path.read_bytes") as read,
+              patch.object(self.router, "_install_card", new_callable=AsyncMock) as install,
+              patch.object(self.router, "_delete_card", new_callable=AsyncMock) as delete,
+              patch.object(self.router, "_card_alias", new_callable=AsyncMock) as alias):
+            for prefix in ("/card", "/cards"):
+                for command in commands:
+                    with self.subTest(prefix=prefix, command=command):
+                        self.run_command(f"{prefix} {command}", user_id=2, images=("https://example.com/image.png",))
+                        self.assertIn("仅管理员", self.bot.sent[-1])
+                        self.assert_public_card_response(self.bot.sent[-1])
+            fetch.assert_not_awaited()
+            read.assert_not_called()
+            install.assert_not_awaited()
+            delete.assert_not_awaited()
+            alias.assert_not_awaited()
+        self.assertEqual(self.bot.cards.list(), before)
+        self.assertEqual(self.bot.personas.queued(), [])
+
+    def test_private_player_help_missing_targets_and_same_card(self) -> None:
+        for command in ("/card help", "/card ?", "/card wat", "/card use 不存在", "/card show 不存在",
+                        "/card use", "/card show", "/card search", "/card search 不存在"):
+            with self.subTest(command=command):
+                self.run_command(command, user_id=2)
+                self.assert_public_card_response(self.bot.sent[-1])
+        self.run_command(f"/card use {self.a.id}", user_id=2)
+        self.assertIn("当前会话已经是", self.bot.sent[-1])
+
+    def test_private_player_ambiguous_card_uses_safe_candidates(self) -> None:
+        self.bot.cards.install_payload(card_payload("小林同伴"))
+        self.run_command("/card use 小", user_id=2)
+        self.assertIn("多个匹配", self.bot.sent[-1])
+        self.assert_public_card_response(self.bot.sent[-1])
+        self.assertEqual(self.bot.personas.effective("private:2").record.id, self.a.id)
+
+    def test_empty_card_library_has_safe_private_player_hint(self) -> None:
+        with (patch.object(self.bot.cards, "list", return_value=[]),
+              patch.object(self.router, "_current_card", side_effect=AssertionError("no effective card"))):
+            self.run_command("/card", user_id=2)
+            self.assertIn("暂无可用角色", self.bot.sent[-1])
+            self.assert_public_card_response(self.bot.sent[-1])
+            self.run_command("/card", user_id=1)
+            self.assertIn("/card install", self.bot.sent[-1])
+
+    def test_private_player_card_details_hide_operational_metadata(self) -> None:
+        record, _ = self.bot.cards.install_payload(
+            card_payload("来源测试", description="公开简介", creator="作者", character_version="v1"),
+            source="/srv/secret-cards/private.json", source_kind="internal-file", installed_by="99887766",
+        )
+        self.run_command(f"/card show {record.id}", user_id=2)
+        public = self.bot.sent[-1]
+        for marker in (record.source, record.source_kind, record.installed_by, "来源:", "安装:"):
+            self.assertNotIn(marker, public)
+        for marker in ("来源测试", "公开简介", "作者", "v1"):
+            self.assertIn(marker, public)
+        self.run_command(f"/card show {record.id}")
+        for marker in (record.source, record.source_kind, record.installed_by):
+            self.assertIn(marker, self.bot.sent[-1])
+
+    def test_private_player_switch_errors_hide_internal_details(self) -> None:
+        with patch.object(self.bot, "switch_card", new_callable=AsyncMock) as switch:
+            switch.side_effect = sqlite3.OperationalError("/srv/private/database.db")
+            self.run_command(f"/card use {self.b.id}", user_id=2)
+            self.assertNotIn("/srv/private", self.bot.sent[-1])
+            switch.side_effect = None
+            switch.return_value = {"id": "failed-job", "phase": "failed", "error": "/srv/private/model-key"}
+            self.run_command(f"/card use {self.b.id}", user_id=2)
+            self.assertNotIn("/srv/private", self.bot.sent[-1])
+            self.assertIn("failed-job", self.bot.sent[-1])
 
     def test_card_alias_add_list_remove(self) -> None:
         self.run_command("/card alias add 小杜")
