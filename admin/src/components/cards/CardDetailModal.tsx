@@ -304,6 +304,7 @@ function MetaTab({ detail, data }: { detail: CardDetail; data: CardDataV3 }) {
       <MetaGrid
         rows={[
           ["卡库 ID", `#${detail.id}`],
+          ["稳定角色 ID", detail.character_id || "待迁移", true],
           ["规范", `${detail.spec} ${detail.spec_version}`],
           [
             "导入格式",

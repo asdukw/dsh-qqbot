@@ -76,6 +76,8 @@ class PersonaStore:
         columns = {row[1] for row in self._db.execute('PRAGMA table_info(persona_switches)')}
         if 'applied_token' not in columns:
             self._db.execute("ALTER TABLE persona_switches ADD COLUMN applied_token TEXT NOT NULL DEFAULT ''")
+        if 'story_prepared' not in columns:
+            self._db.execute("ALTER TABLE persona_switches ADD COLUMN story_prepared TEXT NOT NULL DEFAULT ''")
         self._db.commit()
 
     def effective(self, conversation_id: str) -> Persona:
@@ -160,7 +162,7 @@ class PersonaStore:
         return cursor.rowcount == 1
 
     def update(self, job_id: str, **fields: Any) -> None:
-        allowed = {'phase', 'announcement', 'opening', 'receipts', 'opening_pending', 'error'}
+        allowed = {'phase', 'announcement', 'opening', 'receipts', 'opening_pending', 'error', 'story_prepared'}
         if not fields or not fields.keys() <= allowed:
             raise ValueError('invalid switch update')
         with self._lock, self._db:
@@ -189,6 +191,14 @@ class PersonaStore:
                 (f"{current.epoch + 1}:{job['fingerprint']}", int(time.time()), job_id),
             )
         return self.effective(job['conversation_id'])
+
+    def story_seen(self, conversation_id: str, fingerprint: str) -> bool:
+        with self._lock:
+            return self._db.execute(
+                "SELECT 1 FROM persona_switches WHERE conversation_id=? AND fingerprint=? "
+                "AND phase='complete' AND story_prepared NOT IN ('','null') LIMIT 1",
+                (conversation_id, fingerprint),
+            ).fetchone() is not None
 
     def opening(self, conversation_id: str) -> str:
         with self._lock:

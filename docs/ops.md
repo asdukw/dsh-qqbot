@@ -136,6 +136,10 @@ systemctl start qqbot qqbot-admin
 
 ## 常见故障
 
+**进程健康不等于 QQ 在线。** `/healthz` 只检查面板存活；`/readyz` 会携带服务器端凭据探测 OneBot `get_status`，只有账号 online 且无明确故障时返回200，断连/待扫码返回503（10秒缓存，5秒探测上限），不返回token或原始错误。系统页显示实际链路状态，部署检查也必须检查readyz。QQ登录失效时NapCat容器可能仍是running，systemd不会触发OnFailure，且不能依赖同一失效QQ链路私聊告警；外部可监测readyz。
+
+2026-10-26 10:53:47（Asia/Shanghai）事故确认：NapCat `KickedOffLine` 显示登录失效，10:53:51 OneBot断开，此后需扫码；无服务退出或OOM证据。不要用循环重启企图绕过QQ重新授权。
+
 **QQ 掉线或提示重新登录。** 主进程日志会反复出现 OneBot 重连。检查 `cd /opt/qqbot/napcat && docker compose ps`，然后 `napcat-qr` 打印现有二维码；过期或已失效时用 `napcat-qr --fresh` 重启 NapCat 强制生成新码。扫码后不需要重启 qqbot。
 
 **主进程起不来或反复退出。** 先看 `journalctl -u qqbot -n 100`：TOML 解析错误、数据库权限、激活模型没 key 都会在启动阶段报出来。修好后 `systemctl reset-failed qqbot && systemctl restart qqbot`。

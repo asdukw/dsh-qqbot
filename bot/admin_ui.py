@@ -53,6 +53,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from admin_insights import clean_conversation, fun_data, usage_data
+from admin_story import queue_story, story_data, story_detail
 from approvals import ApprovalRecord, ApprovalStore
 from models import (
     BUILTIN_PROVIDERS,
@@ -63,6 +64,7 @@ from models import (
 )
 from sessions import SessionStore
 from stickers import StickerStore
+from transport_health import transport_health
 from usage import conversation_label
 
 log = logging.getLogger("qqbot.admin")
@@ -1098,6 +1100,7 @@ def card_detail_data(config: dict[str, Any], card_id: int) -> dict[str, Any] | N
         "creator": str(row["creator"] or ""),
         "character_version": str(row["character_version"] or ""),
         "fingerprint": str(row["fingerprint"] or ""),
+        "character_id": str(dict((db_rows(db_paths(config)["cards"], "SELECT character_id FROM cards WHERE id=?", (card_id,)) or [{}])[0]).get("character_id", "")),
         "source_kind": str(row["source_kind"] or ""),
         "source": str(row["source"] or ""),
         "installed_by": str(row["installed_by"] or ""),
@@ -1310,6 +1313,7 @@ def system_data(config: dict[str, Any], static_dir: str = "") -> dict[str, Any]:
         "uptime_seconds": max(0, int(time.time()) - STARTED_AT),
         "python": platform.python_version(),
         "static_dir": static_dir,
+        "transport": transport_health(config),
         "admin": {
             "host": str(admin.get("host", "127.0.0.1")),
             "port": int(admin.get("port", 8080)),
@@ -1586,8 +1590,29 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not self._source_allowed():
             return
 
+        if path == '/readyz':
+            result = transport_health(self.config)
+            self._send_json(HTTPStatus.OK if result['ready'] else HTTPStatus.SERVICE_UNAVAILABLE, result)
+            return
+
         if path == "/api/session":
             self._send_json(HTTPStatus.OK, {"authenticated": self._valid_session()})
+            return
+        if path == '/api/story' or path.startswith('/api/story/'):
+            if not self._api_guard():
+                return
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                offset = max(0, int((query.get('offset') or ['0'])[0]))
+                if path == '/api/story':
+                    result = story_data(db_paths(self.config)['profile'], self.config.get('story') or {}, offset=offset)
+                else:
+                    key = path.removeprefix('/api/story/')
+                    kind = (query.get('kind') or ['run'])[0]
+                    result = story_detail(db_paths(self.config)['profile'], key, kind=kind, offset=offset)
+                self._send_json(HTTPStatus.OK, result)
+            except (ValueError, OSError, sqlite3.Error):
+                self._send_json(HTTPStatus.BAD_REQUEST, {'error': '剧情数据不可用或参数无效'})
             return
         resources = {
             "/api/models": models_data,
@@ -1768,6 +1793,24 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"ok": True}, headers=headers)
             return
 
+        if path == '/api/story/action':
+            if not self._api_guard() or not self._mutation_guard():
+                return
+            try:
+                length = int(self.headers.get('Content-Length') or 0)
+                if not 0 < length <= 4096:
+                    # Drain only a small, bounded excess so closing an unread
+                    # request does not reset the connection before HTTP 413.
+                    if 0 < length <= 65536:
+                        self.rfile.read(length)
+                    self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {'error': '请求须为 1–4096 字节，未截断保存'})
+                    self.close_connection = True
+                    return
+                result = queue_story(db_paths(self.config)['profile'], self._read_payload(), self.config.get('story') or {})
+                self._send_json(HTTPStatus.OK, result)
+            except (ValueError, OSError, sqlite3.Error):
+                self._send_json(HTTPStatus.BAD_REQUEST, {'error': '无效剧情操作，目标或版本可能已变化'})
+            return
         if path == "/api/models/provider-models":
             if not self._api_guard() or not self._mutation_guard():
                 return

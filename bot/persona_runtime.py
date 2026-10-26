@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from content_policy import SAFE_PROMPT, require_safe, safe_text
 from dsh_client import DSHError
 from log_context import get_logger
 from onebot import MessageEvent, OneBotError, OneBotRejected
@@ -63,28 +64,42 @@ class PersonaRuntime:
         lore = persona.card.lorebook.select(text, max_chars=self.config.bot.lore_max_chars)
         prompt = build_system_prompt(persona.card.data, persona.card.name, user_name,
                                      datetime.now(TZ), lore)
-        self.conversations.prepare_persona(session_id, conversation_id, persona.token, prompt)
+        prompt += '\n\n' + SAFE_PROMPT
+        story = getattr(self, 'story', None)
+        relation_prompt = story.context(conversation_id, persona, str(user_id)) if story is not None and story.enabled and user_id else ''
+        self.conversations.prepare_persona(session_id, conversation_id, persona.token, prompt, relation_prompt)
         return persona
 
     def _opening_context(self, conversation_id: str) -> str:
         opening = self.personas.opening(conversation_id)
         return '\n\n[此前已发送的角色开场白，不要再发送]\n' + opening if opening else ''
 
+    def _authorize_switch(self, conversation_id: str, actor: str) -> None:
+        scope, chat_id = target_of(conversation_id)
+        if actor == 'cli':
+            return
+        if actor.isdecimal() and int(actor) > 0:
+            user_id = int(actor)
+            if self.is_admin(user_id) or (scope == 'private' and chat_id == user_id):
+                return
+        raise ValueError('switch actor is not authorized for this conversation')
+
     async def switch_card(self, event: MessageEvent, record: CardRecord) -> dict:
-        if not self.is_admin(event.user_id):
-            raise ValueError('only administrators can switch personas')
-        if event.message_type == 'group' and event.group_id:
+        message_type = getattr(event, 'message_type', None)
+        if message_type == 'group' and event.group_id:
             conversation_id = f'group:{event.group_id}'
-        elif event.message_type == 'private':
+        elif message_type == 'private':
             conversation_id = f'private:{event.user_id}'
         else:
             raise ValueError('unknown conversation')
+        self._authorize_switch(conversation_id, str(event.user_id))
         job = self.personas.enqueue(conversation_id, record, actor=str(event.user_id))
         if job['phase'] == 'queued':
             await self._execute_switch(job['id'])
         return self.personas.job(job['id'])
 
     async def _send_receipt(self, scope: str, chat_id: int, text: str) -> dict:
+        require_safe(text)
         if scope == 'group':
             result = await self.onebot.send_group(chat_id, text)
             self._remember_own_message(chat_id, int(result.get('message_id') or 0))
@@ -102,9 +117,7 @@ class PersonaRuntime:
             if not self.personas.claim(job_id):
                 return
             try:
-                if job['actor'] != 'cli' and (not job['actor'].isdigit()
-                                              or not self.is_admin(int(job['actor']))):
-                    raise ValueError('switch actor is no longer an administrator')
+                self._authorize_switch(conversation_id, job['actor'])
                 current = self.personas.effective(conversation_id)
                 already_bound = bool(job['applied_token']) and current.token == job['applied_token']
                 if not already_bound and current.token != job['expected_token']:
@@ -112,6 +125,14 @@ class PersonaRuntime:
                 scope, chat_id = target_of(conversation_id)
                 card = CharacterCard.from_payload(json.loads(job['payload']))
                 receipts = json.loads(job['receipts'])
+                story = getattr(self, 'story', None)
+                target_record = self.personas.cards.get(job['card_id'])
+                prepared = json.loads(job['story_prepared']) if job.get('story_prepared') else None
+                if not job.get('story_prepared') and story is not None:
+                    prepared = await story.prepare_switch(conversation_id, target_record)
+                    if prepared is not None:
+                        prepared['returning'] = self.personas.story_seen(conversation_id, job['fingerprint'])
+                    self.personas.update(job_id, story_prepared=json.dumps(prepared))
                 if not already_bound:
                     notice = f"系统即将切换本{'群' if scope == 'group' else '会话'}人设：{current.card.name} → {card.name}，请稍候。"
                     self.personas.update(job_id, phase='announcing', announcement=notice)
@@ -128,6 +149,10 @@ class PersonaRuntime:
                 self.sessions.reconcile_persona(conversation_id, current.token, current.cutoff, explicit=True)
                 opening = job['opening'] or substitute(card.data.get('first_mes', ''), card.name,
                                                        '大家' if scope == 'group' else '你', datetime.now(TZ))
+                if prepared and prepared['returning']:
+                    opening = ''
+                if not safe_text(opening):
+                    opening = '角色原开场白不适合当前内容范围；请使用安全的剧情入口。'
                 self.personas.update(job_id, phase='opening', opening=opening)
                 # Preserve card text exactly; split only at the transport length limit.
                 limit = max(1, self.config.bot.max_reply_chars)
@@ -138,6 +163,17 @@ class PersonaRuntime:
                     receipt = await self._send_receipt(scope, chat_id, chunk)
                     receipts.append({'kind': 'opening', 'index': index, 'message_id': receipt['message_id']})
                     self.personas.update(job_id, receipts=json.dumps(receipts))
+                if prepared and story is not None:
+                    synopsis = story.public_opening(prepared)
+                    public_chunks = [synopsis[i:i + limit] for i in range(0, len(synopsis), limit)]
+                    for index, chunk in enumerate(public_chunks):
+                        if any(r.get('kind') == 'story' and r.get('index') == index for r in receipts):
+                            continue
+                        receipt = await self._send_receipt(scope, chat_id, chunk)
+                        receipts.append({'kind': 'story', 'index': index, 'message_id': receipt['message_id']})
+                        self.personas.update(job_id, receipts=json.dumps(receipts))
+                    story_receipts = [receipt for receipt in receipts if receipt.get('kind') == 'story']
+                    story.store.record_announcement(prepared['world']['id'], current.token, public_chunks, story_receipts)
                 self.personas.consume_opening(conversation_id)
                 self.personas.update(job_id, phase='complete', opening_pending=int(bool(opening)), error='')
                 log.info('persona switched: conv=%s card=%s job=%s', conversation_id, card.name, job_id)
@@ -151,12 +187,18 @@ class PersonaRuntime:
 
     def start_personas(self) -> None:
         self.personas.recover()
+        story = getattr(self, 'story', None)
+        if story is not None:
+            story.store.recover()
         self._persona_worker = asyncio.create_task(self._persona_loop(), name='qqbot-personas')
 
     async def _persona_loop(self) -> None:
         while True:
             try:
                 if self.onebot.connected:
+                    story = getattr(self, 'story', None)
+                    if story is not None:
+                        await story.tick()
                     for job in self.personas.queued():
                         await self._execute_switch(job['id'])
             except Exception:  # noqa: BLE001 - one bad request cannot stop the worker

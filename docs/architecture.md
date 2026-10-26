@@ -81,7 +81,7 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
    - 群聊被叫到（被 @、消息里出现角色卡的名字、或引用了机器人最近发的消息）：生成 `conversation_id = group:<group_id>`，直接回复；
    - 其余群消息：放进该群的内存缓冲（`bot/group_context.py`，默认最近 30 条；图片消息同时保留图片 URL），再交给 `[bot.proactive]` 判定是否主动接话（概率、冷却、小时/天配额、安静时段、关键词、接话窗口）。
 3. `session_id = conversation_id.replace(":", "-")`。
-4. 读取角色卡库的 active signature（`id` / `updated_at` / `fingerprint`）；变化时重新生成系统提示词、原子写 `memory/lore.md`、重启 DSH runtime（session 保留）。`/card use` 会直接触发这次刷新；`[cards] bootstrap` 文件被修改时也会被检测到。
+4. 读取当前 conversation 的人设快照，按 token/revision 轮换该会话 generation；每轮写入 `session_personas` 的专属 prompt，不再生成共享 `memory/lore.md` 或因切卡重启整个 DSH。
 5. 把身份写进 `profile.db` 的 `conversations` 表：`session_id → scope, user_id, group_id, sender_name`（`bot/conversations.py`）。
 6. 群聊时取出并清空该群缓冲，和被叫到的那句拼成一条用户消息：`[群聊里最近的消息] … [有人 @ 你] 昵称(QQ号): 内容`；每行都带发言者 QQ 号（群名片相同的人也能区分），消息头的发言者若还有不同的 QQ 昵称会额外注明。
 7. 图片：进入 DSH 历史的内容只有文字。图片下载后按 SHA-1 存到 `<dsh.workspace>/images/<sha1>.<ext>`（`bot/images.py`），用当前模型生成一次描述并缓存到 `memory.db` 的 `image_captions` 表；prompt 里只放 `[图片附件] 描述 + 相对路径`，模型需要细节时用 `read_image` 工具按路径读取原图（`tool-fs.readImage = true`）。同一张图重复出现只调用一次视觉模型。图片准备是并行的，每张最多 `[dsh] image_prepare_timeout`（默认 30s）；描述调用 `image_caption_timeout`（默认 15s）且不重试，超时就退化为文字 + 原图路径，不会让回复等上几分钟。`[dsh] image_mode = "inline"` 可回退到旧的图片块行为；thin client 路径仍然使用 `image_url`。
@@ -105,7 +105,7 @@ DSH SDK 的 `session/prompt` 只接受 `sessionId` 和 `contentBlocks`，没有�
 ## 画像插件（`dsh/user-profile.mjs`）
 
 - 在 `agent/created` 里为每个 agent 注册 **agent-scoped** 的变量 `user_profile`、`group_profile` 和 section `user-profile`（order 8000），只影响当前 agent。
-- 用户画像 `user_facts`，主键 `(user_id, key)`，**按 QQ 号**，私聊和群聊共用：
+- 用户画像 `user_facts`，主键 `(user_id, group_id, key)`；私聊 group_id 为空，群 facts 按当前群隔离：
   - `visibility`：私聊写入默认 `private`，可显式设为 `public`；群聊写入一律 `public`；
   - 群聊里只读、只注入、只删 `public` 事实，且不能用公开值覆盖同 key 的私密事实；
   - 私聊注入时私密事实带「（私密）」标记，提醒模型别带到别处。
@@ -123,13 +123,14 @@ CREATE TABLE conversations (
 );
 CREATE TABLE user_facts (
   user_id    TEXT NOT NULL,
+  group_id   TEXT NOT NULL DEFAULT '',
   key        TEXT NOT NULL,
   value      TEXT NOT NULL,
   visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
   source     TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (user_id, key)
+  PRIMARY KEY (user_id, group_id, key)
 );
 CREATE TABLE group_facts (
   group_id   TEXT NOT NULL,
@@ -186,6 +187,18 @@ DSH 的上下文只包含当前 generation；旧 session JSONL 在 `$DSH_HOME/se
 - 切换轮换 session generation，并使用消息 ID cutoff 隔离 fallback history 和自动 FTS/LIKE recall；旧档案保留，显式查询旧 session 时提示此前人设阶段。
 - `bootstrap` 兼容：库为空时导入 `[cards] bootstrap`；未引用的默认 bootstrap 卡按 mtime 重新导入；绑定/任务引用的版本不可原地改写或去重删除。
 - 命令行：`--list-cards`、`--search-cards <query>`、`--install-card <url|path>`、`--use-card <id|name> --conversation group:<id>`、`--switch-status <id>`、`--resume-switch <id>`、`--show-card`、`--add-card-alias <name>`、`--remove-card-alias <name>`。
+
+### 管理员语义角色工具
+
+`dsh/card-tools.mjs` 注册 `card_library`、`card_online_search`、`card_install`，复用官方 `ctx.web.search` 与现有 keyless provider。模型只提供查询或候选 ID；插件将真实搜索 sources 直接交给 `bot/card_service.py` 的内部登记接口。Python 抓取静态页面真实下载 href/直接卡 JSON，不运行页面脚本、不猜站点 API；候选绑定 `(actor, conversation, batch, number, TTL)`，后续编号必须对应最新有效批次。
+
+CardService 在随机 `127.0.0.1` 端口提供有凭证、有限请求体/并发/时间的桥接。真实管理员 chat 回合在 `_reply_dsh` 开始 DSH 调用时创建 lease，绑定原事件、session、persona token 和随机 nonce。固定 SDK 无逐轮 env/metadata，因此 `DSHClient.run_authorized` 在线程锁内关闭旧 runtime、以显式 SDK env 创建当轮独立 runtime，结束即关闭；普通 runtime 的 card env 为空，工具不注册。session ID/历史不变。取消先撤销 lease，再等旧线程关闭，防止迟到工具借用下一轮权限。代价是管理员聊天轮的额外启动开销。
+
+`card_fetch.fetch_public_card_content` 是独立的自主下载边界：公网 HTTPS/443、禁代理、固定已校验 IP、原始 Host/TLS SNI、逐跳验证、总超时、12 MiB 上限、拒绝 HTTP 压缩。`CharacterCard.from_bytes(strict=True)` 在归一化前验证原始卡结构、JSON 深度和 PNG 完整性，元数据解压有界；旧的显式管理员文件/附件导入保留兼容性。安装复用 `CardRegistry` 的归一化与指纹去重，不默认 use。
+
+`card_library use` 只记录 `DeferredCardSwitch`，不在模型调用内 `switch_card` 或 `enqueue`：前者重入会话锁，后者会让当前 `_persona` 因 pending 拒绝发送。当前轮严格确认文本分片回执，返回 deferred，`handle` 退出 guard 后重新取会话锁同步复核 token/权限再入队，由 persona worker 完成预告/绑定/开场白。失败、取消或未知回执不入队，安装已经落库则仍保留。
+
+验证入口：`tests/test_card_service.py`、`tests/test_card_fetch.py`、`tests/test_personas.py` 和 `scripts/check_card_tools_runtime.py`。SDK smoke 使用真实工具注册/搜索 seam/HTTP bridge/临时库，不依赖外网；公网来源可用性需另外只读检查，不能由 fixture 代替。
 
 ## 表情包库（`bot/stickers.py`）
 
@@ -296,8 +309,8 @@ auto: true
 
 ## 文件记忆
 
-- `memory/lore.md`：角色卡世界书，启动/换卡时由 adapter 生成；
-- `memory/notes/`：模型自由写入的事件、约定、摘要；
+- 角色卡和世界书按 session 注入，不再写共享 `memory/lore.md`；
+- `memory/notes/`：共享工具工作区，不承担个人剧情/私密关系存档；
 - `memory/profiles/`：旧版 JSON 画像的兼容目录（SQLite 版不再写入，可删除）。
 
 工作区是模型唯一可写的文件区域。密钥、数据库和 DSH session 日志都在工作区之外；旧 session JSONL 由 `session-history` 插件只读、按需访问。
@@ -317,3 +330,25 @@ auto: true
 - `deepseek-harness-sdk` 固定 `0.2.1rc2`；DSH 的插件 API 仍是 developer preview。
 - 升级步骤：改 `deploy/install-bot.sh` 里的版本 → 重新安装 → 用 `dsh --profile qqbot --dump-config` 验证 profile → 跑 `--check-dsh`。
 - 如果 DSH 改了 `agent/created`、`ctx.systemPrompt` 或 `ToolDefinition`，需要同步调整 `dsh/user-profile.mjs` 和 `dsh/session-history.mjs`。
+
+## Galgame 运行时
+
+`story_models.py` 定义有界、无环的章节图、条件选项、效果与延迟事件；Pydantic 拒绝未知字段，规则验证引用、可达性、保底选项和关系前置。世界包含人物摘要与分阶段语气；不是完整剧情树，也不执行卡片脚本。
+
+`story_generation.py` 只用无工具 compatible client，输入当前角色/世界、本人关系与已确认事件，无群 DSH history 或共享文件记忆。`LLMClient.complete()` opt-in 返回 finish_reason/usage；默认 chat payload 不变。JSON 模式可配置，本地 schema/语义校验始终开启，最多一次修复，总超时/并发/长度有界。
+
+`story_store.py` 在 profile.db 保存 schema 版本、world/run/relation/menu/action/event/outbox、权限、设置、审计及30天无正文生成诊断。关系身份为 conversation+character+user，周目独立 run_id；character_id 是本地稳定角色身份，卡片 fingerprint 与 persona epoch 不是存档键。
+
+选项先验证本人/作用域/菜单版本/token/过期与去重，冻结效果在候选状态执行，生成下一幕且通过验证后，一次 BEGIN IMMEDIATE 事务消费菜单、写实际关系/状态、事件及 outbox。生成期间不占群会话锁或 SQL 事务，提交与发送短暂获取 conversation guard 并再次校验版本。网络 unknown 冻结、不自动重播；效果最多应用一次，不声称消息 exactly-once。
+
+切卡跨 characters.db/profile.db 沿现有 saga：准备并保存世界引用和原始投递内容→绑定→公共序幕。未完成切换阻止普通新回复。A→B→A 读取旧档，继续时新签菜单 token，旧菜单失效但选项含义不变。restart 确认后归档本人目标关系/周目，forget 清除该目标活动与归档内容；真实 facts 不改。
+
+普通聊天由 Python 准备 scoped relation_prompt，JS 插件只动态读取，不对新版关系另行分档/定价；旧 marker 仅兼容剥离。日常提案与剧情效果通过同一关系档，正向日预算不吞负向/印象。后台 mutation 认证/同源检查后入队，bot 重新核对完整目标和 revision；超过4096字节拒绝，不截断保存。
+
+### 生成协议 v2：检查点与分层校验
+
+`WorldBrief` 与 `StoryGraphDraft` 分别生成，本地组合成兼容的 `StoryDefinition`。检查点键包含 conversation/稳定角色/卡fingerprint/偏好hash/协议版本，未完成草稿不写入权威 world。只有完整验证通过后才执行原切卡bind；旧周目和既有world不重写。每阶段初次调用最多一次schema/语法反馈修复，候选正文只作为模型修复上下文，不进入公开日志；诊断只保留有界路径/类型/固定消息，不序列化input/ctx。截断、拒绝、内容策略、传输失败与校验失败分别报告。
+
+发布硬约束保留ID/引用/flag/效果/安全保底/无环/可到达结局；孤立未引用节点、采样未覆盖等为质量警告，采样预算耗尽记unknown，不证明剧本无效。`story_warnings` 在真实初值与阈值边界上有界探索。原满属性单一模拟移除。显式refresh可签发基于当前关系的新菜单，保持原choice内容与效果，旧菜单失效；普通continue仍复用冻结选项。
+
+排队、单次、阶段与准备总deadline分开，剩余时间约束每一次请求，传输attempts=1避免指数重试。场景不继承整图token上限。native严格输出仅显式配置；仅已知behavior闭域字典转换为固定五阶段对象，其他不支持schema拒绝，应用约束始终本地复验。面板展示attempt/stage/错误码和草稿状态，不暴露正文。

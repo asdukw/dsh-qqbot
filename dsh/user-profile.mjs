@@ -303,7 +303,15 @@ function affinityTier(value) {
   return '陌生'
 }
 
+function preparedRelation(sessionId) {
+  try {
+    return getDb().prepare('SELECT relation_prompt FROM session_personas WHERE session_id=?').get(sessionId)?.relation_prompt || ''
+  } catch { return '' }
+}
+
 function renderUserRelation(sessionId) {
+  const prepared = preparedRelation(sessionId)
+  if (prepared) return prepared
   const ctx = contextOf(sessionId)
   if (!ctx) return '（暂无）'
   let row
@@ -511,7 +519,7 @@ const MEMORY_NOTE =
   '群用 group_profile_read / group_profile_write / group_profile_forget。' +
   '对方说出关于自己的稳定事实时用 profile_write；群的话题、氛围、梗、约定用 group_profile_write。' +
   '私聊里得知的事默认私密，绝不在群里提起。' +
-  '事件和重要片段写到工作目录的 memory/notes/ 下；需要回忆时用 glob/grep/read。'
+  '虚构剧情/角色关系由程序管理，不写入真实用户画像或共享文件笔记；不从共享 notes 推断私人剧情。'
 
 export const name = 'user-profile'
 export const inject = ['tools', 'systemPrompt']
@@ -534,14 +542,15 @@ export function apply(ctx) {
         '所在群的画像：\n{{group_profile}}\n\n' +
         MEMORY_NOTE,
     })
-    if (relationEnabled()) {
-      agent.ctx.systemPrompt.variable('user_relation', () => renderUserRelation(sessionId))
+    {
+      agent.ctx.systemPrompt.variable('user_relation', () => preparedRelation(sessionId) || (relationEnabled() ? renderUserRelation(sessionId) : ''))
+      agent.ctx.systemPrompt.variable('relation_hint', () => preparedRelation(sessionId) || !relationEnabled() ? '' : RELATION_NOTE)
       agent.ctx.systemPrompt.section({
         name: 'user-relation',
         order: 8001,
         text:
           `你与当前说话人的关系：
-{{user_relation}}` + `${NL}${NL}${RELATION_NOTE}`,
+{{user_relation}}` + `${NL}${NL}{{relation_hint}}`,
       })
     }
   })

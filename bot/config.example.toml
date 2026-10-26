@@ -88,13 +88,37 @@ database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
 [relation]
-# Per-user affinity + impression. The main model updates it with hidden
-# markers ([好感+2] / [印象: ...] / [关系: ...]); /relation is public.
+# Legacy per-user affinity used only while [story] is disabled.
+# Story mode keeps this table read-only and uses scoped, event-based relations.
 enabled = true
 start_affinity = 20
 max_delta = 3
 cooldown_seconds = 60
 max_changes_per_day = 20
+
+[story]
+# Opt in via this flag or the private admin Story page. A card switch then
+# prepares the public story automatically; each /story start owns its own save.
+enabled = false
+timeout = 120           # one model call, not the entire preparation
+stage_timeout = 240     # includes at most one repair per stage
+prepare_timeout = 420   # brief + graph end-to-end deadline
+queue_timeout = 20
+brief_tokens = 1800
+scene_tokens = 1200
+output_mode = "legacy" # text | json_object | json_schema (confirmed providers only)
+max_tokens = 6000
+max_context_chars = 24000
+concurrency = 2
+menu_hours = 168
+daily_chat_gain = 5
+chat_cooldown = 120
+json_mode = false  # true only for providers supporting response_format
+# Per-character overrides use local character_id, never a display name:
+# [story.character_preferences."<32-character local id>"]
+# enabled = true
+# tone = "嘴硬心软，尊重自主选择"
+# pace = "日常铺垫、共同经历、冲突修复；不要跳到恋人"
 
 [usage]
 # Token ledger and per-message analytics for the admin UI.
@@ -103,8 +127,8 @@ retention_days = 90
 event_retention_days = 90
 
 [admin]
-# Admin UI. Only the model page writes (providers/models); the rest is
-# read-only. Bind localhost and reach it through Workbench port forwarding:
+# Admin UI: authenticated model/approval/sticker/story mutations.
+# Bind localhost and reach it through Workbench port forwarding:
 # workbench forward start --remote-port 8080 --local-port 8080.
 enabled = true
 host = "127.0.0.1"     # 0.0.0.0 only if the port is restricted in the security group

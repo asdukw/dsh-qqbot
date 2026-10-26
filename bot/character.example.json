@@ -20,7 +20,16 @@
     "tags": [],
     "creator": "",
     "character_version": "0.1",
-    "extensions": {},
+    "extensions": {
+      "qqbot": {
+        "galgame": {
+          "enabled": true,
+          "tone": "保留角色的说话方式、价值观和边界；友情与非露骨恋爱都有完整路线。",
+          "pace": "日常铺垫、共同经历、关键选择、分支汇合、冲突修复与后日谈；不从初识突然跳到恋人。",
+          "boundaries": "拒绝与设置边界不惩罚；不把高好感当作亲密授权。"
+        }
+      }
+    },
     "assets": [],
     "creator_notes_multilingual": {},
     "source": [],

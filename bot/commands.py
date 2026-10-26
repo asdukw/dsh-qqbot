@@ -1,4 +1,4 @@
-"""Admin-only chat commands. Commands never enter model history."""
+"""Chat commands with per-action authorization; never enter model history."""
 
 from __future__ import annotations
 
@@ -68,7 +68,9 @@ HELP = """可用命令:
 /task           定时任务（仅管理员）
 /daily [YYYY-MM-DD]     生成当前会话的每日日报（默认昨天，仅管理员）
 /sub            RSS / B 站订阅（仅管理员）
-/relation       查看 bot 对你的印象（所有人可用）
+/story          开始/继续个人剧情（所有人可用）
+/choose <菜单码> <编号>  选择自己的剧情选项
+/relation       查看当前角色关系（所有人可用）
 /help           显示帮助"""
 
 CARD_HELP = """/card                     列出角色卡
@@ -82,6 +84,17 @@ CARD_HELP = """/card                     列出角色卡
 /card alias add <名称>     添加别名，群里直接叫它就会被当成在找它
 /card alias remove <名称>  删除别名
 /card alias list <id|名称> 查看别的卡的别名"""
+
+
+PRIVATE_CARD_ACTIONS = frozenset((
+    "list", "ls", "search", "find", "show", "info", "use", "switch", "help", "?",
+))
+PRIVATE_CARD_HELP = """/card                     列出可用角色卡
+/card search <关键词>      搜索角色卡
+/card show <id|名称>       查看角色详情和别名
+/card use <id|名称>        切换自己的私聊角色（也可使用已有别名）
+/card help                显示选角帮助
+仅影响你与机器人的私聊；切回角色后可 /story continue 继续原剧情。"""
 
 
 TASK_HELP = """/task                     列出定时任务
@@ -127,8 +140,26 @@ class CommandRouter:
         text = strip_message_markers(text)
         parts = text.strip().split()
         name = parts[0].lower()
+        if name in ('/story', '/剧情', '/choose', '/选择'):
+            story = getattr(self.bot, 'story', None)
+            if story is None:
+                await self.bot.send_text(event, '剧情系统不可用。')
+                return
+            try:
+                response = await story.handle_command(event, name, parts[1:])
+                if response:
+                    await self.bot.send_text(event, response)
+            except ValueError as exc:
+                await self.bot.send_text(event, str(exc)[:200])
+            except Exception:
+                log.exception('story command failed')
+                await self.bot.send_text(event, '剧情操作未完成，进度不会重复生效。请 /story continue 重试。')
+            return
         if name in ("/relation", "/关系", "/好感度", "/印象"):
             await self._relation(event, parts[1:])
+            return
+        if name in ("/card", "/cards"):
+            await self._card(event, parts[1:])
             return
         if not self.bot.is_admin(event.user_id):
             log.info("ignoring command from non-admin %s: %.80s", event.user_id, text)
@@ -137,8 +168,6 @@ class CommandRouter:
             await self.bot.send_text(event, HELP)
         elif name in ("/model", "/models"):
             await self._model(event, parts[1:])
-        elif name in ("/card", "/cards"):
-            await self._card(event, parts[1:])
         elif name == "/proactive":
             await self._proactive(event, parts[1:])
         elif name in ("/reset", "/new"):
@@ -156,6 +185,14 @@ class CommandRouter:
 
     async def _relation(self, event: Any, args: list[str]) -> None:
         """Public read command; admins can also set/reset records."""
+        story = getattr(self.bot, 'story', None)
+        if story is not None and story.enabled:
+            if args and args[0] not in ('help', '?'):
+                await self.bot.send_text(event, '新版关系仅查看自己在当前角色/会话的进度；管理操作请使用后台。')
+                return
+            response = await story.command(event, ['status'])
+            await self.bot.send_text(event, response)
+            return
         store = getattr(self.bot, "relations", None)
         if store is None:
             await self.bot.send_text(event, "关系系统未启用。")
@@ -275,14 +312,26 @@ class CommandRouter:
         return self.bot.personas.effective(conversation_id).record
 
     async def _card(self, event: Any, args: list[str]) -> None:
-        registry = self.bot.cards
         action = args[0].lower() if args else "list"
+        is_admin = self.bot.is_admin(event.user_id)
+        if not is_admin:
+            if getattr(event, "message_type", None) != "private":
+                return
+            if action not in PRIVATE_CARD_ACTIONS:
+                await self.bot.send_text(event, "此操作仅管理员可用，私聊可使用以下选角命令：" + chr(10) + PRIVATE_CARD_HELP)
+                return
+        registry = self.bot.cards
         rest = args[1:]
         target = " ".join(rest).strip()
 
         if action in ("list", "ls"):
+            rows = registry.list()
+            if not rows:
+                empty = "角色卡库是空的。用 /card install <url|路径> 安装。" if is_admin else "角色卡库暂无可用角色，请联系管理员。"
+                await self.bot.send_text(event, empty)
+                return
             await self.bot.send_text(
-                event, self._render_cards(registry.list(), f"角色卡 (* = 全局默认，共 {registry.count()} 张；本会话: {self._current_card(event).display_name}):")
+                event, self._render_cards(rows, f"角色卡 (* = 全局默认，共 {registry.count()} 张；本会话: {self._current_card(event).display_name}):")
             )
         elif action in ("search", "find"):
             if not target:
@@ -303,7 +352,7 @@ class CommandRouter:
         elif action in ("alias", "aliases", "nick"):
             await self._card_alias(event, rest)
         elif action in ("help", "?"):
-            await self.bot.send_text(event, CARD_HELP)
+            await self.bot.send_text(event, self._card_help(event))
         else:
             await self.bot.send_text(event, f"未知角色卡命令: {action}\n{CARD_HELP}")
 
@@ -313,16 +362,20 @@ class CommandRouter:
             return
         record = self.bot.cards.resolve(target)
         if record is None:
-            await self.bot.send_text(event, await self._not_found(target))
+            await self.bot.send_text(event, await self._not_found(event, target))
             return
         try:
             job = await self.bot.switch_card(event, record)
         except (ValueError, sqlite3.Error) as exc:
-            await self.bot.send_text(event, f"切换失败: {exc}")
+            message = f"切换失败: {exc}" if self.bot.is_admin(event.user_id) else "切换未完成，请稍后重试或联系管理员。"
+            await self.bot.send_text(event, message)
             return
         if job['phase'] != 'complete':
             await self.bot.send_text(
-                event, f"切换任务 {job['id']}: {job['phase']}" + chr(10) + str(job['error'])
+                event, f"切换任务 {job['id']}: {job['phase']}" + (
+                    chr(10) + str(job['error']) if self.bot.is_admin(event.user_id)
+                    else chr(10) + "切换未完成，请联系管理员检查任务状态。"
+                )
             )
         elif not job['announcement']:
             await self.bot.send_text(event, f"当前会话已经是 #{record.id} {record.display_name}")
@@ -333,7 +386,7 @@ class CommandRouter:
             return
         record = self.bot.cards.resolve(target)
         if record is None:
-            await self.bot.send_text(event, await self._not_found(target))
+            await self.bot.send_text(event, await self._not_found(event, target))
             return
         try:
             card = record.card
@@ -343,14 +396,15 @@ class CommandRouter:
         data = card.data
         lines = [
             f"#{record.id} {record.display_name}" + ("（全局默认）" if record.is_active else ""),
-            f"来源: {record.source_kind} {record.source or '-'}",
             f"标签: {', '.join(record.tags) or '-'}",
             f"别名: {', '.join(record.aliases) or '-'}",
             f"作者: {record.creator or '-'}  版本: {record.character_version or '-'}",
             f"简介: {len(data.get('description', ''))} 字符  "
             f"世界书: {len(card.lorebook.entries)} 条",
-            f"安装: {record.installed_by or '-'}",
         ]
+        if self.bot.is_admin(event.user_id):
+            lines.insert(1, f"来源: {record.source_kind} {record.source or '-'}")
+            lines.append(f"安装: {record.installed_by or '-'}")
         preview = data.get("description", "").strip()
         if preview:
             lines.append("——")
@@ -411,7 +465,7 @@ class CommandRouter:
             return
         record = self.bot.cards.resolve(target)
         if record is None:
-            await self.bot.send_text(event, await self._not_found(target))
+            await self.bot.send_text(event, await self._not_found(event, target))
             return
         try:
             self.bot.cards.delete(record.id)
@@ -476,7 +530,7 @@ class CommandRouter:
         if target:
             record = registry.resolve(target)
             if record is None:
-                await self.bot.send_text(event, await self._not_found(target))
+                await self.bot.send_text(event, await self._not_found(event, target))
                 return
         else:
             record = self._current_card(event)
@@ -493,10 +547,13 @@ class CommandRouter:
             + "\n用 /card alias add <名称> 添加。",
         )
 
-    async def _not_found(self, target: str) -> str:
+    def _card_help(self, event: Any) -> str:
+        return CARD_HELP if self.bot.is_admin(event.user_id) else PRIVATE_CARD_HELP
+
+    async def _not_found(self, event: Any, target: str) -> str:
         matches = self.bot.cards.search(target, limit=5)
         if not matches:
-            return f"找不到角色卡: {target}\n{CARD_HELP}"
+            return f"找不到角色卡: {target}\n{self._card_help(event)}"
         return self._render_cards(matches, f"「{target}」有多个匹配，请用 id 指定:")
 
     @staticmethod

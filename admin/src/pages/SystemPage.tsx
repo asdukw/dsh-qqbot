@@ -42,6 +42,8 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
   return (
     <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
       {error ? <ErrorBanner message={error} /> : null}
+      {data?.transport && !data.transport.ready ? <ErrorBanner message="QQ 消息链路不可用：进程运行不代表账号在线。检查 NapCat 登录状态，必要时重新扫码；单纯重启 bot 不能恢复失效登录。" /> : null}
+      <p className="text-sm text-muted-foreground">QQ 连接：{data?.transport?.ready ? "在线，状态探测通过" : data?.transport?.state || "尚未检查"}；就绪检查 /readyz，离线返回 503。</p>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
@@ -71,7 +73,7 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
-        <SectionCard icon={Server} title="管理面板" description="模型页可写，其余只读；密码来自 bot.env">
+        <SectionCard icon={Server} title="管理面板" description="模型、审批与剧情可管理；密码来自 bot.env">
           <div className="divide-y divide-blue-50">
             <InfoRow label="监听" value={data ? `${data.admin.host}:${data.admin.port}` : "-"} mono />
             <InfoRow

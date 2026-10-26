@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bot'))
 
+from commands import CommandRouter  # noqa: E402
 from conversations import ConversationStore  # noqa: E402
 from dsh_client import DSHError  # noqa: E402
 from group_context import GroupContextBuffer  # noqa: E402
@@ -110,6 +111,38 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.memory.history('group:42', 10, after_id=current.cutoff), [])
         self.assertEqual(await self.memory.recall('group:42', 'secret', after_id=current.cutoff), [])
         self.assertEqual(await self.memory.count('group:42'), 1)
+
+    async def test_story_prepared_before_binding_and_public_synopsis(self) -> None:
+        from story_models import StorySettings
+        from story_runtime import StoryRuntime
+        from story_store import StoryStore
+        from test_story import definition
+        store = StoryStore(Path(self.tmp.name) / 'story.db')
+        self.bot.client = SimpleNamespace()
+        self.bot.story = StoryRuntime(self.bot, store, StorySettings(enabled=True))
+        generator = SimpleNamespace(client=self.bot.client, settings=self.bot.story.settings,
+                                    outline=AsyncMock(side_effect=ValueError('invalid JSON')))
+        self.bot.story._generator = generator
+        try:
+            failed = await self.bot.switch_card(self.event(), self.b)
+            self.assertEqual(failed['phase'], 'failed')
+            self.assertEqual(self.store.effective('group:42').record.id, self.a.id)
+            self.assertEqual(self.sends, [])
+            generator.outline.side_effect = None
+            generator.outline.return_value = definition()
+            completed = await self.bot.switch_card(self.event(), self.b)
+            self.assertEqual(completed['phase'], 'complete')
+            self.assertEqual(self.sends[1][2], self.b.card.data['first_mes'])
+            self.assertIn('序幕', self.sends[2][2])
+            self.assertIn('/story start', self.sends[2][2])
+            self.assertTrue(completed['story_prepared'])
+            await self.bot.switch_card(self.event(), self.c)
+            self.sends.clear()
+            await self.bot.switch_card(self.event(), self.b)
+            self.assertEqual(len(self.sends), 2)
+            self.assertIn('返回', self.sends[-1][2])
+        finally:
+            store.close()
 
     async def test_same_card_noop_and_repeat_switch_does_not_rotate(self) -> None:
         job = await self.bot.switch_card(self.event(), self.a)
@@ -242,10 +275,294 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         history = await self.memory.history('group:42', 10, after_id=cutoff)
         self.assertEqual([item['content'] for item in history], ['new abc 中文'])
 
-    async def test_non_admin_cannot_request_cutover(self) -> None:
+    async def test_non_admin_cannot_request_group_cutover(self) -> None:
         with self.assertRaises(ValueError):
             await self.bot.switch_card(self.event(user=9), self.b)
         self.assertFalse(self.sends)
+        self.assertEqual(self.store.queued(), [])
+
+    def private_event(self, user: int = 9) -> MessageEvent:
+        return MessageEvent('private', user, 1, 'hello', False, 'player')
+
+    async def test_private_player_switches_via_router_and_isolates_history(self) -> None:
+        self.bot.send_text = AsyncMock()
+        router = CommandRouter(self.bot)
+        await self.memory.add('private:9', 'assistant', 'old secret identity')
+        old = self.bot._persona('private:9')
+        generation = self.sessions.info('private:9').generation
+        others = {key: self.bot._persona(key).token for key in ('private:10', 'group:42')}
+        await router.handle(self.private_event(), f'/card use {self.b.id}')
+        current = self.bot._persona('private:9')
+        self.assertEqual(current.record.id, self.b.id)
+        self.assertNotEqual(current.token, old.token)
+        self.assertEqual([(scope, chat) for scope, chat, _ in self.sends], [('private', 9), ('private', 9)])
+        self.assertIn('即将切换', self.sends[0][2])
+        self.assertEqual(self.sends[1][2], self.b.card.data['first_mes'])
+        self.assertEqual(self.sessions.info('private:9').generation, generation + 1)
+        self.assertEqual(self.cards.active().id, self.a.id)
+        self.assertEqual({key: self.bot._persona(key).token for key in others}, others)
+        self.assertEqual(await self.memory.history('private:9', 10, after_id=current.cutoff), [])
+        self.assertEqual(await self.memory.recall('private:9', 'secret', after_id=current.cutoff), [])
+        self.bot._prepare_persona('private:9', 'private-9-test', self.private_event(), 'secret')
+        self.bot._prepare_persona('private:10', 'private-10-test', self.private_event(10), 'secret')
+        conn = sqlite3.connect(Path(self.tmp.name) / 'profile.db')
+        try:
+            prompts = dict(conn.execute('SELECT session_id, prompt FROM session_personas'))
+        finally:
+            conn.close()
+        self.assertIn('Alice world secret', prompts['private-9-test'])
+        self.assertNotIn('Default world secret', prompts['private-9-test'])
+        self.assertIn('Default world secret', prompts['private-10-test'])
+        await router.handle(self.private_event(), f'/cards switch {self.b.id}')
+        self.assertEqual(len(self.sends), 2)
+        self.assertEqual(self.sessions.info('private:9').generation, generation + 1)
+        self.bot.send_text.assert_awaited_once()
+
+    async def test_switch_rejects_missing_or_unknown_event_type_before_enqueue(self) -> None:
+        for user in (1, 9):
+            for kind in (None, 'unknown', ''):
+                with self.subTest(user=user, kind=kind):
+                    event = SimpleNamespace(user_id=user)
+                    if kind is not None:
+                        event.message_type = kind
+                    with self.assertRaises(ValueError):
+                        await self.bot.switch_card(event, self.b)
+        self.assertEqual(self.store.queued(), [])
+        self.assertEqual(self.sends, [])
+
+    async def test_worker_allows_self_private_and_cli_tasks(self) -> None:
+        for conversation, actor in (('private:9', '9'), ('group:42', 'cli')):
+            with self.subTest(conversation=conversation, actor=actor):
+                job = self.store.enqueue(conversation, self.b, actor=actor)
+                await self.bot._execute_switch(job['id'])
+                self.assertEqual(self.store.job(job['id'])['phase'], 'complete')
+                self.assertEqual(self.store.effective(conversation).record.id, self.b.id)
+        self.assertEqual([(scope, chat) for scope, chat, _ in self.sends],
+                         [('private', 9), ('private', 9), ('group', 42), ('group', 42)])
+
+    async def test_worker_rejects_cross_user_group_and_invalid_actor_without_side_effects(self) -> None:
+        self.bot.story = SimpleNamespace(prepare_switch=AsyncMock())
+        for conversation, actor in (('private:10', '9'), ('group:42', '9'),
+                                    ('private:9', 'invalid'), ('private:9', ''), ('private:9', '0')):
+            with self.subTest(conversation=conversation, actor=actor):
+                job = self.store.enqueue(conversation, self.b, actor=actor)
+                await self.bot._execute_switch(job['id'])
+                self.assertEqual(self.store.job(job['id'])['phase'], 'failed')
+                self.assertEqual(self.store.effective(conversation).record.id, self.a.id)
+        self.bot.story.prepare_switch.assert_not_awaited()
+        self.assertEqual(self.sends, [])
+
+    async def test_worker_rechecks_group_admin_after_revocation(self) -> None:
+        job = self.store.enqueue('group:42', self.b, actor='1')
+        self.bot.config.bot.admin_qq_ids = ()
+        await self.bot._execute_switch(job['id'])
+        self.assertEqual(self.store.job(job['id'])['phase'], 'failed')
+        self.assertEqual(self.store.effective('group:42').record.id, self.a.id)
+        self.assertEqual(self.sends, [])
+
+    async def test_private_player_story_prepares_before_binding_and_resumes_own_save(self) -> None:
+        from story_models import StorySettings
+        from story_runtime import StoryRuntime
+        from story_store import StoryStore
+        from test_story import definition
+        store = StoryStore(Path(self.tmp.name) / 'story.db')
+        self.bot.client = SimpleNamespace()
+        self.bot.story = StoryRuntime(self.bot, store, StorySettings(enabled=True))
+        generator = SimpleNamespace(client=self.bot.client, settings=self.bot.story.settings,
+                                    outline=AsyncMock(side_effect=ValueError('invalid JSON')),
+                                    scene=AsyncMock(return_value='雨落在书店门前。'))
+        self.bot.story._generator = generator
+        try:
+            failed = await self.bot.switch_card(self.private_event(), self.b)
+            self.assertEqual(failed['phase'], 'failed')
+            self.assertEqual(self.store.effective('private:9').record.id, self.a.id)
+            self.assertEqual(self.sends, [])
+            generator.outline.side_effect = None
+            generator.outline.return_value = definition()
+            completed = await self.bot.switch_card(self.private_event(), self.b)
+            self.assertEqual(completed['phase'], 'complete')
+            self.assertIn('序幕', self.sends[-1][2])
+            await self.bot.story.enter(self.private_event())
+            relation = store.relation('private:9', self.b.character_id, '9')
+            run = store.run(relation['id'])
+            assert run is not None
+            menu = store.current_menu(run['id'])
+            assert menu is not None
+            await self.bot.story.choose(self.private_event(), menu['id'], 1)
+            saved = store.snapshot(run['id'])
+            other_before = self.store.effective('private:10').token
+            await self.bot.switch_card(self.private_event(), self.c)
+            await self.bot.story.enter(self.private_event())
+            other_character = store.relation('private:9', self.c.character_id, '9')
+            other_run = store.run(other_character['id'])
+            assert other_run is not None
+            self.assertNotEqual(other_run['id'], run['id'])
+            self.sends.clear()
+            await self.bot.switch_card(self.private_event(), self.b)
+            self.assertEqual(len(self.sends), 2)
+            self.assertIn('返回', self.sends[-1][2])
+            await self.bot.story.enter(self.private_event())
+            restored = store.snapshot(run['id'])
+            resumed_run = store.run(relation['id'])
+            assert resumed_run is not None
+            self.assertEqual(resumed_run['id'], run['id'])
+            self.assertEqual(restored['relation'], saved['relation'])
+            self.assertEqual(restored['state_model'], saved['state_model'])
+            resumed_menu = store.current_menu(run['id'])
+            assert resumed_menu is not None
+            self.assertNotEqual(resumed_menu['id'], menu['id'])
+            with self.assertRaises(ValueError):
+                await self.bot.story.choose(self.private_event(), menu['id'], 1)
+            self.assertTrue(all(scope == 'private' and chat == 9 for scope, chat, _ in self.sends))
+            self.assertEqual(self.store.effective('private:10').token, other_before)
+        finally:
+            store.close()
+
+    async def test_private_player_unknown_delivery_requires_explicit_resume(self) -> None:
+        self.bot.onebot.send_private = AsyncMock(side_effect=OneBotError('timeout'))
+        job = await self.bot.switch_card(self.private_event(), self.b)
+        self.assertEqual(job['actor'], '9')
+        self.assertEqual(job['phase'], 'unknown')
+        self.assertEqual(self.store.effective('private:9').record.id, self.a.id)
+        self.store.recover()
+        self.assertEqual(self.store.queued(), [])
+        self.bot.onebot.send_private.assert_awaited_once()
+        self.store.resume(job['id'])
+        self.bot.onebot.send_private = AsyncMock(return_value={'message_id': 9})
+        await self.bot._execute_switch(job['id'])
+        self.assertEqual(self.store.job(job['id'])['phase'], 'complete')
+        self.assertEqual(self.bot.onebot.send_private.await_count, 2)
+        self.assertTrue(all(call.args[0] == 9 for call in self.bot.onebot.send_private.await_args_list))
+        self.assertEqual(self.store.effective('private:9').record.id, self.b.id)
+
+    async def test_tool_switch_finishes_old_reply_before_publication_without_deadlock(self) -> None:
+        from card_service import CardService
+        from commands import CommandRouter
+        event = self.private_event(1)
+        event.text = '切换角色'
+        self.bot.commands = CommandRouter(self.bot)
+        self.bot._names = {}
+        self.bot.relations = None
+        self.bot._log_chat_event = Mock()
+        self.bot._maybe_reload_model = AsyncMock()
+        service = self.bot.card_service = CardService(self.bot)
+        lease = service.open(event, 'private:1', 's1', event.text, self.bot._persona('private:1').token)
+
+        async def reply(conversation, original, text):
+            self.assertTrue(self.bot._locks[conversation].locked())
+            service.library(lease, {'action': 'use', 'query': str(self.b.id)})
+            self.assertEqual(self.store.queued(), [])
+            self.assertIsNone(self.store.pending(conversation))
+            await self.bot._send_reply(original, conversation, '旧角色回复完毕', strict_receipts=True)
+            service.revoke(lease)
+            return lease.deferred
+
+        self.bot._reply = reply
+        try:
+            await asyncio.wait_for(self.bot.handle(event), timeout=3)
+            self.assertEqual(len(self.sends), 1)
+            self.assertEqual(self.store.effective('private:1').record.id, self.a.id)
+            queued = self.store.queued()
+            self.assertEqual(len(queued), 1)
+            await self.bot._execute_switch(queued[0]['id'])
+            self.assertEqual(self.sends[0][2], '旧角色回复完毕')
+            self.assertIn('即将切换', self.sends[1][2])
+            self.assertEqual(self.store.effective('private:1').record.id, self.b.id)
+        finally:
+            await service.close()
+
+    async def test_strict_tool_reply_requires_every_text_receipt_and_never_uses_voice(self) -> None:
+        self.bot.relations = None
+        self.bot.config.bot.max_reply_chars = 8
+        self.bot._send_voice = AsyncMock(return_value=True)
+        for failure in (OneBotError('timeout'), {}):
+            self.bot.onebot.send_private = AsyncMock(side_effect=[{'message_id': 1}, failure])
+            with self.subTest(failure=failure), self.assertRaises(OneBotError):
+                await self.bot._send_reply(self.private_event(1), 'private:1',
+                                           '旧角色还有很长很长的回复不能截断[语音]', strict_receipts=True)
+            self.assertEqual(self.bot.onebot.send_private.await_count, 2)
+        self.bot._send_voice.assert_not_awaited()
+        self.assertEqual(self.store.queued(), [])
+
+    async def test_dsh_send_failure_discards_tool_deferred_and_revokes_lease(self) -> None:
+        from card_service import CardService
+        from dsh_client import DSHClient, DSHConfig
+        self.bot.card_service = service = CardService(self.bot)
+        self.bot.dsh = DSHClient(DSHConfig())
+        self.bot.ensure_card = AsyncMock(return_value=True)
+        self.bot._session_for = Mock(return_value=('s1', False))
+        self.bot._prepare_persona = Mock()
+        self.bot._turn_images = Mock(return_value=[])
+        self.bot._turn_prompt = Mock(return_value=('switch please', 0))
+        self.bot._recall_block = AsyncMock(return_value='')
+        self.bot._record_dsh_usage = Mock()
+        self.bot._touch_session = Mock()
+        self.bot._send_reply = AsyncMock(side_effect=OneBotError('unknown delivery'))
+
+        def run(session, text, images, env):
+            lease = service.authorize(env['QQBOT_CARD_LEASE'], session)
+            service.library(lease, {'action': 'use', 'query': str(self.b.id)})
+            return '已受理，回复后切换', []
+
+        self.bot.dsh.run_authorized = Mock(side_effect=run)
+        try:
+            deferred = await self.bot._reply_dsh('private:1', self.private_event(1), '切换角色')
+            self.assertIsNone(deferred)
+            self.assertEqual(service.leases, {})
+            self.assertEqual(self.store.queued(), [])
+            self.bot._send_reply.assert_awaited_once()
+            self.assertTrue(self.bot._send_reply.await_args.kwargs['strict_receipts'])
+        finally:
+            await service.close()
+
+    async def test_cancelled_dsh_revokes_lease_before_worker_finishes(self) -> None:
+        import threading
+
+        from card_service import CardService
+        from dsh_client import DSHClient, DSHConfig
+        self.bot.card_service = service = CardService(self.bot)
+        self.bot.dsh = DSHClient(DSHConfig())
+        self.bot.ensure_card = AsyncMock(return_value=True)
+        self.bot._session_for = Mock(return_value=('s1', False))
+        self.bot._prepare_persona = Mock()
+        self.bot._turn_images = Mock(return_value=[])
+        self.bot._turn_prompt = Mock(return_value=('switch', 0))
+        self.bot._recall_block = AsyncMock(return_value='')
+        entered, finish = threading.Event(), threading.Event()
+        captured = {}
+
+        def run(session, text, images, env):
+            captured.update(env)
+            entered.set()
+            finish.wait(5)
+            with self.assertRaises(ValueError):
+                service.authorize(env['QQBOT_CARD_LEASE'], session)
+            return 'late reply', []
+
+        self.bot.dsh.run_authorized = Mock(side_effect=run)
+        task = asyncio.create_task(self.bot._reply_dsh('private:1', self.private_event(1), '切换角色'))
+        try:
+            await asyncio.to_thread(entered.wait, 3)
+            self.assertTrue(entered.is_set())
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertEqual(service.leases, {})
+            self.assertFalse(task.done())
+            finish.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(self.store.queued(), [])
+        finally:
+            finish.set()
+            await service.close()
+
+    async def test_fallback_card_request_reports_unavailable_instead_of_model_success(self) -> None:
+        self.bot._send = AsyncMock()
+        self.bot.client = SimpleNamespace(chat=AsyncMock())
+        await self.bot._reply_llm('private:1', self.private_event(1), '找角色卡并下载')
+        self.bot.client.chat.assert_not_awaited()
+        self.assertIn('语义角色工具不可用', self.bot._send.await_args.args[1])
+        self.assertEqual(self.store.queued(), [])
 
     async def test_no_opening_finishes_after_announcement(self) -> None:
         card, _ = self.cards.install_payload(payload('Silent'))
