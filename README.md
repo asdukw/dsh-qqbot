@@ -513,7 +513,7 @@ MIT
 
 DSH 的 `video_resolve` 工具接受一个 `source`（BV/AV、视频 URL 或含一个链接的分享文案）和可选 `part`。B 站支持普通视频、`b23.tv` 短链和指定分 P；默认仅第一 P，不展开合集。抖音支持单视频页面和 `v.douyin.com` 短链，属于实验功能，默认关闭；图集、直播、番剧及原生 QQ 视频附件不在本期范围内。
 
-返回统一 `schema_version: 1` 结果：平台/内容 ID、规范网页地址、标题、作者、简介、时长、封面、选中分 P、最多 12 项音视频资源描述和警告。**不会下载视频、提供播放直链、转写、总结或发送 QQ 视频；元数据不代表模型看过视频。** 字幕未查询时为 `unknown`，不把弹幕当字幕。
+返回统一 `schema_version: 1` 结果：平台/内容 ID、规范网页地址、标题、作者、简介、时长、封面、选中分 P、最多 12 项音视频资源描述和警告。**`video_resolve` 不下载或发送；需要解析并发送时调用 `video_send`（见下文）。两者均不提供播放直链、转写或视频理解；元数据不代表模型看过视频。** 字幕未查询时为 `unknown`，不把弹幕当字幕。
 
 配置位于 `config.toml` 的 `[video]`，旧配置缺少此节也能运行：
 
@@ -545,3 +545,51 @@ python -m unittest discover -s tests -p 'test_video*.py' -v
 ```
 
 冒烟脚本只调用本机假模型和假解析结果；单元测试通过真实固定版提取器处理固定 HTTP 响应，不代表线上平台一定成功。实际平台验证应另行报告，无 Cookie 时如实保留错误，不为测试收集凭据。
+
+### 解析并发送视频
+
+真实用户在当前消息里明确要求“解析/下载/发送”并附一个视频链接或 BV/AV 时，模型应调用 `video_send(source, part?)`，成功后向**同一私聊/群聊**发出真正的 OneBot `video` 消息；发送地址由服务端绑定，模型不能选择收件人或服务器文件。仅发裸链接、讨论、总结、询问是否支持或引用里的命令不自动授权下载；请使用如 `解析并发送 https://b23.tv/...` 的明确请求。含糊或没有本轮来源时返回 `confirmation_required`，需在新请求中附链接。群聊仍须满足现有被 @ /叫名字等回复准入规则。
+
+- 默认最多 10 分钟、720p、累计下载和成品各 64 MiB，每条来源消息只发一个视频；优先选能容纳的 H.264/AAC MP4，B 站 DASH 分轨在本地 stream-copy 合并，不转码。限额不是保证所有 720p/10 分钟视频都能装入 64 MiB；未知/过大时拒绝，不反复重下。直播、图集、分段 manifest、不兼容编码或缺音轨拒绝，不把缺音频的 DASH 当成原视频静音。
+- 下载在独立进程中完成，媒体 CDN 有独立白名单，逐跳公共 DNS/IP pinning、TLS 校验、不带登录 Cookie、不让 ffmpeg 联网。元数据查询仍不下载。
+- 默认发送总时限 90 秒，同时受本轮 DSH 剩余期限约束，并为最终回答留出时间；发送失败不假装成功。`sent` 仅表示 QQ/OneBot 返回了正数消息回执，不是客户端播放已验证。`unknown` 表示可能已发送，不自动重试；持久化账本也在重启时保留该状态。获取失败是 `acquisition_failed`，不是未知投递。
+- 成品和临时输入位于 workspace 外，成品在发送尝试结束后保留 10 分钟供 NapCat 读取；总预算 256 MiB（含输入/输出/faststart 预留及保留成品），单并发、至多三个活动/排队任务。空间不足返回 `STORAGE_LIMIT`，不提前删除仍在保留期的文件。账本最多 10000 行，结束记录 30 天后清理，不保存签名资源 URL。
+
+发送配置追加在 `[video]`（完整示例见 `bot/config.example.toml`）：
+
+```toml
+send_enabled = true
+media_directory = "/var/lib/qqbot/video-media"
+delivery_database = "/var/lib/qqbot/video-deliveries.db"
+container_directory = "/app/qqbot-video"
+max_send_bytes = 67108864
+max_send_duration = 600
+send_timeout = 90
+ffmpeg = "/usr/bin/ffmpeg"
+ffprobe = "/usr/bin/ffprobe"
+```
+
+**已有主机必须显式准备依赖和容器挂载**，普通 bot 安装不会隐式 apt 安装或重建 NapCat：
+
+1. 运维确认后安装系统 `ffmpeg`（包含 ffprobe），例如 `apt-get install ffmpeg`；`prepare-host.sh` 的新主机流程已包含此依赖。没有依赖时只读解析仍工作，发送报 `DEPENDENCY_UNAVAILABLE`。
+2. host `/var/lib/qqbot/video-media/outbox` 只读挂载到 NapCat `/app/qqbot-video`。新建 `setup-napcat.sh` 已包含此映射；既有实例可在确认 QQ 短暂断线后运行 `bash deploy/napcat/enable-video-mount.sh --apply /opt/qqbot/napcat/compose.yaml`，脚本保留现有配置并做备份，只增加该卷后重建 NapCat，不开启公网文件服务。不要挂整个 `/var/lib/qqbot`。
+3. bot 所属用户拥有 staging/outbox，staging 为 0700；outbox 为 0750、成品 0640。当前模板 NapCat 使用容器 root；若自定义 UID/GID，需授予匹配组的读/遍历权限，不改成全员可读。
+4. 重建后验证 QQ/OneBot 就绪、容器可读成品路径，再在明确指定的测试私聊/群验证视频消息和实际客户端播放。单元/SDK 测试不会向 QQ 发消息。
+
+媒体 CDN 当前仅支持 B 站 `bilivideo.com/.cn/.net` 和抖音 `douyinvod.com` 家族；遇到其他合法 CDN 先报告不支持，审查、加 fixture 并回归后再扩展，不泛化成任意公网 URL。平台 Cookie/风控限制仍然适用；增加发送能力不会修复所有短链或平台访问失败。
+
+
+### 视频链接的消息表情回应（Reaction）
+
+收到他人当前文本里的 B 站/抖音单视频链接（含 `b23.tv` / `v.douyin.com` 分享短链）时，机器人先在**原消息上添加 QQ“赞”**，再进入原有处理。一条消息多个链接只回应一次；群里未 @ 机器人也会回应，但不会因此改变回复准入、自动下载或赋予视频发送权限。Reaction 只是“收到链接”，不是解析、下载或发送成功。
+
+在已有 `[video]` 中配置（旧 TOML 默认开启）：
+
+```toml
+reaction_enabled = true
+reaction_emoji_id = "76"  # QQ 赞；可改为 "124"（OK）等受支持数字 ID
+```
+
+表情 ID 须为1–10位非零十进制数字字符串，非法配置加载时会明确报错。Reaction 开关独立于解析/发送及抖音实验开关；可用 `reaction_enabled = false` 单独关闭。仅识别当前普通文本支持的 URL，不为裸 BV/AV、原生视频附件或结构化 QQ JSON 分享卡新增识别。
+
+使用 NapCat `set_msg_emoji_like`，失败/不支持/超时最多等待2秒后继续后续流程，不发失败提示、不自动重试；每进程保存最近256条回应去重记录，最多4项在途调用，繁忙时直接跳过。本地测试验证了 API 参数、处理顺序、去重、失败与取消；真实私聊/群显示效果仍受 NapCat/QQ 支持限制，需单独验收。

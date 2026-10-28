@@ -598,6 +598,20 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
             if cards is not None:
                 await cards.close()
 
+    async def test_video_receipt_updates_group_state_and_rejects_missing_receipt(self) -> None:
+        self.bot.onebot.send_private_video = AsyncMock(return_value={'message_id': 11})
+        self.bot.onebot.send_group_video = AsyncMock(return_value={'message_id': 12})
+        result = await self.bot._send_video_receipt('private:7', 'file:///app/qqbot-video/a.mp4', 9)
+        self.assertEqual(result['message_id'], 11)
+        self.bot.onebot.send_private_video.assert_awaited_once_with(7, 'file:///app/qqbot-video/a.mp4', timeout=9)
+        await self.bot._send_video_receipt('group:42', 'file:///app/qqbot-video/b.mp4', 8)
+        self.bot._remember_own_message.assert_called_with(42, 12)
+        self.bot.proactive.note_speaking.assert_called_once()
+        self.bot.onebot.send_group_video.return_value = {}
+        with self.assertRaises(OneBotError):
+            await self.bot._send_video_receipt('group:42', 'file:///app/qqbot-video/c.mp4', 8)
+        self.bot._remember_own_message.assert_called_once()
+
     async def test_fallback_card_request_reports_unavailable_instead_of_model_success(self) -> None:
         self.bot._send = AsyncMock()
         self.bot.client = SimpleNamespace(chat=AsyncMock())

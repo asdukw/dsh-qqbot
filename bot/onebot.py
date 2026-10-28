@@ -536,6 +536,29 @@ class OneBotWSClient:
             "message": [{"type": "record", "data": {"file": file}}],
         }, timeout=timeout)
 
+    async def send_private_video(self, user_id: int, file: str, timeout: float = 25.0) -> dict:
+        return await self.call('send_private_msg', {
+            'user_id': user_id, 'message': [{'type': 'video', 'data': {'file': file}}],
+        }, timeout=timeout)
+
+    async def send_group_video(self, group_id: int, file: str, timeout: float = 25.0) -> dict:
+        return await self.call('send_group_msg', {
+            'group_id': group_id, 'message': [{'type': 'video', 'data': {'file': file}}],
+        }, timeout=timeout)
+
+    async def set_msg_emoji_like(self, message_id: int, emoji_id: str, *,
+                                 set: bool = True, timeout: float = 2.0) -> dict:
+        """Add/remove a reaction on the original message, not a new chat message."""
+        if type(message_id) is not int or message_id <= 0:
+            raise ValueError('reaction requires a positive message ID')
+        if not isinstance(emoji_id, str) or not re.fullmatch(r'[1-9][0-9]{0,9}', emoji_id):
+            raise ValueError('reaction requires a numeric emoji ID string')
+        if type(set) is not bool:
+            raise ValueError('reaction set must be boolean')
+        return await self.call('set_msg_emoji_like', {
+            'message_id': message_id, 'emoji_id': emoji_id, 'set': set,
+        }, timeout=timeout)
+
     async def get_login_info(self) -> dict:
         return await self.call("get_login_info", {})
 

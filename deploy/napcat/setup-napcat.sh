@@ -3,6 +3,7 @@
 set -euo pipefail
 
 BASE=/opt/qqbot/napcat
+install -d -m 750 /var/lib/qqbot/video-media /var/lib/qqbot/video-media/outbox
 install -d -m 755 "$BASE" "$BASE/data" "$BASE/data/qq" "$BASE/data/config" "$BASE/data/plugins"
 
 if [ ! -f "$BASE/.env" ]; then
@@ -36,6 +37,7 @@ services:
       - ./data/qq:/app/.config/QQ
       - ./data/config:/app/napcat/config
       - ./data/plugins:/app/napcat/plugins
+      - /var/lib/qqbot/video-media/outbox:/app/qqbot-video:ro
 YAML
 
 if [ ! -f "$BASE/data/config/onebot11.json" ]; then

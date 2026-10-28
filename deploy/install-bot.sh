@@ -14,6 +14,11 @@ fi
 
 install -d -o root -g root -m 755 /opt/qqbot /opt/qqbot/bot
 install -d -o qqbot -g qqbot -m 750 /var/lib/qqbot
+install -d -o qqbot -g qqbot -m 750 /var/lib/qqbot/video-media /var/lib/qqbot/video-media/outbox
+install -d -o qqbot -g qqbot -m 700 /var/lib/qqbot/video-media/staging
+if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+    echo 'warning: video sending requires ffmpeg/ffprobe; explicitly install with apt-get install ffmpeg' >&2
+fi
 install -d -o root -g qqbot -m 750 /etc/qqbot
 
 cp -a "$SRC/bot/." /opt/qqbot/bot/

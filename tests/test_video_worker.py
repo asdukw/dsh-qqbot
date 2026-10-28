@@ -7,6 +7,7 @@ import importlib.util
 import json
 import socket
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -95,6 +96,28 @@ class ExtractorTests(unittest.TestCase):
         with self.assertRaises(VideoError) as error:
             self.run_fixture({'source': BV, 'part': 3})
         self.assertEqual(error.exception.code, 'INVALID_SOURCE')
+
+    def test_real_extractor_download_mode_uses_only_pinned_cdn_transport(self):
+        def media(request):
+            if request.headers['host'].endswith('.bilivideo.com'):
+                self.assertNotIn('cookie', request.headers)
+                self.assertNotIn('authorization', request.headers)
+                return httpx.Response(200, headers={'content-type': 'video/mp4'}, content=b'media')
+            response = self.fixture(request)
+            if request.url.path == '/x/player/wbi/playurl':
+                body = response.json()
+                for fmt in body['data']['dash']['video']:
+                    fmt.update(height=360, baseUrl='https://cn-fixture.bilivideo.com/video?secret')
+                for fmt in body['data']['dash']['audio']:
+                    fmt['baseUrl'] = 'https://cn-fixture.bilivideo.com/audio?secret'
+                return httpx.Response(200, json=body)
+            return response
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_fixture({'source': BV, 'part': 2, 'materialize': True,
+                'directory': tmp, 'max_bytes': 10000, 'max_duration': 600}, media)
+            self.assertEqual(result['artifacts']['files'], ['input0.mp4', 'input1.mp4'])
+            self.assertEqual((Path(tmp) / 'input0.mp4').read_bytes(), b'media')
+            self.assertNotIn('secret', json.dumps(result))
 
     def test_short_links_av_identity_and_platform_errors(self):
         def short(request):

@@ -41,6 +41,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r bot/requirements.txt
 
+      - name: Install media test dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
       - name: Unit tests
         run: python -m unittest discover -s tests -v
 
