@@ -26,6 +26,7 @@ import StickersPage from "@/pages/StickersPage";
 import SystemPage from "@/pages/SystemPage";
 import TasksPage from "@/pages/TasksPage";
 import UsagePage from "@/pages/UsagePage";
+import VideoCredentialsPage from "@/pages/VideoCredentialsPage";
 
 type View = "loading" | "login" | "ready";
 
@@ -126,6 +127,8 @@ function Page({
       return <StickersPage refreshKey={refreshKey} />;
     case "usage":
       return <UsagePage refreshKey={refreshKey} />;
+    case "video-credentials":
+      return <VideoCredentialsPage refreshKey={refreshKey} />;
     case "system":
       return <SystemPage refreshKey={refreshKey} />;
     default:

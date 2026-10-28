@@ -164,6 +164,41 @@ class VideoHTTPTests(unittest.TestCase):
         self.fetch(handler, cookiejar=jar)
         self.assertTrue(any(cookie.name == 'new' for cookie in jar))
 
+    def test_shortlink_stops_at_checked_video_without_fetching_target(self):
+        calls = []
+        def redirect(request):
+            calls.append(request)
+            if len(calls) != 1:
+                raise AssertionError('Video HTML must not be fetched during shortlink expansion')
+            return httpx.Response(302, headers={'location': URL + '?p=2&tracking=secret'},
+                                  stream=httpx.ByteStream(b'ignored'))
+        data, target, status, _ = self.fetch(redirect, url='https://b23.tv/test', stop_at_video=True)
+        self.assertEqual((data, status), (b'', 302))
+        self.assertEqual(parse_source(target).part, 2)
+        self.assertEqual(len(calls), 1)
+
+    def test_shortlink_chain_and_hostile_destinations_remain_bounded(self):
+        calls = []
+        def chain(request):
+            calls.append(request)
+            destination = 'https://b23.tv/next' if len(calls) == 1 else URL
+            return httpx.Response(302, headers={'location': destination})
+        self.assertEqual(self.fetch(chain, url='https://b23.tv/start', stop_at_video=True)[1], URL)
+        self.assertEqual(len(calls), 2)
+        for destination in ('https://www.douyin.com/video/123', 'https://127.0.0.1/a',
+                            'https://www.bilibili.com.evil.test/video/' + BV,
+                            'https://www.bilibili.com/bangumi/play/ep123',
+                            'https://user:secret@www.bilibili.com/video/' + BV,
+                            'http://www.bilibili.com/video/' + BV):
+            handler = Mock(return_value=httpx.Response(302, headers={'location': destination}))
+            with self.subTest(destination=destination), self.assertRaises(VideoError):
+                self.fetch(handler, url='https://b23.tv/start', stop_at_video=True)
+            self.assertEqual(handler.call_count, 1)
+        with self.assertRaises(VideoError) as error:
+            self.fetch(lambda r: httpx.Response(302, headers={'location': '/again'}),
+                       url='https://b23.tv/start', stop_at_video=True)
+        self.assertEqual(error.exception.code, 'LIMIT_EXCEEDED')
+
     def test_compression_raw_decoded_total_and_request_budgets(self):
         payload = zlib.compress(b'body')
         self.assertEqual(self.fetch(lambda r: httpx.Response(200, headers={'content-encoding': 'deflate'},
@@ -372,8 +407,8 @@ class VideoBackendTests(unittest.IsolatedAsyncioTestCase):
         backend = VideoBackend(VideoSettings())
         with (patch('asyncio.create_subprocess_exec', AsyncMock(return_value=process)) as spawn,
               patch.dict(os.environ, {'MODEL_API_KEY': 'secret', 'HTTPS_PROXY': 'secret'})):
-            with self.assertRaises(VideoError):
-                await backend.resolve(BV)
+            result = await backend.resolve(BV)
+            self.assertEqual(result['error']['code'], 'LIMIT_EXCEEDED')
         process.terminate.assert_called_once()
         self.assertNotIn('MODEL_API_KEY', spawn.call_args.kwargs['env'])
         self.assertNotIn('HTTPS_PROXY', spawn.call_args.kwargs['env'])

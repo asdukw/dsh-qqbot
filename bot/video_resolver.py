@@ -20,6 +20,7 @@ class VideoSettings:
     calls_per_turn: int = 3
     cache_seconds: int = 300
     cache_entries: int = 128
+    credentials_directory: str = "/var/lib/qqbot/video-credentials"
     bilibili_cookies: str = ""
     douyin_cookies: str = ""
 
@@ -42,7 +43,15 @@ class VideoSettings:
             raise ValueError('video.reaction_emoji_id must be a 1-10 digit nonzero decimal string')
 
     def cookie_file(self, platform: str) -> str:
-        return self.bilibili_cookies if platform == "bilibili" else self.douyin_cookies
+        return self.credentials(platform)[0]
+
+    def credentials(self, platform: str) -> tuple[str, tuple]:
+        from video_credentials import CredentialError, effective
+        legacy = self.bilibili_cookies if platform == 'bilibili' else self.douyin_cookies
+        try:
+            return effective(self.credentials_directory, platform, legacy)
+        except CredentialError as exc:
+            raise VideoError('CREDENTIALS_INVALID', 'Configured platform cookies are unavailable or invalid') from exc
 
 
 def number(value):

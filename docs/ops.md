@@ -198,3 +198,14 @@ $M --switch-status <任务ID>
 - `--resume-switch <任务ID> --opening-delivered`：仅当已经绑定且确认完整开场白已投递时，直接完成本地状态，不发送消息。
 
 未完成切换会暂停目标的角色输出，不影响其他会话。`/reset` 只轮换当前 session，保留角色绑定。升级前备份 `characters.db`、`memory.db`、`profile.db`；旧自动生成 `memory/lore.md` 应移出模型 workspace 备份，用户 notes 不动。权限下放不属于此功能，现有管理员鉴权保持不变。
+
+
+## 视频平台 Cookie 配置
+
+1. 用现有SSH/Workbench端口转发将服务器管理面板8080映射到本机，浏览器访问 `http://127.0.0.1:本地端口/#/video-credentials` 并登录。不要为了输入Cookie开放公网HTTP；公共访问可看状态但不能保存/删除。
+2. 选择B站或抖音，粘贴本平台Cookie请求头或导入Netscape文件，保存后输入清空。只显示“已配置（未验证）”、来源和时间；不可下载或回显秘密。请勿在QQ、工单或聊天粘贴真实Cookie。
+3. `[video] credentials_directory` 默认 `/var/lib/qqbot/video-credentials`，由qqbot读写，目录0700、文件0600，放workspace之外；同一配置供admin与bot使用。旧TOML自动采用默认值。legacy静态路径仍兼容，面板override优先。
+4. 保存/替换/清除后下一次解析/发送即生效，不重启QQ或NapCat；clear tombstone使后续匿名，不恢复legacy凭据。在途worker可能继续使用已经读取的Cookie。
+5. 配置不保证412消失，也不自动打开抖音实验功能。遇到 `UPSTREAM_BLOCKED`/`RATE_LIMITED` 等待工具给出的冷却时间；不要多次重复请求。带Cookie实测只能在用户授权并已通过安全页面配置后进行，避免频繁测试触发账号风险。
+
+本功能上线仅需正常更新bot和admin进程及admin/dist，不需要重建NapCat、不动QQ登录态。部署前按既有流程确认目标和重启范围。凭据目录不应纳入公开发布包；备份/恢复务必保留文件权限并限制访问。

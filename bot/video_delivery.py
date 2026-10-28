@@ -143,14 +143,14 @@ class VideoMaterializer:
                 directory = self.staging / ('job-' + secrets.token_hex(16))
                 directory.mkdir(mode=0o700)
                 # Metadata cache is not a downloadable artifact; always get fresh resources.
-                result = await self.backend._extract(metadata['canonical_url'], metadata['selected_part'],
-                    self.settings.cookie_file(metadata['platform']), media={
+                result = await self.backend.materialize(metadata['canonical_url'], metadata['selected_part'], media={
                         'materialize': True, 'directory': str(directory.resolve()),
                         'max_bytes': max_bytes, 'max_duration': min(600, self.settings.max_send_duration),
                         'download_timeout': min(35, max(0.01, deadline - time.monotonic() - 10))})
                 if result.get('status') != 'ok':
                     error = result.get('error', {})
-                    raise VideoError(error.get('code', 'UPSTREAM_ERROR'), error.get('message', 'Video acquisition failed'))
+                    raise VideoError(error.get('code', 'UPSTREAM_ERROR'), error.get('message', 'Video acquisition failed'),
+                                     stage=error.get('stage'), http_status=error.get('http_status'))
                 if (result.get('content_id') != metadata.get('content_id')
                         or result.get('selected_part') != metadata.get('selected_part')
                         or result.get('platform') != metadata.get('platform')):

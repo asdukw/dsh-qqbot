@@ -49,6 +49,10 @@ class VideoBackend:
         self._cache: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
         self._active: set[asyncio.Task] = set()
         self._closed = False
+        self._flights: dict[tuple, list] = {}
+        self._versions: dict = {}
+        self._waiters = 0
+        self._cooldowns: dict[tuple, tuple[float, dict]] = {}
 
     async def close(self):
         self._closed = True
@@ -57,47 +61,116 @@ class VideoBackend:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._cache.clear()
+        self._flights.clear()
+        self._cooldowns.clear()
+
+    def _cooldown(self, platform, version):
+        row = self._cooldowns.get((platform, version))
+        if row and row[0] > time.monotonic():
+            result = copy.deepcopy(row[1])
+            result['error']['retry_after_seconds'] = max(1, int(row[0] - time.monotonic() + 1))
+            return result
+        self._cooldowns.pop((platform, version), None)
+        return None
+
+    def _record_failure(self, platform, version, result):
+        if result.get('status') == 'error' and result.get('error', {}).get('code') in ('UPSTREAM_BLOCKED', 'RATE_LIMITED'):
+            self._cooldowns[(platform, version)] = (time.monotonic() + 60, copy.deepcopy(result))
+            while len(self._cooldowns) > 16:
+                self._cooldowns.pop(next(iter(self._cooldowns)))
+
+    async def _run(self, source, part, platform, cookie_file, version, media=None):
+        try:
+            async with asyncio.timeout(max(1, min(60, self.settings.timeout)) if media is None else 55), self._slots:
+                cooldown = self._cooldown(platform, version)
+                if cooldown:
+                    return cooldown
+                self._versions[asyncio.current_task()] = version
+                try:
+                    result = (await self._extract(source, part, cookie_file) if media is None else
+                              await self._extract(source, part, cookie_file, media=media))
+                except VideoError as exc:
+                    result = exc.result()
+                finally:
+                    self._versions.pop(asyncio.current_task(), None)
+                self._record_failure(platform, version, result)
+                return result
+        except TimeoutError:
+            raise VideoError('TIMEOUT', 'Video resolution timed out') from None
 
     async def resolve(self, source: str, part: int | None = None) -> dict:
         if self._closed:
-            raise VideoError("UNAVAILABLE", "Video service is closed")
+            raise VideoError('UNAVAILABLE', 'Video service is closed')
         target = parse_source(source, part)
         settings = self.settings
-        if not settings.enabled or not getattr(settings, target.platform + "_enabled"):
-            raise VideoError("UNSUPPORTED_SOURCE", "This video platform is disabled")
-        cookie_file = settings.cookie_file(target.platform)
-        credential_version = None
-        if cookie_file:
-            try:
-                stat = Path(cookie_file).stat()
-                credential_version = (cookie_file, stat.st_mtime_ns, stat.st_size)
-            except OSError:
-                raise VideoError(
-                    "CREDENTIALS_INVALID", "Configured platform cookie file is unavailable"
-                ) from None
-        key = (target.platform, target.content_id, target.part, credential_version)
-        cached = self._cache.get(key) if not target.short else None
+        if not settings.enabled or not getattr(settings, target.platform + '_enabled'):
+            raise VideoError('UNSUPPORTED_SOURCE', 'This video platform is disabled')
+        cookie_file, version = settings.credentials(target.platform)
+        key = (target.platform, target.url if target.short else target.content_id, part if target.short else target.part, version)
+        cached = self._cache.get(key)
         if cached and cached[0] > time.monotonic():
             self._cache.move_to_end(key)
             return copy.deepcopy(cached[1])
-        task = asyncio.current_task()
-        if task is None or len(self._active) >= 8:
-            raise VideoError("BUSY", "Video resolver queue is full")
+        cooldown = self._cooldown(target.platform, version)
+        if cooldown:
+            return cooldown
+        if self._waiters >= 32:
+            raise VideoError('BUSY', 'Video resolver waiter limit reached')
+        flight = self._flights.get(key)
+        if flight is None:
+            if len(self._active) >= 8:
+                raise VideoError('BUSY', 'Video resolver queue is full')
+            task = asyncio.create_task(self._resolve_owner(key, source, part, target.platform, cookie_file, version))
+            flight = [task, 0]
+            self._flights[key] = flight
+            self._active.add(task)
+            task.add_done_callback(self._active.discard)
+        task = flight[0]
+        flight[1] += 1
+        self._waiters += 1
+        try:
+            async with asyncio.timeout(max(1, min(60, settings.timeout))):
+                return copy.deepcopy(await asyncio.shield(task))
+        except TimeoutError:
+            raise VideoError('TIMEOUT', 'Video resolution timed out') from None
+        finally:
+            self._waiters -= 1
+            flight[1] -= 1
+            if flight[1] == 0:
+                if self._flights.get(key) is flight:
+                    self._flights.pop(key, None)
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _resolve_owner(self, key, source, part, platform, cookie_file, version):
+        result = await self._run(source, part, platform, cookie_file, version)
+        if result.get('status') == 'ok' and self.settings.cache_entries > 0:
+            # Do not publish an old credential generation into a newly selected partition.
+            if self.settings.credentials(platform)[1] == version:
+                expiry = time.monotonic() + max(0, min(600, self.settings.cache_seconds))
+                self._cache[key] = (expiry, copy.deepcopy(result))
+                if result.get('canonical_url'):
+                    canonical = parse_source(result['canonical_url'], result.get('selected_part'))
+                    canonical_key = (platform, canonical.content_id, canonical.part, version)
+                    self._cache[canonical_key] = (expiry, copy.deepcopy(result))
+                while len(self._cache) > min(256, self.settings.cache_entries):
+                    self._cache.popitem(last=False)
+        return result
+
+    async def materialize(self, source, part, *, media):
+        if self._closed:
+            raise VideoError('UNAVAILABLE', 'Video service is closed')
+        target = parse_source(source, part)
+        if not self.settings.enabled or not getattr(self.settings, target.platform + '_enabled'):
+            raise VideoError('UNSUPPORTED_SOURCE', 'This video platform is disabled')
+        cookie_file, version = self.settings.credentials(target.platform)
+        if len(self._active) >= 8:
+            raise VideoError('BUSY', 'Video resolver queue is full')
+        task = asyncio.create_task(self._run(source, part, target.platform, cookie_file, version, media))
         self._active.add(task)
         try:
-            async with asyncio.timeout(max(1, min(60, settings.timeout))), self._slots:
-                result = await self._extract(source, part, cookie_file)
-            if result.get("status") == "ok" and not target.short and settings.cache_entries > 0:
-                self._cache[key] = (
-                    time.monotonic() + max(0, min(600, settings.cache_seconds)),
-                    copy.deepcopy(result),
-                )
-                self._cache.move_to_end(key)
-                while len(self._cache) > min(256, settings.cache_entries):
-                    self._cache.popitem(last=False)
-            return result
-        except TimeoutError:
-            raise VideoError("TIMEOUT", "Video resolution timed out") from None
+            return await task
         finally:
             self._active.discard(task)
 
@@ -132,8 +205,11 @@ class VideoBackend:
         try:
             if process.stdin is None or process.stdout is None or process.stderr is None:
                 raise VideoError("UNAVAILABLE", "Video worker pipes unavailable")
+            version = self._versions.get(asyncio.current_task(), ())
+            expected = ({'credential_generation': version[1]} if version and version[0] == 'managed' else
+                        {'credential_stat': list(version[2:])} if version and version[0] == 'legacy' else {})
             payload = json.dumps(
-                {"source": source, "part": part, "cookie_file": cookie_file, **(media or {})}, ensure_ascii=False
+                {"source": source, "part": part, "cookie_file": cookie_file, **expected, **(media or {})}, ensure_ascii=False
             ).encode()
             if len(payload) > 8192:
                 raise VideoError("INVALID_SOURCE", "Worker request too large")

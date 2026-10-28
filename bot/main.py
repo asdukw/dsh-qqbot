@@ -612,6 +612,7 @@ def load_config(path: str | Path) -> AppConfig:
         calls_per_turn=max(1, min(5, int(video_raw.get('calls_per_turn', 3)))),
         cache_seconds=max(0, min(600, int(video_raw.get('cache_seconds', 300)))),
         cache_entries=max(0, min(256, int(video_raw.get('cache_entries', 128)))),
+        credentials_directory=str(video_raw.get('credentials_directory', '/var/lib/qqbot/video-credentials')),
         bilibili_cookies=str(video_raw.get('bilibili_cookies', '')),
         douyin_cookies=str(video_raw.get('douyin_cookies', '')),
         reaction_enabled=bool(video_raw.get('reaction_enabled', True)),

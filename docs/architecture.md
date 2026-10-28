@@ -357,9 +357,9 @@ auto: true
 
 `dsh/video-tools.mjs` 的 `video_resolve(source, part?)` 使用 Node 原生 HTTP 直连 loopback bridge，不使用环境代理或重定向。`VideoService` 在 `bot/main.py::_reply_dsh()` 为真实用户当前消息发放 session/actor/conversation 绑定的限时 lease；管理员轮次合并独立的 card/video 环境，普通用户不获得 card authority。定时、主动、合成事件不发 lease；`DSHClient` 清空未授权运行时的 video 环境。授权 runtime 在轮次前后关闭，session 数据保留；这以启动延迟换取简单、明确的权限边界。
 
-`video_platforms.py` 规范化单视频标识/短链/分 P，`video_resolver.py` 定义版本化输出；`video_backend.py` 管理并发、限时、输出上限和元数据 LRU；`video_worker.py` 隔离固定版提取器，按平台显式选择 extractor，不自动委派 Generic、合集或内置媒体下载器。B 站先校验 BV/AV 对应的真实身份和分 P 范围。`video_http.py` 是所有后端元数据请求唯一的传输层：固定 `RequestDirector` 不允许其他 handler 兜底，逐跳检查平台域名和公共 DNS，实际连接 pin IP、Host/SNI 保持源站；原始/解压响应大小、累计流量和请求数有界。该集成边界不是防任意恶意 Python 代码的 OS 沙箱。
+`video_platforms.py` 规范化单视频标识/短链/分 P，`video_resolver.py` 定义版本化输出；`video_backend.py` 管理并发、限时、输出上限和元数据 LRU；`video_worker.py` 隔离固定版提取器，按平台显式选择 extractor，不自动委派 Generic、合集或内置媒体下载器。B站在固定提取器初始JSON hook里校验BV/AV、分P及CID；不再强制调用view API，pages来自已验证页面，匹配CID且非预览的内嵌DASH可复用。`video_http.py` 是所有后端元数据请求唯一的传输层：固定 `RequestDirector` 不允许其他 handler 兜底，逐跳检查平台域名和公共 DNS，实际连接 pin IP、Host/SNI 保持源站；原始/解压响应大小、累计流量和请求数有界。该集成边界不是防任意恶意 Python 代码的 OS 沙箱。
 
-缓存只含投影后的元数据/资源描述，键包含平台、ID、分 P、配置 Cookie 路径及 mtime/size，不缓存错误；短链结果暂不缓存。不同会话可共享同一凭据版本下的公开元数据，不保存聊天内容或 lease。变更配置 Cookie 内容时需更新文件时间/大小（替换文件后重启可保证清空缓存）。无媒体直链缓存；发送的本地成品和临时输入由独立 materializer 管理，不能把元数据缓存命中当成可发送文件。
+缓存只含投影后的元数据/资源描述，键含平台、来源/规范ID、显式分P及凭据generation（legacy为路径/mtime/size）。短链成功结果同时缓存规范目标；平台block/限流仅在独立冷却表保存60秒安全错误，普通错误不缓存。相同key用独立owner task共享只读结果，最多8个active key/32等待者，各等待者独立shield/deadline；最后等待者离开才取消owner，shutdown取消回收全部活动worker。出队后检查平台+generation冷却，materialize也使用同一gate但不共享文件/QQ任务。更新凭据后不把旧结果发布入新缓存。
 
 worker 以最小环境启动，不继承 bot 模型密钥、代理或 bridge secret；不加载用户插件/配置/浏览器 Cookie，平台 Cookie 只在内存使用且不写回。未查询的字幕为 unknown，禁用可能主动下载字幕正文的 extractor 路径。输出最多 12 个格式摘要，不输出 Cookie、Header、签名媒体 URL 或原始对象。
 
@@ -374,3 +374,10 @@ worker 以最小环境启动，不继承 bot 模型密钥、代理或 bridge sec
 发送前 `VideoService.authorize()` 再验单轮权限，`Bot._send_video_receipt()` 仅向 lease 原会话调用 OneBot video helper，不重取会话锁、不吞错误，群回执同步 own-message/proactive 记录。发送阶段使用剩余总 deadline，bridge/JS 发送上限 110 秒，只读 JS 65 秒；并非用更长 lease 延长 DSH 期限。
 
 `video_store.py` 以 conversation/message 为唯一键，canonical platform/ID/part 为身份，preparing 抢占只为避免重复获取；紧邻实际 QQ 动作写 sending，正数回执写 sent，明确平台拒绝写 rejected，发送中取消/断连/超时/缺回执或重启遗留 sending 写 unknown。获取失败与重启遗留 preparing 为 acquisition_failed。重复工具调用只返回原状态，unknown 不自动重试，不承诺 exactly-once。文件 TTL 从发送尝试结束更新，含 unknown 成品保留 10 分钟；单 materialize、256 MiB 预留峰值和保留文件预算使失败关闭而非提前删除上传文件。
+
+
+### 视频凭据管理
+
+`video_credentials.py` 提供固定平台状态文件的严格解析、0700目录/0600文件、原子替换与cleared tombstone；managed状态与Cookie在同一JSON中一次提交，generation隔离缓存和冷却。`VideoSettings.credentials()` 每次调用选择managed > cleared匿名 > legacy路径，worker通过stdin接收路径和期望generation，内存加载后域约束，不透传给模型。保存或清除后无需重启；并发版本变化失败关闭，不混用新旧Cookie。
+
+`admin_video.py` 与 `admin_ui.py` 提供登录保护的GET安全状态/POST保存删除。写入只允许loopback peer、Host及完整同源Origin，严格UTF-8/JSON/重复头/请求体限额，不接受任意路径或代理自报TLS。React `VideoCredentialsPage` 用既有API与组件，状态刷新不覆盖草稿，保存/清除后清空输入，不把Cookie存浏览器存储。前端状态不能授权，服务端重复校验；既有admin监听配置不因此变更。

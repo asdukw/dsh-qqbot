@@ -59,3 +59,11 @@
 - CDN transport 单独允许审核过的平台 CDN 家族，逐跳全 DNS 检查+实际 IP pinning，无环境代理、无 Cookie/Authorization，不接收 extractor 任意 Header；流式字节/时限/跳转有界，不取 manifest、不让 ffmpeg 访问网络。worker 只返回固定文件名 manifest，父进程检查普通文件、路径/identity/分 P 与输出时长/codec，原子发布；ffmpeg 使用固定本地 MOV demuxer和 file-only 协议，不允许模型命令或传远程 URL。
 - 文件在 DSH workspace 之外，只有验证后的成品目录以只读卷供 NapCat 使用；不启公网下载接口。每轮一次、时长/体积/清晰度硬上限、单 materialize 和 256 MiB 预留峰值预算；下载/合并/发送前取消会清理 partial，发送中取消视为 unknown、成品保留 TTL 供潜在读取。启动/定时清理只识别服务随机文件名，不跟随 symlink 或递归删除意外内容。
 - SQLite 账本不存 Cookie/签名 URL，权限 0600，最多10000条，结束记录30天清理；重启遗留 sending 不自动重发，QQ 回执只证明接口接受，不证明客户端播放。安装系统 ffmpeg、重建 NapCat、向真实 QQ 会话测试均是独立部署动作，普通代码更新不隐式执行。自定义 NapCat UID/GID 必须仅授予成品目录所需读/遍历权限，不挂全部机器人数据目录。
+
+
+## 管理面板视频 Cookie
+
+- 凭据保存在workspace/static/outbox之外的固定平台状态文件；0700/0600限制访问，内容为受权限保护的明文，备份也需同等保护。managed、cleared与随机generation原子提交；删除不删除任意legacy文件，也不意外回退到旧Cookie。已被worker读取的会话状态无法通过删除追溯撤回。
+- Cookie输入严格限平台域、格式、大小/数量和控制字符；header转换为固定主机host-only Cookie，Netscape仅接受本平台域。worker期望generation/legacy stat与实际读取不一致时失败关闭；不把凭据放命令行或env，不回显值/预览/哈希/路径到API或日志。
+- 新凭据写入端点要求现有管理员登录、来源白名单及loopback peer+Host+同源Origin，JSON正文限96KiB envelope/64KiB Cookie；不截断保存，拒绝重复关键头、分块传输、跨域、公共HTTP和不可信代理头。未提供可信TLS代理模式，不因请求自称https放开。页面禁止在不合规通道提交，服务端仍权威校验；不改其他面板API权限或暴露新公网服务。
+- 凭据页不验证账号有效性、不自动登录/刷新Cookie、不读取浏览器。平台412/429触发短时冷却，不反复请求或绕过限制。仅共享同凭据版本的安全元数据，不共享媒体文件、租约、收件目标和QQ投递任务。

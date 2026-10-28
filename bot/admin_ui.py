@@ -54,6 +54,8 @@ from zoneinfo import ZoneInfo
 import httpx
 from admin_insights import clean_conversation, fun_data, usage_data
 from admin_story import queue_story, story_data, story_detail
+from admin_video import handle_post as video_credentials_post
+from admin_video import status_payload as video_credentials_payload
 from approvals import ApprovalRecord, ApprovalStore
 from models import (
     BUILTIN_PROVIDERS,
@@ -1595,6 +1597,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK if result['ready'] else HTTPStatus.SERVICE_UNAVAILABLE, result)
             return
 
+        if path == '/api/video/credentials':
+            if not self._api_guard():
+                return
+            try:
+                self._send_json(HTTPStatus.OK, video_credentials_payload(self))
+            except (ValueError, OSError):
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {'error': 'Video credential status is unavailable'})
+            return
         if path == "/api/session":
             self._send_json(HTTPStatus.OK, {"authenticated": self._valid_session()})
             return
@@ -1791,6 +1801,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_raw(HTTPStatus.SEE_OTHER, b"", headers=headers)
             else:
                 self._send_json(HTTPStatus.OK, {"ok": True}, headers=headers)
+            return
+
+        if path in ('/api/video/credentials', '/api/video/credentials/delete'):
+            video_credentials_post(self, path)
             return
 
         if path == '/api/story/action':

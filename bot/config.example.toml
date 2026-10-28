@@ -277,6 +277,7 @@ cache_seconds = 300
 cache_entries = 128
 # Optional Netscape cookie files, platform-specific and readable only by the service.
 # Never paste cookies into chat; these files are loaded in memory and not rewritten.
+credentials_directory = "/var/lib/qqbot/video-credentials"  # admin-managed, outside workspace
 bilibili_cookies = ""
 douyin_cookies = ""
 
