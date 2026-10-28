@@ -15,7 +15,7 @@ from urllib.request import Request as CookieRequest
 
 import httpx
 from card_fetch import CardFetchError, _public_ip
-from video_platforms import VideoError, checked_url
+from video_platforms import VideoError, checked_url, parse_source, platform_http_error
 
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_TOTAL = 8 * 1024 * 1024
@@ -29,7 +29,8 @@ class SafeHTTP:
         self.failure: VideoError | None = None
 
     def fetch(
-        self, url: str, *, headers=None, cookiejar: CookieJar | None = None, timeout: float = 8.0
+        self, url: str, *, headers=None, cookiejar: CookieJar | None = None, timeout: float = 8.0,
+        stop_at_video: bool = False
     ) -> tuple[bytes, str, int, dict]:
         deadline = time.monotonic() + min(10, max(0.1, timeout))
         with httpx.Client(trust_env=False, follow_redirects=False) as client:
@@ -98,7 +99,17 @@ class SafeHTTP:
                         location = response.headers.get("location")
                         if not location:
                             raise VideoError("UPSTREAM_ERROR", "Invalid video redirect")
-                        url = urljoin(url, location)
+                        destination = urljoin(url, location)
+                        checked_url(destination, self.platform)
+                        if stop_at_video:
+                            target = parse_source(destination)
+                            if target.platform != self.platform:
+                                raise VideoError('UNSUPPORTED_SOURCE', 'Short link changed platform', stage='shortlink')
+                            if not target.short:
+                                # A validated Location identifies the video. Do not fetch its HTML
+                                # here; extraction owns subsequent requests and their error stage.
+                                return b'', destination, response.status_code, {}
+                        url = destination
                         continue
                     size = raw = 0
                     chunks = []
@@ -172,14 +183,7 @@ def handler_class():
                 }
                 response = Response(io.BytesIO(data), url, headers, status=status)
                 if status >= 400:
-                    code = {
-                        404: "NOT_FOUND",
-                        429: "RATE_LIMITED",
-                        401: "AUTH_REQUIRED",
-                        403: "UPSTREAM_BLOCKED",
-                        412: "UPSTREAM_BLOCKED",
-                    }.get(status, "UPSTREAM_ERROR")
-                    self.transport.failure = VideoError(code, "Platform HTTP request was rejected")
+                    self.transport.failure = platform_http_error(status, self.transport.platform, 'extractor')
                     raise HTTPError(response)
                 return response
             except VideoError as exc:

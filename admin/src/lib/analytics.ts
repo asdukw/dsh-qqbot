@@ -402,3 +402,9 @@ export type SystemData = {
     size: number | null;
   }>;
 };
+
+export type VideoCredentialRow = {
+  platform: string; configured: boolean; source: "managed" | "legacy" | "cleared" | "missing";
+  updated_at: number | null; enabled: boolean;
+};
+export type VideoCredentialsData = { platforms: VideoCredentialRow[]; can_write: boolean; notice: string };

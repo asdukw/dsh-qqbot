@@ -10,19 +10,44 @@ from card_fetch import CardFetchError, public_url
 
 
 class VideoError(RuntimeError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, stage: str | None = None,
+                 http_status: int | None = None):
         super().__init__(message)
         self.code = code
+        self.stage = stage
+        self.http_status = http_status
 
     def result(self) -> dict:
+        details = {}
+        if self.stage is not None:
+            details["stage"] = self.stage
+        if self.http_status is not None:
+            details["http_status"] = self.http_status
         return {
             "schema_version": 1,
             "status": "error",
             "error": {
                 "code": self.code,
                 "message": str(self),
+                **details,
             },
         }
+
+
+def platform_http_error(status: int, platform: str, stage: str) -> VideoError:
+    code = {401: 'AUTH_REQUIRED', 403: 'UPSTREAM_BLOCKED', 404: 'NOT_FOUND',
+            412: 'UPSTREAM_BLOCKED', 429: 'RATE_LIMITED'}.get(status, 'UPSTREAM_ERROR')
+    name = 'Bilibili' if platform == 'bilibili' else 'Douyin'
+    message = f'{name} request failed at {stage} (HTTP {status}).'
+    if code == 'UPSTREAM_BLOCKED':
+        message += (' The platform rejected this server request. This is not evidence of a bad '
+                    'shortlink or missing cookies; changing to a BV/full link is not a fix. '
+                    'Do not repeatedly retry or request cookies in chat.')
+    elif code == 'AUTH_REQUIRED':
+        message += ' Platform authorization is required; credentials must be configured by the operator, not sent in chat.'
+    elif code == 'RATE_LIMITED':
+        message += ' Platform rate limit reached; do not immediately retry.'
+    return VideoError(code, message, stage=stage, http_status=status)
 
 
 @dataclass(frozen=True)

@@ -238,6 +238,15 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.send())['status'], 'acquisition_failed')
         self.sender.assert_not_awaited()
 
+    async def test_metadata_rejection_details_reach_tool_without_downloading(self):
+        failure = {'schema_version': 1, 'status': 'error', 'error': {
+            'code': 'UPSTREAM_BLOCKED', 'stage': 'metadata', 'http_status': 412,
+            'message': 'Platform rejected the server request'}}
+        self.service.backend.resolve.return_value = failure
+        self.assertEqual(await self.send(), failure)
+        self.service.materializer.materialize.assert_not_awaited()
+        self.sender.assert_not_awaited()
+
     async def test_group_destination_deadline_and_revocation_before_send(self):
         self.event.message_type = 'group'
         self.event.group_id = 42
@@ -309,6 +318,14 @@ class AssemblyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(error.exception.code, 'STORAGE_LIMIT')
                 self.assertEqual(materializer._reserved, 0)
                 self.assertTrue(artifact.path.exists())
+                backend._extract.side_effect = None
+                backend._extract.return_value = {'status': 'error', 'error': {
+                    'code': 'UPSTREAM_BLOCKED', 'stage': 'extractor', 'http_status': 412,
+                    'message': 'Platform rejected the server request'}}
+                with self.assertRaises(VideoError) as blocked:
+                    await materializer.materialize(URL, 1, META, time.monotonic() + 15)
+                self.assertEqual(blocked.exception.result()['error']['http_status'], 412)
+                self.assertEqual(blocked.exception.stage, 'extractor')
                 async def unexpected(source, part, cookie, *, media):
                     (Path(media['directory']) / 'input0.mp4').write_bytes(inputs['input0.mp4'])
                     return {**META, 'artifacts': {'files': ['../../private'], 'silent': False}}

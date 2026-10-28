@@ -86,7 +86,7 @@ function SidebarNav({
 function SidebarFoot() {
   return (
     <div className="px-5 py-4 text-[11px] leading-relaxed text-slate-400">
-      模型与审批可编辑 · 其余只读
+      模型、审批、剧情与视频凭据可管理
       <br />
       每 60 秒自动刷新
     </div>

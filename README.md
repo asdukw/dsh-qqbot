@@ -531,7 +531,7 @@ bilibili_cookies = ""
 douyin_cookies = ""
 ```
 
-Cookie 路径仅由运维配置，使用平台专属 Netscape 文件，放在 workspace 之外并限制文件权限；程序不读取浏览器 Cookie、不自动登录，也不写回文件。不要把 Cookie 发进聊天。抖音可能需要新鲜 Cookie（不一定需要已登录账号）；B 站 ECS 出口也可能遭风控，解析器支持不等于部署环境可用。
+Cookie 可通过管理面板的“系统 → 视频凭据”保存，或沿用运维指定的平台专属 Netscape 文件；凭据位于 workspace 外。程序不读取浏览器 Cookie、不自动登录、不写回 legacy 文件。不要把 Cookie 发进聊天。抖音可能需要新鲜 Cookie（不一定需要已登录账号）；B 站 ECS 出口也可能遭风控，解析器支持不等于部署环境可用。
 
 失败返回 `status: "error"` 和 `error.code/message`：例如 `INVALID_SOURCE`、`UNSUPPORTED_SOURCE`、`AUTH_REQUIRED`、`CREDENTIALS_REQUIRED`、`CREDENTIALS_INVALID`、`ACCESS_RESTRICTED`、`RATE_LIMITED`、`UPSTREAM_BLOCKED`、`NOT_FOUND`、`TIMEOUT`、`EXTRACTOR_BROKEN`、`BACKEND_UNAVAILABLE`、`LIMIT_EXCEEDED`、`BUSY`。不能可靠区分凭据失效和平台风控时不猜测原因，也不尝试绕过。
 
@@ -593,3 +593,33 @@ reaction_emoji_id = "76"  # QQ 赞；可改为 "124"（OK）等受支持数字 I
 表情 ID 须为1–10位非零十进制数字字符串，非法配置加载时会明确报错。Reaction 开关独立于解析/发送及抖音实验开关；可用 `reaction_enabled = false` 单独关闭。仅识别当前普通文本支持的 URL，不为裸 BV/AV、原生视频附件或结构化 QQ JSON 分享卡新增识别。
 
 使用 NapCat `set_msg_emoji_like`，失败/不支持/超时最多等待2秒后继续后续流程，不发失败提示、不自动重试；每进程保存最近256条回应去重记录，最多4项在途调用，繁忙时直接跳过。本地测试验证了 API 参数、处理顺序、去重、失败与取消；真实私聊/群显示效果仍受 NapCat/QQ 支持限制，需单独验收。
+
+
+### 短链失败与平台风控的区分
+
+短链展开只请求短链及必要的中间短链，取得同平台、合法单视频 `Location` 后就交给解析器，不提前访问一次最终视频网页。所有实际后续请求仍执行原有 HTTPS/域名/DNS/IP 固定检查；指定分 P 和参数冲突规则不变。
+
+HTTP 失败的工具结果保留 `error.stage`（`shortlink` / `metadata` / `extractor`）和 `error.http_status`。例如短链已成功跳转，而后续 B 站元数据请求返回 412，应报告 `UPSTREAM_BLOCKED`、`stage=metadata`、`http_status=412`，不能说成“短链打不开，请换 BV”。平台 API 以 HTTP 200 返回业务错误 `-412` 时只标注 extractor/platform block，不把业务码误充 HTTP 状态。
+
+412 表示平台拒绝当前请求，不足以证明缺少 Cookie；直接 BV/完整链接也可能被拒绝。机器人不应保证换链接或加 Cookie 就能恢复，不反复重试，也不要求用户在聊天中提交 Cookie。真实需要授权时，仍由运维配置 workspace 外的平台专属受限 Cookie 文件。
+
+
+### 管理面板配置 B站 / 抖音 Cookie
+
+在面板“系统 → 视频凭据”（`#/video-credentials`）分别管理两平台。页面只显示配置状态、来源与更新时间，**不会回显已保存值**；“已配置”仅代表本地已保存，不代表账号已通过上游验证，也不保证解除 HTTP 412。
+
+- 可粘贴浏览器请求中的 `Cookie: name=value; ...` 或纯请求头内容，也可选择 Netscape 格式并粘贴/导入本平台 Cookie 文件。不要导入整个浏览器数据库，不接受 JSON 导出。内容最大64 KiB、最多256条存储记录，只允许选定平台域名。
+- 请求头形式按平台固定为HTTPS host-only Cookie：B站www/api主机、抖音www主机；不发送给短链域或媒体CDN。Netscape文件保留合法的平台域/path/expiry范围。
+- 默认保存到 `[video] credentials_directory = "/var/lib/qqbot/video-credentials"`，目录0700、平台状态文件0600，由qqbot服务用户管理，原子替换；**是受文件权限保护的明文存储，不是加密保险库**。管理员备份时也应保护这份目录。
+- 保存/替换后，后续元数据解析和视频发送自动读取，无需重启。清除会明确停用该平台凭据，不悄悄恢复旧的 `bilibili_cookies` / `douyin_cookies` 运维文件；旧文件不删除。在途worker已经读到的Cookie无法追溯撤回。
+- 保存Cookie不会自动启用抖音，也不会启用或改变发送权限。不要把Cookie贴进QQ或本助手聊天，不要在截图中泄漏。
+
+**写入只允许通过本机转发访问**：浏览器使用 `http://127.0.0.1:转发端口`（或localhost/::1），且服务器看到的连接须为loopback。公共HTTP页面只看状态，保存/删除被禁止；界面也不会让你在该页面输入并提交凭据。当前版本不支持仅凭代理 `X-Forwarded-Proto` 认定HTTPS，可信TLS代理接入需单独设计。无需开放任何公网端口。
+
+后端接口：`GET /api/video/credentials` 返回安全状态；`POST /api/video/credentials` 保存 `{platform,format,content}`，`format` 为 `header` 或 `netscape`；`POST /api/video/credentials/delete` 清除 `{platform}`。均需管理员登录，写入另需同源Origin、JSON和本机通道。API不返回凭据、预览、哈希或存储路径。
+
+### 降低平台重复请求
+
+B站不再强制先访问 `/x/web-interface/view`；从目标页内嵌初始数据校验BV/AV、分P和CID，再复用pages列表；可确认属于当前CID且非预览的内嵌DASH数据直接复用，其他情况走提取器正常WBI接口。不读取未消费的章节/字幕/评论，不在平台拦截后轮换接口重试。
+
+同平台/来源/分P/凭据版本的同时只读请求合并为一个任务；某个等待者取消不会误杀其他等待者，全部取消时终止worker。成功元数据短期有界缓存（含短链与规范目标映射），视频文件和QQ发送任务不共享。412/429对应的平台+凭据版本进入60秒冷却，排队请求出队后再次检查；工具结果带 `retry_after_seconds`，不要立即重复尝试。更新/清除凭据后使用新generation，旧缓存/冷却不会串入新配置。这些措施减少无效请求，**不是风控绕过，也不保证真实平台访问成功**。

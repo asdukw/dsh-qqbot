@@ -32,10 +32,10 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(request.extensions['sni_hostname'], host)
         if path == '/x/web-interface/view':
             return httpx.Response(200, json={'code': 0, 'data': {
-                'bvid': BV, 'aid': 123, 'pages': [{'cid': 10}, {'cid': 11}]}})
+                'bvid': BV, 'aid': 123, 'pages': [{'cid': 10, 'part': 'First'}, {'cid': 11, 'part': 'Second'}]}})
         if path.startswith('/video/'):
             state = {'videoData': {'bvid': BV, 'aid': 123, 'cid': 10, 'title': 'Fixture video',
-                                  'desc': 'Fixture description', 'pages': [{'cid': 10}, {'cid': 11}],
+                                  'desc': 'Fixture description', 'pages': [{'cid': 10, 'part': 'First'}, {'cid': 11, 'part': 'Second'}],
                                   'stat': {'view': 1, 'like': 2}, 'rights': {}},
                      'upData': {'name': 'Fixture author', 'mid': 7}, 'tags': []}
             return httpx.Response(200, text='<script>window.__INITIAL_STATE__=' + json.dumps(state) + ';</script>')
@@ -119,6 +119,72 @@ class ExtractorTests(unittest.TestCase):
             self.assertEqual((Path(tmp) / 'input0.mp4').read_bytes(), b'media')
             self.assertNotIn('secret', json.dumps(result))
 
+    def test_embedded_playback_reuse_requires_matching_part(self):
+        page = self.fixture
+        network = []
+        def embedded(request):
+            network.append(request.url.path)
+            response = page(request)
+            if request.url.path.startswith('/video/'):
+                play = {'code': 0, 'data': {'cid': 11, 'timelength': 12000, 'dash': {
+                    'video': [{'baseUrl': 'https://media.example/video?secret', 'mimeType': 'video/mp4',
+                               'codecs': 'avc1', 'id': 80, 'height': 720, 'width': 1280}],
+                    'audio': [{'baseUrl': 'https://media.example/audio?secret', 'mimeType': 'audio/mp4',
+                               'codecs': 'mp4a', 'id': 30280}]}}}
+                return httpx.Response(200, text=response.text + '<script>window.__playinfo__=' + json.dumps(play) + ';</script>')
+            return response
+        result = self.run_fixture({'source': BV, 'part': 2}, embedded)
+        self.assertEqual(result['content_id'], BV)
+        self.assertEqual(network, [f'/video/{BV}'])
+        self.assertNotIn('secret', json.dumps(result))
+        def wrong_part(request):
+            response = embedded(request)
+            if request.url.path.startswith('/video/'):
+                return httpx.Response(200, text=response.text.replace('"cid": 11, "timelength"', '"cid": 10, "timelength"'))
+            return response
+        network.clear()
+        self.run_fixture({'source': BV, 'part': 2}, wrong_part)
+        self.assertIn('/x/player/wbi/playurl', network)
+        self.assertNotIn('/x/web-interface/view', network)
+        self.assertNotIn('/x/player/pagelist', network)
+        self.assertNotIn('/x/player/wbi/v2', network)
+
+    def test_anonymous_nav_can_supply_signing_keys_but_playback_auth_is_preserved(self):
+        def nav(request):
+            response = self.fixture(request)
+            if request.url.path == '/x/web-interface/nav':
+                body = response.json()
+                body['code'] = -101
+                return httpx.Response(200, json=body)
+            return response
+        result = self.run_fixture({'source': BV, 'part': 2}, nav)
+        self.assertEqual(result['status'], 'ok')
+        def restricted(request):
+            if request.url.path == '/x/player/wbi/playurl':
+                return httpx.Response(200, json={'code': -101, 'message': 'private'})
+            return nav(request)
+        with self.assertRaises(VideoError) as error:
+            self.run_fixture({'source': BV, 'part': 2}, restricted)
+        self.assertEqual(error.exception.code, 'AUTH_REQUIRED')
+
+    def test_initial_state_validation_precedes_any_playback_request(self):
+        for mutation, category in ((lambda d: d.update(bvid='BV1GJ411x7h7'), 'EXTRACTOR_BROKEN'),
+                                   (lambda d: d.update(pages=[]), 'EXTRACTOR_BROKEN'),
+                                   (lambda d: d.update(pages=[{'cid': 10}]), 'INVALID_SOURCE'),
+                                   (lambda d: d.update(rights={'is_stein_gate': True}), 'UNSUPPORTED_SOURCE')):
+            called = []
+            def malformed(request, called=called, mutation=mutation):
+                called.append(request.url.path)
+                self.assertTrue(request.url.path.startswith('/video/'))
+                response = self.fixture(request)
+                state = json.loads(response.text.split('=', 1)[1].split(';</script>', 1)[0])
+                mutation(state['videoData'])
+                return httpx.Response(200, text='<script>window.__INITIAL_STATE__=' + json.dumps(state) + ';</script>')
+            with self.subTest(category=category), self.assertRaises(VideoError) as error:
+                self.run_fixture({'source': BV, 'part': 2}, malformed)
+            self.assertEqual(error.exception.code, category)
+            self.assertEqual(len(called), 1)
+
     def test_short_links_av_identity_and_platform_errors(self):
         def short(request):
             if request.headers['host'] == 'b23.tv':
@@ -135,6 +201,76 @@ class ExtractorTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(VideoError) as error:
                 self.run_fixture({'source': BV}, lambda request, status=status: httpx.Response(status))
             self.assertEqual(error.exception.code, code)
+
+    def test_shortlink_block_is_reported_at_the_actual_stage(self):
+        calls = []
+        def metadata_block(request):
+            calls.append((request.headers['host'], request.url.path))
+            if request.headers['host'] == 'b23.tv':
+                return httpx.Response(302, headers={'location': f'https://www.bilibili.com/video/{BV}?p=2'})
+            if request.url.path.startswith('/video/'):
+                return httpx.Response(412, text='secret upstream details')
+            raise AssertionError('Unexpected request before metadata')
+        with self.assertRaises(VideoError) as error:
+            self.run_fixture({'source': 'https://b23.tv/test'}, metadata_block)
+        result = error.exception.result()['error']
+        self.assertEqual((result['code'], result['stage'], result['http_status']),
+                         ('UPSTREAM_BLOCKED', 'extractor', 412))
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn('secret', json.dumps(result))
+        for status, code in ((401, 'AUTH_REQUIRED'), (404, 'NOT_FOUND'),
+                             (412, 'UPSTREAM_BLOCKED'), (429, 'RATE_LIMITED')):
+            with self.subTest(status=status), self.assertRaises(VideoError) as error:
+                self.run_fixture({'source': 'https://b23.tv/test'},
+                                 lambda request, status=status: httpx.Response(status))
+            result = error.exception.result()['error']
+            self.assertEqual((result['code'], result['stage'], result['http_status']),
+                             (code, 'shortlink', status))
+
+    def test_platform_json_block_is_not_mislabeled_as_missing_cookies(self):
+        def blocked(request):
+            if request.headers['host'] == 'b23.tv':
+                return httpx.Response(302, headers={'location': f'https://www.bilibili.com/video/{BV}'})
+            if request.url.path == '/x/player/wbi/playurl':
+                return httpx.Response(200, json={'code': -412, 'message': 'secret platform text'})
+            return self.fixture(request)
+        with self.assertRaises(VideoError) as error:
+            self.run_fixture({'source': 'https://b23.tv/test'}, blocked)
+        result = error.exception.result()['error']
+        self.assertEqual(result['code'], 'UPSTREAM_BLOCKED')
+        self.assertEqual(result['stage'], 'extractor')
+        self.assertNotIn('http_status', result)
+        self.assertNotIn('secret', json.dumps(result))
+
+    def test_valid_shortlink_does_not_duplicate_extractor_page_request(self):
+        pages = []
+        def blocked_page(request):
+            if request.headers['host'] == 'b23.tv':
+                return httpx.Response(302, headers={'location': f'https://www.bilibili.com/video/{BV}?p=2'})
+            if request.url.path.startswith('/video/'):
+                pages.append(request.url.path)
+                return httpx.Response(412)
+            return self.fixture(request)
+        with self.assertRaises(VideoError) as error:
+            self.run_fixture({'source': 'https://b23.tv/test'}, blocked_page)
+        self.assertEqual(error.exception.code, 'UPSTREAM_BLOCKED')
+        self.assertEqual(error.exception.stage, 'extractor')
+        self.assertEqual(error.exception.http_status, 412)
+        self.assertEqual(len(pages), 1)
+
+    def test_douyin_shortlink_resolves_without_visiting_video_page(self):
+        calls = []
+        def douyin(request):
+            calls.append((request.headers['host'], request.url.path))
+            if request.headers['host'] == 'v.douyin.com':
+                return httpx.Response(302, headers={'location': 'https://www.douyin.com/video/123'})
+            self.assertEqual(request.url.path, '/aweme/v1/web/aweme/detail/')
+            return httpx.Response(412)
+        with self.assertRaises(VideoError) as error:
+            self.run_fixture({'source': 'https://v.douyin.com/test/'}, douyin)
+        self.assertEqual(error.exception.stage, 'extractor')
+        self.assertEqual(error.exception.http_status, 412)
+        self.assertEqual(len(calls), 2)
 
     def test_douyin_galleries_are_not_misreported_as_video(self):
         def gallery(request):
