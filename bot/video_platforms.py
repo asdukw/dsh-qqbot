@@ -114,3 +114,14 @@ def parse_source(source: str, part: int | None = None) -> VideoTarget:
         "UNSUPPORTED_SOURCE",
         "Only individual video pages are supported (not live, galleries or collections)",
     )
+
+
+def contains_video_link(text: str) -> bool:
+    """Recognize current text links without resolving shortlinks or making requests."""
+    for match in re.finditer(r'https?://[^\s<>"　]+', text[:4096]):
+        try:
+            parse_source(match[0])
+        except VideoError:
+            continue
+        return True
+    return False

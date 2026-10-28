@@ -111,6 +111,7 @@ from tasks import (
     spec_of,
 )
 from usage import UsageStore
+from video_platforms import contains_video_link
 from video_resolver import VideoSettings
 from video_service import VideoService
 from voice import (
@@ -613,6 +614,17 @@ def load_config(path: str | Path) -> AppConfig:
         cache_entries=max(0, min(256, int(video_raw.get('cache_entries', 128)))),
         bilibili_cookies=str(video_raw.get('bilibili_cookies', '')),
         douyin_cookies=str(video_raw.get('douyin_cookies', '')),
+        reaction_enabled=bool(video_raw.get('reaction_enabled', True)),
+        reaction_emoji_id=video_raw.get('reaction_emoji_id', '76'),
+        send_enabled=bool(video_raw.get('send_enabled', True)),
+        media_directory=str(video_raw.get('media_directory', '/var/lib/qqbot/video-media')),
+        delivery_database=str(video_raw.get('delivery_database', '/var/lib/qqbot/video-deliveries.db')),
+        container_directory=str(video_raw.get('container_directory', '/app/qqbot-video')),
+        max_send_bytes=max(1024, min(67108864, int(video_raw.get('max_send_bytes', 67108864)))),
+        max_send_duration=max(1, min(600, float(video_raw.get('max_send_duration', 600)))),
+        send_timeout=max(5, min(90, float(video_raw.get('send_timeout', 90)))),
+        ffmpeg=str(video_raw.get('ffmpeg', '/usr/bin/ffmpeg')),
+        ffprobe=str(video_raw.get('ffprobe', '/usr/bin/ffprobe')),
     )
 
     return AppConfig(
@@ -906,6 +918,8 @@ class Bot(PersonaRuntime):
         self._system_prompt = ""
         self.card_service: CardService | None = None
         self.video_service: VideoService | None = None
+        self._reaction_seen: dict[tuple[str, int, int], None] = {}
+        self._reaction_inflight = 0
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
         self._scheduler: TaskScheduler | None = None
@@ -992,6 +1006,7 @@ class Bot(PersonaRuntime):
         if not text and not event.images:
             return
 
+        await self._maybe_react_video_link(event, text)
         self._log_chat_event(event, text)
         story = getattr(self, "story", None)
         if self.relations is not None and (story is None or not story.enabled):
@@ -1068,6 +1083,45 @@ class Bot(PersonaRuntime):
                         service.commit(deferred)
                     except (ValueError, sqlite3.Error):
                         log.warning('deferred card switch discarded: authority or persona changed')
+
+    async def _maybe_react_video_link(self, event: MessageEvent, text: str) -> None:
+        settings = self.config.video
+        if (not settings.reaction_enabled or type(event.message_id) is not int
+                or event.message_id <= 0 or type(event.user_id) is not int
+                or event.user_id <= 0 or event.user_id == self.config.onebot.self_id):
+            return
+        if event.message_type == 'group':
+            if type(event.group_id) is not int or event.group_id <= 0:
+                return
+            target = event.group_id
+        elif event.message_type == 'private':
+            target = event.user_id
+        else:
+            return
+        if not contains_video_link(text):
+            return
+        # Keep the helper safe for direct handler callers as well as parser dedup.
+        seen = getattr(self, '_reaction_seen', None)
+        if seen is None:
+            seen = self._reaction_seen = {}
+        key = (event.message_type, target, event.message_id)
+        if key in seen:
+            return
+        seen[key] = None  # Claim before any await; failures are not retried.
+        if len(seen) > 256:
+            del seen[next(iter(seen))]
+        inflight = getattr(self, '_reaction_inflight', 0)
+        if inflight >= 4:
+            return
+        self._reaction_inflight = inflight + 1
+        try:
+            async with asyncio.timeout(2):
+                await self.onebot.set_msg_emoji_like(event.message_id, settings.reaction_emoji_id,
+                                                     set=True, timeout=2)
+        except (OneBotError, OSError, TimeoutError) as exc:
+            log.warning('video reaction outcome=unavailable error_type=%s', type(exc).__name__)
+        finally:
+            self._reaction_inflight -= 1
 
     async def handle_notice(self, payload: dict) -> None:
         """Turn poke notices into context lines or a direct reply."""
@@ -2736,10 +2790,11 @@ class Bot(PersonaRuntime):
             turn_env = {}
             if event.message_id > 0 and isinstance(dsh, DSHClient) and video_settings.enabled:
                 if video_service is None:
-                    video_service = self.video_service = VideoService(video_settings)
+                    video_service = self.video_service = VideoService(video_settings, self._send_video_receipt)
                 await video_service.start()
                 video_lease = video_service.open(event, conversation_id, session_id,
-                                                 lifetime=dsh.config.request_timeout + 10)
+                                                 lifetime=dsh.config.request_timeout + 10, text=text,
+                                                 deadline=time.monotonic() + dsh.config.request_timeout)
                 turn_env.update(video_service.env(video_lease))
             if self.is_admin(event.user_id) and event.message_id > 0 and isinstance(dsh, DSHClient):
                 if service is None:
@@ -2902,6 +2957,22 @@ class Bot(PersonaRuntime):
         self.personas.consume_opening(conversation_id)
         await self._send_reply(event, conversation_id, reply)
         log.info("reply processing finished: conv=%s llm=%.1fs", conversation_id, elapsed)
+
+    async def _send_video_receipt(self, conversation: str, uri: str, timeout: float) -> dict:
+        scope, _, chat = conversation.partition(':')
+        if scope == 'group':
+            result = await self.onebot.send_group_video(int(chat), uri, timeout=timeout)
+        elif scope == 'private':
+            result = await self.onebot.send_private_video(int(chat), uri, timeout=timeout)
+        else:
+            raise ValueError('invalid video destination')
+        message_id = result.get('message_id')
+        if type(message_id) is not int or message_id <= 0:
+            raise OneBotError('video delivery unknown: no receipt')
+        if scope == 'group':
+            self._remember_own_message(int(chat), message_id)
+            self.proactive.note_speaking(int(chat), time.time())
+        return result
 
     async def _send(self, event: MessageEvent, text: str) -> None:
         require_safe(text)

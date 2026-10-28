@@ -11,8 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from video_backend import VideoBackend
-from video_platforms import VideoError
+from video_delivery import VideoMaterializer
+from video_platforms import VideoError, VideoTarget
 from video_resolver import VideoSettings
+from video_sending import send_request, send_video
+from video_store import VideoStore
 
 
 @dataclass(eq=False)
@@ -22,15 +25,21 @@ class VideoLease:
     expires: float
     actor: int
     conversation: str
+    message_id: int = 0
+    send_source: VideoTarget | None = None
+    deadline: float = 0
     calls: int = 0
     tasks: set[asyncio.Task] = field(default_factory=set)
     expiry: asyncio.TimerHandle | None = None
 
 
 class VideoService:
-    def __init__(self, settings: VideoSettings):
+    def __init__(self, settings: VideoSettings, sender=None):
         self.settings = settings
         self.backend = VideoBackend(settings)
+        self.materializer = VideoMaterializer(settings, self.backend)
+        self.sender = sender
+        self.store: VideoStore | None = None
         self.secret = secrets.token_urlsafe(32)
         self.url = ""
         self.leases: dict[str, VideoLease] = {}
@@ -47,7 +56,8 @@ class VideoService:
                 self._server = await asyncio.start_server(self._http, "127.0.0.1", 0, limit=8192)
                 self.url = f"http://127.0.0.1:{self._server.sockets[0].getsockname()[1]}"
 
-    def open(self, event, conversation: str, session: str, lifetime: float = 120) -> VideoLease:
+    def open(self, event, conversation: str, session: str, lifetime: float = 120,
+             *, text: str = '', deadline: float | None = None) -> VideoLease:
         if (
             self._closed
             or not self.settings.enabled
@@ -71,6 +81,9 @@ class VideoService:
         lease = VideoLease(
             secrets.token_urlsafe(32), session, time.monotonic() + ttl, event.user_id, conversation
         )
+        lease.message_id = event.message_id
+        lease.deadline = min(lease.expires, deadline if deadline is not None else lease.expires - 10)
+        lease.send_source = send_request(text)
         self.leases[lease.nonce] = lease
         lease.expiry = asyncio.get_running_loop().call_later(ttl, self.revoke, lease)
         return lease
@@ -102,8 +115,10 @@ class VideoService:
             raise ValueError("video authority expired or invalid")
         return lease
 
-    async def call(self, nonce: str, session: str, args: dict) -> dict:
+    async def call(self, nonce: str, session: str, args: dict, operation: str = 'resolve') -> dict:
         lease = self.authorize(nonce, session)
+        if operation not in ('resolve', 'send'):
+            raise ValueError('unsupported video operation')
         if not isinstance(args, dict) or set(args) - {"source", "part"} or "source" not in args:
             raise ValueError("video_resolve accepts source and optional part only")
         lease.calls += 1
@@ -115,7 +130,8 @@ class VideoService:
         lease.tasks.add(task)
         try:
             try:
-                result = await self.backend.resolve(args["source"], args.get("part"))
+                result = (await send_video(self, lease, args) if operation == "send" else
+                          await self.backend.resolve(args["source"], args.get("part")))
             except VideoError as exc:
                 result = exc.result()
             self.authorize(nonce, session)
@@ -125,6 +141,7 @@ class VideoService:
 
     async def close(self):
         self._closed = True
+        active = {task for lease in self.leases.values() for task in lease.tasks}
         for lease in tuple(self.leases.values()):
             self.revoke(lease)
         if self._server:
@@ -132,8 +149,12 @@ class VideoService:
             await self._server.wait_closed()
         for task in tuple(self._connections):
             task.cancel()
-        await asyncio.gather(*tuple(self._connections), return_exceptions=True)
+        await asyncio.gather(*tuple(self._connections), *active, return_exceptions=True)
+        await self.materializer.close()
         await self.backend.close()
+        if self.store is not None:
+            self.store.close()
+            self.store = None
 
     async def _http(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         task = asyncio.current_task()
@@ -145,7 +166,7 @@ class VideoService:
         disconnect: asyncio.Task[Any] | None = None
         status, result = 400, {"error": "invalid video bridge request"}
         try:
-            async with asyncio.timeout(65):
+            async with asyncio.timeout(110):
                 header = await reader.readuntil(b"\r\n\r\n")
                 lines = header.decode("ascii").split("\r\n")
                 fields = {}
@@ -170,12 +191,13 @@ class VideoService:
                 if not 0 < length <= 8192:
                     raise ValueError("invalid size")
                 body = json.loads(await reader.readexactly(length))
-                if not isinstance(body, dict) or set(body) != {"lease", "session", "args"}:
+                if (not isinstance(body, dict) or set(body) - {"lease", "session", "args", "operation"}
+                        or not {"lease", "session", "args"} <= set(body)):
                     raise ValueError("invalid envelope")
                 if not isinstance(body["lease"], str) or not isinstance(body["session"], str):
                     raise ValueError("invalid authority")
                 operation = asyncio.create_task(
-                    self.call(body["lease"], body["session"], body["args"])
+                    self.call(body["lease"], body["session"], body["args"], body.get("operation", "resolve"))
                 )
                 disconnect = asyncio.create_task(reader.read(1))
                 done, _ = await asyncio.wait(

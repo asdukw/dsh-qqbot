@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bot'))
 
 from deepseek_harness import DeepSeekHarness  # pyright: ignore[reportMissingImports]  # noqa: E402
+from video_delivery import VideoArtifact  # noqa: E402
 from video_resolver import VideoSettings  # noqa: E402
 from video_service import VideoService  # noqa: E402
 
@@ -39,17 +40,22 @@ class Handler(BaseHTTPRequestHandler):
         messages = body.get('messages', [])
         blocks = messages[-1].get('content', [])
         results = [b for b in blocks if isinstance(b, dict) and b.get('type') == 'tool_result'] if isinstance(blocks, list) else []
-        if PHASE == 'video':
-            assert 'video_resolve' in names, names
+        if PHASE in ('video', 'send'):
+            assert {'video_resolve', 'video_send'} <= names, names
             assert 'card_install' not in names, names
         else:
-            assert 'video_resolve' not in names, names
-        invoke = PHASE == 'video' and not results
+            assert 'video_resolve' not in names and 'video_send' not in names, names
+        invoke = PHASE in ('video', 'send') and not results
         if results:
             text = results[-1]['content']
             if not isinstance(text, str):
                 text = ''.join(item.get('text', '') for item in text if isinstance(item, dict))
-            assert json.loads(text)['title'] == 'LOCAL_FIXTURE_VIDEO', text
+            result = json.loads(text)
+            if PHASE == 'send':
+                assert result['status'] == 'sent' and result['message_id'] == 123, text
+                assert 'file://' not in text and 'signature' not in text, text
+            else:
+                assert result['title'] == 'LOCAL_FIXTURE_VIDEO', text
         events: list[dict[str, Any]] = [
             {'type': 'message_start', 'message': {'id': f'msg_{REQUESTS}', 'model': 'smoke-model',
              'type': 'message', 'role': 'assistant', 'content': [], 'stop_reason': None,
@@ -58,7 +64,7 @@ class Handler(BaseHTTPRequestHandler):
         if invoke:
             events += [
                 {'type': 'content_block_start', 'index': 0, 'content_block': {
-                    'type': 'tool_use', 'id': f'call_{REQUESTS}', 'name': 'video_resolve', 'input': {}}},
+                    'type': 'tool_use', 'id': f'call_{REQUESTS}', 'name': 'video_send' if PHASE == 'send' else 'video_resolve', 'input': {}}},
                 {'type': 'content_block_delta', 'index': 0, 'delta': {
                     'type': 'input_json_delta', 'partial_json': json.dumps({'source': BV})}},
             ]
@@ -92,6 +98,11 @@ async def main():
         await service.start()
         with tempfile.TemporaryDirectory(prefix='qqbot-video-smoke-') as tmp:
             root = Path(tmp)
+            service.settings.media_directory = str(root / 'media')
+            service.settings.delivery_database = str(root / 'deliveries.db')
+            from video_delivery import VideoMaterializer
+            service.materializer = VideoMaterializer(service.settings, service.backend)
+            service.sender = AsyncMock(return_value={'message_id': 123})
             plugin = (Path(__file__).resolve().parents[1] / 'dsh/video-tools.mjs').as_uri()
             profile = root / 'video.patch.json'
             profile.write_text(json.dumps([
@@ -126,11 +137,32 @@ async def main():
                 service.backend.resolve.assert_awaited_once_with(BV, None)
             finally:
                 service.revoke(lease)
+            PHASE = 'send'
+            metadata = {'status': 'ok', 'title': 'LOCAL_FIXTURE_VIDEO', 'platform': 'bilibili',
+                        'content_id': BV, 'selected_part': 1,
+                        'canonical_url': f'https://www.bilibili.com/video/{BV}?p=1'}
+            service.backend.resolve = AsyncMock(return_value=metadata)
+            service.materializer.initialize()
+            artifact = VideoArtifact(service.materializer.outbox / ('a' * 32 + '.mp4'), metadata)
+            artifact.path.write_bytes(b'local-fixture')
+            service.materializer.materialize = AsyncMock(return_value=artifact)
+            event.message_id = 2
+            lease = service.open(event, 'private:7', 'video-session', text=f'解析 {BV}')
+            env = {**base_env, **service.env(lease)}
+            try:
+                result = await asyncio.to_thread(run)
+                assert result.final_response == 'VIDEO_TOOLS_OK', str(result)
+                service.sender.assert_awaited_once()
+                assert service.sender.await_args is not None
+                assert service.sender.await_args.args[0] == 'private:7'
+            finally:
+                service.revoke(lease)
             PHASE = 'background'
             env = {**base_env, 'QQBOT_VIDEO_BRIDGE': '', 'QQBOT_VIDEO_SECRET': '', 'QQBOT_VIDEO_LEASE': ''}
             result = await asyncio.to_thread(run)
             assert result.final_response == 'VIDEO_TOOLS_OK', str(result)
-            print(f'PASS: real SDK video registration/invocation, no card privilege, later unauthorized tool absence ({REQUESTS} model requests)')
+            await service.close()
+            print(f'PASS: real SDK video registration/invocation, no card privilege, scoped actual send with receipt, later unauthorized tool absence ({REQUESTS} model requests)')
     finally:
         await service.close()
         await asyncio.to_thread(server.shutdown)

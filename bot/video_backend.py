@@ -101,7 +101,7 @@ class VideoBackend:
         finally:
             self._active.discard(task)
 
-    async def _extract(self, source, part, cookie_file):
+    async def _extract(self, source, part, cookie_file, *, media: dict | None = None):
         worker = Path(__file__).with_name("video_worker.py")
         # -I prevents ambient Python paths; only the trusted bot source is added explicitly.
         bootstrap = 'import runpy,sys; sys.path.insert(0,sys.argv[1]); runpy.run_path(sys.argv[2],run_name="__main__")'
@@ -133,7 +133,7 @@ class VideoBackend:
             if process.stdin is None or process.stdout is None or process.stderr is None:
                 raise VideoError("UNAVAILABLE", "Video worker pipes unavailable")
             payload = json.dumps(
-                {"source": source, "part": part, "cookie_file": cookie_file}, ensure_ascii=False
+                {"source": source, "part": part, "cookie_file": cookie_file, **(media or {})}, ensure_ascii=False
             ).encode()
             if len(payload) > 8192:
                 raise VideoError("INVALID_SOURCE", "Worker request too large")

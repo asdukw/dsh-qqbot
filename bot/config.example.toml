@@ -262,10 +262,14 @@ character = "/etc/qqbot/character.json"
 database = "/var/lib/qqbot/memory.db"
 
 [video]
-# Metadata/resource descriptions only; no media downloads or transcription.
+# Metadata lookup plus explicitly requested video delivery; no transcription.
 enabled = true
 bilibili_enabled = true
 douyin_enabled = false  # experimental; may require fresh operator-supplied cookies
+# Acknowledge supported links on the original message, even in unaddressed groups.
+# Independent of parsing/sending flags; a reaction means received, not processed.
+reaction_enabled = true
+reaction_emoji_id = "76"  # QQ thumbs-up; 1-10 digit nonzero decimal string
 timeout = 30
 concurrency = 2
 calls_per_turn = 3
@@ -275,3 +279,15 @@ cache_entries = 128
 # Never paste cookies into chat; these files are loaded in memory and not rewritten.
 bilibili_cookies = ""
 douyin_cookies = ""
+
+# Explicit parse/send requests deliver a bounded MP4 to the originating conversation.
+# Requires ffmpeg/ffprobe and the read-only NapCat outbox mount; see README.
+send_enabled = true
+media_directory = "/var/lib/qqbot/video-media"
+delivery_database = "/var/lib/qqbot/video-deliveries.db"
+container_directory = "/app/qqbot-video"
+max_send_bytes = 67108864
+max_send_duration = 600
+send_timeout = 90
+ffmpeg = "/usr/bin/ffmpeg"
+ffprobe = "/usr/bin/ffprobe"

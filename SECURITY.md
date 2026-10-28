@@ -50,7 +50,12 @@
 ## 视频解析边界
 
 - 视频 bridge 与管理员角色工具完全分权。只在真实聊天轮次向独立 DSH runtime 发放随机 bearer/lease，session 由执行上下文提供，服务端再次验证；定时/主动/合成消息不获得视频权限。bridge 只监听随机 loopback 端口，拒绝 Origin、重复 header、分块传输和超限请求；浏览器和未授权 runtime 不能获得调用权限。模型不会收到 bridge 凭据。
-- 输入仅接受已支持平台的单视频 ID/URL；所有短链和 extractor 请求统一走固定版本的唯一受限 handler。只允许 HTTPS/443 与明确平台域名，DNS 全部结果须为公网，实际连接绑定检查过的 IP 并保留 Host/TLS SNI；无环境代理或默认 transport 回退。每跳重新生成 Cookie/Referer，清空 HTTP 客户端按 pin IP 存储的 Cookie，防止不同源站在相同 IP 下串凭据。维持 TLS 校验，不开启文件 URL、外部下载器、JS runtime 或插件加载。
+- 输入仅接受已支持平台的单视频 ID/URL；所有短链和 extractor 元数据请求统一走固定版本的唯一受限 handler。只允许 HTTPS/443 与明确平台域名，DNS 全部结果须为公网，实际连接绑定检查过的 IP 并保留 Host/TLS SNI；无环境代理或默认 transport 回退。每跳重新生成 Cookie/Referer，清空 HTTP 客户端按 pin IP 存储的 Cookie，防止不同源站在相同 IP 下串凭据。维持 TLS 校验，不开启文件 URL、外部下载器、JS runtime 或插件加载。
 - 请求数、重定向、原始/解码响应、累计流量、队列、进程输出及总时间有界。取消、过期、断开与 shutdown 会终止并回收 worker。进程隔离不等于 OS 网络沙箱；边界依赖受信固定版 yt-dlp 的所有请求都经所覆盖接口，升级必须重跑真实 extractor+固定响应安全测试，不支持的网络行为失败关闭。
 - Cookie 只能由运维在 workspace 外配置平台专属文件；在 worker 内存中按域使用，不读浏览器、不写回、不自动获取或刷新。配置凭据是部署者对该平台读取权限的授权，不突破会员、地域、登录或验证限制。工具不接受 Cookie/文件路径/代理/提取器参数。返回/日志不包含 raw 后端错误、Cookie、Header、签名媒体地址；但公开标题/简介仍会作为工具结果发送模型提供商，属于不可信外部数据。
-- 元数据缓存按平台/内容/分 P/凭据文件版本分区且有 TTL/LRU 上限；只有公开元数据、非授权信息可跨会话共享。当前不提供下载、字幕正文、视频理解或 QQ 视频发送。若后续增加下载，需独立设计 CDN egress、资源有效期、大小/时长限制、缓存权限与删除流程，不能直接放宽现有域名白名单。
+- 元数据缓存按平台/内容/分 P/凭据文件版本分区且有 TTL/LRU 上限；只有公开元数据、非授权信息可跨会话共享。只读接口不下载、不发视频；仍不提供字幕正文或视频理解。发送使用下面独立的 CDN/磁盘/QQ 授权边界，不能直接放宽元数据白名单。
+
+- `video_send` 必须同时具有真实当前轮次、明确解析/下载/发送请求与对应单一来源；裸链接/讨论/引用内容不能授权。目标绑定来源 conversation/message，模型不能传收件人、文件路径或任意媒体地址；定时/主动/合成事件无发送权限。保守字符串请求规则不是全面语义授权证明，未匹配请求需确认，不自动引用历史链接。
+- CDN transport 单独允许审核过的平台 CDN 家族，逐跳全 DNS 检查+实际 IP pinning，无环境代理、无 Cookie/Authorization，不接收 extractor 任意 Header；流式字节/时限/跳转有界，不取 manifest、不让 ffmpeg 访问网络。worker 只返回固定文件名 manifest，父进程检查普通文件、路径/identity/分 P 与输出时长/codec，原子发布；ffmpeg 使用固定本地 MOV demuxer和 file-only 协议，不允许模型命令或传远程 URL。
+- 文件在 DSH workspace 之外，只有验证后的成品目录以只读卷供 NapCat 使用；不启公网下载接口。每轮一次、时长/体积/清晰度硬上限、单 materialize 和 256 MiB 预留峰值预算；下载/合并/发送前取消会清理 partial，发送中取消视为 unknown、成品保留 TTL 供潜在读取。启动/定时清理只识别服务随机文件名，不跟随 symlink 或递归删除意外内容。
+- SQLite 账本不存 Cookie/签名 URL，权限 0600，最多10000条，结束记录30天清理；重启遗留 sending 不自动重发，QQ 回执只证明接口接受，不证明客户端播放。安装系统 ffmpeg、重建 NapCat、向真实 QQ 会话测试均是独立部署动作，普通代码更新不隐式执行。自定义 NapCat UID/GID 必须仅授予成品目录所需读/遍历权限，不挂全部机器人数据目录。

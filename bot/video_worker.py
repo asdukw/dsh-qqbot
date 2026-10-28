@@ -1,4 +1,4 @@
-"""Short-lived yt-dlp worker. Never imports user plugins or downloads media."""
+"""Short-lived extractor; only explicit internal materialize mode downloads bounded media."""
 
 from __future__ import annotations
 
@@ -185,7 +185,13 @@ def extract(payload: dict) -> dict:
                     raise VideoError(
                         "UNSUPPORTED_SOURCE", "Interactive or multi-entry videos are not supported"
                     )
-            return project(info, target)
+            result = project(info, target)
+            if payload.get('materialize'):
+                from video_media import download_tracks
+                result['artifacts'] = download_tracks(
+                    info, target.platform, payload['directory'], payload['max_bytes'],
+                    payload['max_duration'], payload.get('download_timeout', 35))
+            return result
         except VideoError:
             raise
         except Exception as exc:

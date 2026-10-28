@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -21,6 +22,24 @@ class VideoSettings:
     cache_entries: int = 128
     bilibili_cookies: str = ""
     douyin_cookies: str = ""
+
+    reaction_enabled: bool = True
+    reaction_emoji_id: str = "76"
+
+    send_enabled: bool = True
+    media_directory: str = '/var/lib/qqbot/video-media'
+    delivery_database: str = '/var/lib/qqbot/video-deliveries.db'
+    container_directory: str = '/app/qqbot-video'
+    max_send_bytes: int = 64 * 1024 * 1024
+    max_send_duration: float = 600
+    send_timeout: float = 90
+    ffmpeg: str = '/usr/bin/ffmpeg'
+    ffprobe: str = '/usr/bin/ffprobe'
+
+    def __post_init__(self):
+        if (not isinstance(self.reaction_emoji_id, str)
+                or not re.fullmatch(r'[1-9][0-9]{0,9}', self.reaction_emoji_id)):
+            raise ValueError('video.reaction_emoji_id must be a 1-10 digit nonzero decimal string')
 
     def cookie_file(self, platform: str) -> str:
         return self.bilibili_cookies if platform == "bilibili" else self.douyin_cookies
