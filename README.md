@@ -508,3 +508,40 @@ sudo -u qqbot /opt/qqbot/bot/venv/bin/python /opt/qqbot/bot/main.py --check-oneb
 ## License
 
 MIT
+
+## 视频链接解析
+
+DSH 的 `video_resolve` 工具接受一个 `source`（BV/AV、视频 URL 或含一个链接的分享文案）和可选 `part`。B 站支持普通视频、`b23.tv` 短链和指定分 P；默认仅第一 P，不展开合集。抖音支持单视频页面和 `v.douyin.com` 短链，属于实验功能，默认关闭；图集、直播、番剧及原生 QQ 视频附件不在本期范围内。
+
+返回统一 `schema_version: 1` 结果：平台/内容 ID、规范网页地址、标题、作者、简介、时长、封面、选中分 P、最多 12 项音视频资源描述和警告。**不会下载视频、提供播放直链、转写、总结或发送 QQ 视频；元数据不代表模型看过视频。** 字幕未查询时为 `unknown`，不把弹幕当字幕。
+
+配置位于 `config.toml` 的 `[video]`，旧配置缺少此节也能运行：
+
+```toml
+[video]
+enabled = true
+bilibili_enabled = true
+douyin_enabled = false
+timeout = 30
+concurrency = 2
+calls_per_turn = 3
+cache_seconds = 300
+cache_entries = 128
+bilibili_cookies = ""
+douyin_cookies = ""
+```
+
+Cookie 路径仅由运维配置，使用平台专属 Netscape 文件，放在 workspace 之外并限制文件权限；程序不读取浏览器 Cookie、不自动登录，也不写回文件。不要把 Cookie 发进聊天。抖音可能需要新鲜 Cookie（不一定需要已登录账号）；B 站 ECS 出口也可能遭风控，解析器支持不等于部署环境可用。
+
+失败返回 `status: "error"` 和 `error.code/message`：例如 `INVALID_SOURCE`、`UNSUPPORTED_SOURCE`、`AUTH_REQUIRED`、`CREDENTIALS_REQUIRED`、`CREDENTIALS_INVALID`、`ACCESS_RESTRICTED`、`RATE_LIMITED`、`UPSTREAM_BLOCKED`、`NOT_FOUND`、`TIMEOUT`、`EXTRACTOR_BROKEN`、`BACKEND_UNAVAILABLE`、`LIMIT_EXCEEDED`、`BUSY`。不能可靠区分凭据失效和平台风控时不猜测原因，也不尝试绕过。
+
+工具仅对进入普通回复流程的真实用户消息开放；不自动抓取所有群消息，不给定时/主动/合成消息授权，DSH 关闭时不提供该工具。视频权限与管理员角色工具分离。首版复用单轮独立 DSH runtime，因而每个视频启用的聊天轮次都有运行时重启开销，但磁盘会话历史保留。可用 `enabled = false` 关闭。
+
+后端固定 `yt-dlp==2026.10.26`；升级须同时更新版本校验、通过网络/提取器回归测试并在实际部署出口验证，不在运行时自动升级。离线实际 SDK 冒烟测试：
+
+```bash
+python scripts/check_video_tools_runtime.py
+python -m unittest discover -s tests -p 'test_video*.py' -v
+```
+
+冒烟脚本只调用本机假模型和假解析结果；单元测试通过真实固定版提取器处理固定 HTTP 响应，不代表线上平台一定成功。实际平台验证应另行报告，无 Cookie 时如实保留错误，不为测试收集凭据。

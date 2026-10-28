@@ -76,6 +76,9 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         self.bot.onebot = SimpleNamespace(send_group=group, send_private=private)
 
     async def asyncTearDown(self) -> None:
+        video = getattr(self.bot, 'video_service', None)
+        if video is not None:
+            await video.close()
         self.conversations.close()
         self.sessions.close()
         self.memory.close()
@@ -555,6 +558,45 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         finally:
             finish.set()
             await service.close()
+
+    async def test_video_tools_ordinary_admin_and_synthetic_turn_authority(self) -> None:
+        from dsh_client import DSHClient, DSHConfig
+        self.bot.dsh = DSHClient(DSHConfig())
+        self.bot.ensure_card = AsyncMock(return_value=True)
+        self.bot._session_for = Mock(return_value=('video-session', False))
+        self.bot._prepare_persona = Mock()
+        self.bot._turn_images = Mock(return_value=[])
+        self.bot._turn_prompt = Mock(return_value=('video please', 0))
+        self.bot._recall_block = AsyncMock(return_value='')
+        self.bot._record_dsh_usage = Mock()
+        self.bot._touch_session = Mock()
+        self.bot._send_reply = AsyncMock()
+        captured = []
+
+        def authorized(session, text, images, env):
+            captured.append(env)
+            self.bot.video_service.authorize(env['QQBOT_VIDEO_LEASE'], session)
+            return 'metadata only', []
+
+        self.bot.dsh.run_authorized = Mock(side_effect=authorized)
+        self.bot.dsh.run_with_events = Mock(return_value=('ordinary', []))
+        try:
+            await self.bot._reply_dsh('private:2', self.private_event(2), '解析视频')
+            self.assertIn('QQBOT_VIDEO_LEASE', captured[-1])
+            self.assertNotIn('QQBOT_CARD_LEASE', captured[-1])
+            self.assertEqual(self.bot.video_service.leases, {})
+            await self.bot._reply_dsh('private:1', self.private_event(1), '解析视频')
+            self.assertIn('QQBOT_VIDEO_LEASE', captured[-1])
+            self.assertIn('QQBOT_CARD_LEASE', captured[-1])
+            synthetic = self.private_event(2)
+            synthetic.message_id = 0
+            await self.bot._reply_dsh('private:2', synthetic, 'poke')
+            self.assertEqual(len(captured), 2)
+            self.bot.dsh.run_with_events.assert_called_once()
+        finally:
+            cards = getattr(self.bot, 'card_service', None)
+            if cards is not None:
+                await cards.close()
 
     async def test_fallback_card_request_reports_unavailable_instead_of_model_success(self) -> None:
         self.bot._send = AsyncMock()

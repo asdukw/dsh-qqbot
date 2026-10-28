@@ -108,6 +108,8 @@
       name: '/opt/qqbot/dsh/plugins/web-search-keyless.mjs'
     - id: web-fetch-http
       name: '@deepseek-ai/dsh-web-fetch-http'
+    - id: video-tools
+      name: '/opt/qqbot/dsh/plugins/video-tools.mjs'
     - id: card-tools
       name: '/opt/qqbot/dsh/plugins/card-tools.mjs'
     - id: tool-web
