@@ -260,3 +260,18 @@ prompt = "你正在群里和大家聊天。结合上面的最近消息，简短�
 # Deprecated: used as [cards] bootstrap when that key is absent.
 character = "/etc/qqbot/character.json"
 database = "/var/lib/qqbot/memory.db"
+
+[video]
+# Metadata/resource descriptions only; no media downloads or transcription.
+enabled = true
+bilibili_enabled = true
+douyin_enabled = false  # experimental; may require fresh operator-supplied cookies
+timeout = 30
+concurrency = 2
+calls_per_turn = 3
+cache_seconds = 300
+cache_entries = 128
+# Optional Netscape cookie files, platform-specific and readable only by the service.
+# Never paste cookies into chat; these files are loaded in memory and not rewritten.
+bilibili_cookies = ""
+douyin_cookies = ""

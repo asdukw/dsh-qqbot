@@ -51,11 +51,15 @@ class AuthorizedRuntimeTests(unittest.TestCase):
         old_env = dict(os.environ)
         client = DSHClient(DSHConfig())
         with patch('dsh_client.DeepSeekHarness', Harness):
-            client.run_authorized('s1', 'install', (), {'QQBOT_CARD_LEASE': 'old-nonce', 'QQBOT_CARD_SECRET': 'secret'})
+            client.run_authorized('s1', 'install', (), {'QQBOT_CARD_LEASE': 'old-nonce', 'QQBOT_CARD_SECRET': 'secret',
+                                                               'QQBOT_VIDEO_LEASE': 'video-nonce', 'QQBOT_VIDEO_SECRET': 'video-secret'})
             self.assertTrue(created[0].closed)
             client.run('s1', 'ordinary')
             self.assertEqual(created[1].env['QQBOT_CARD_LEASE'], '')
             self.assertEqual(created[1].env['QQBOT_CARD_SECRET'], '')
+            self.assertEqual(created[1].env['QQBOT_VIDEO_LEASE'], '')
+            self.assertEqual(created[1].env['QQBOT_VIDEO_SECRET'], '')
+            self.assertEqual(created[1].env['QQBOT_VIDEO_BRIDGE'], '')
             self.assertEqual(os.environ, old_env)
             client.close()
 

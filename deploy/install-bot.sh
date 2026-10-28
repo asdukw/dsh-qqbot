@@ -49,6 +49,7 @@ if [ ! -d "$DSH_HOME/profiles/qqbot" ]; then
 fi
 install -m 644 "$SRC/dsh/qqbot.cordis.patch.yml" "$DSH_HOME/profiles/qqbot/cordis.patch.yml"
 install -m 644 "$SRC/dsh/persona.mjs" /opt/qqbot/dsh/plugins/persona.mjs
+install -m 644 "$SRC/dsh/video-tools.mjs" /opt/qqbot/dsh/plugins/video-tools.mjs
 install -m 644 "$SRC/dsh/card-tools.mjs" /opt/qqbot/dsh/plugins/card-tools.mjs
 install -m 644 "$SRC/dsh/user-profile.mjs" /opt/qqbot/dsh/plugins/user-profile.mjs
 install -m 644 "$SRC/dsh/session-history.mjs" /opt/qqbot/dsh/plugins/session-history.mjs

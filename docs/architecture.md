@@ -352,3 +352,15 @@ auto: true
 发布硬约束保留ID/引用/flag/效果/安全保底/无环/可到达结局；孤立未引用节点、采样未覆盖等为质量警告，采样预算耗尽记unknown，不证明剧本无效。`story_warnings` 在真实初值与阈值边界上有界探索。原满属性单一模拟移除。显式refresh可签发基于当前关系的新菜单，保持原choice内容与效果，旧菜单失效；普通continue仍复用冻结选项。
 
 排队、单次、阶段与准备总deadline分开，剩余时间约束每一次请求，传输attempts=1避免指数重试。场景不继承整图token上限。native严格输出仅显式配置；仅已知behavior闭域字典转换为固定五阶段对象，其他不支持schema拒绝，应用约束始终本地复验。面板展示attempt/stage/错误码和草稿状态，不暴露正文。
+
+## 统一视频解析
+
+`dsh/video-tools.mjs` 的 `video_resolve(source, part?)` 使用 Node 原生 HTTP 直连 loopback bridge，不使用环境代理或重定向。`VideoService` 在 `bot/main.py::_reply_dsh()` 为真实用户当前消息发放 session/actor/conversation 绑定的限时 lease；管理员轮次合并独立的 card/video 环境，普通用户不获得 card authority。定时、主动、合成事件不发 lease；`DSHClient` 清空未授权运行时的 video 环境。授权 runtime 在轮次前后关闭，session 数据保留；这以启动延迟换取简单、明确的权限边界。
+
+`video_platforms.py` 规范化单视频标识/短链/分 P，`video_resolver.py` 定义版本化输出；`video_backend.py` 管理并发、限时、输出上限和元数据 LRU；`video_worker.py` 隔离固定版提取器，按平台显式选择 extractor，不自动委派 Generic、合集或媒体下载。B 站先校验 BV/AV 对应的真实身份和分 P 范围。`video_http.py` 是所有后端请求唯一的传输层：固定 `RequestDirector` 不允许其他 handler 兜底，逐跳检查平台域名和公共 DNS，实际连接 pin IP、Host/SNI 保持源站；原始/解压响应大小、累计流量和请求数有界。该集成边界不是防任意恶意 Python 代码的 OS 沙箱。
+
+缓存只含投影后的元数据/资源描述，键包含平台、ID、分 P、配置 Cookie 路径及 mtime/size，不缓存错误；短链结果暂不缓存。不同会话可共享同一凭据版本下的公开元数据，不保存聊天内容或 lease。变更配置 Cookie 内容时需更新文件时间/大小（替换文件后重启可保证清空缓存）。无媒体直链缓存、下载句柄或本地媒体文件。
+
+worker 以最小环境启动，不继承 bot 模型密钥、代理或 bridge secret；不加载用户插件/配置/浏览器 Cookie，平台 Cookie 只在内存使用且不写回。未查询的字幕为 unknown，禁用可能主动下载字幕正文的 extractor 路径。输出最多 12 个格式摘要，不输出 Cookie、Header、签名媒体 URL 或原始对象。
+
+单轮撤销/到期、HTTP 断开、解析超时及服务关闭会取消活动解析，terminate/kill/wait 回收进程；stdout/stderr 在读取时限制为 16 KiB/4 KiB。先停止 bridge/worker，再在线程中等待 DSH close 的锁，避免 asyncio loop 与 bridge 互等。静态配额为最多 24 次请求、5 次重定向、单响应 2 MiB、累计解码 8 MiB、工具响应 16 KiB，配置并发/总时限和缓存还有硬上限。

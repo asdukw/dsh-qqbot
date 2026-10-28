@@ -91,7 +91,8 @@ class DSHClient:
             raise DSHError("deepseek-harness-sdk is not installed in this venv")
 
         env = {"DSH_SYSTEM_PROMPT": self._system_prompt,
-               "QQBOT_CARD_BRIDGE": "", "QQBOT_CARD_SECRET": "", "QQBOT_CARD_LEASE": ""}
+               "QQBOT_CARD_BRIDGE": "", "QQBOT_CARD_SECRET": "", "QQBOT_CARD_LEASE": "",
+               "QQBOT_VIDEO_BRIDGE": "", "QQBOT_VIDEO_SECRET": "", "QQBOT_VIDEO_LEASE": ""}
         if turn_env:
             env.update(turn_env)
         log.info(

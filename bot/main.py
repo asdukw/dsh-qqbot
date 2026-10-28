@@ -111,6 +111,8 @@ from tasks import (
     spec_of,
 )
 from usage import UsageStore
+from video_resolver import VideoSettings
+from video_service import VideoService
 from voice import (
     VoiceError,
     extract_voice_marker,
@@ -359,6 +361,7 @@ class AppConfig:
     feeds: FeedsSection = field(default_factory=FeedsSection)
     relation: RelationSection = field(default_factory=RelationSection)
     story: StorySettings = field(default_factory=StorySettings)
+    video: VideoSettings = field(default_factory=VideoSettings)
     bot: BotSection = field(default_factory=BotSection)
     paths: PathsSection = field(default_factory=PathsSection)
 
@@ -598,6 +601,20 @@ def load_config(path: str | Path) -> AppConfig:
         max_changes_per_day=max(0, int(relation_raw.get("max_changes_per_day", 20))),
     )
 
+    video_raw = _section(table, 'video')
+    video = VideoSettings(
+        enabled=bool(video_raw.get('enabled', True)),
+        bilibili_enabled=bool(video_raw.get('bilibili_enabled', True)),
+        douyin_enabled=bool(video_raw.get('douyin_enabled', False)),
+        timeout=max(1.0, min(60.0, float(video_raw.get('timeout', 30)))),
+        concurrency=max(1, min(4, int(video_raw.get('concurrency', 2)))),
+        calls_per_turn=max(1, min(5, int(video_raw.get('calls_per_turn', 3)))),
+        cache_seconds=max(0, min(600, int(video_raw.get('cache_seconds', 300)))),
+        cache_entries=max(0, min(256, int(video_raw.get('cache_entries', 128)))),
+        bilibili_cookies=str(video_raw.get('bilibili_cookies', '')),
+        douyin_cookies=str(video_raw.get('douyin_cookies', '')),
+    )
+
     return AppConfig(
         onebot=OneBotSection(
             url=str(onebot_raw.get("url", "ws://127.0.0.1:3001")),
@@ -621,6 +638,7 @@ def load_config(path: str | Path) -> AppConfig:
         feeds=feeds,
         relation=relation,
         story=StorySettings.model_validate(_section(table, "story")),
+        video=video,
         bot=BotSection(
             reply_private=bool(bot_raw.get("reply_private", True)),
             reply_group_at=bool(bot_raw.get("reply_group_at", False)),
@@ -887,6 +905,7 @@ class Bot(PersonaRuntime):
         self._meme_last: dict[int, float] = {}
         self._system_prompt = ""
         self.card_service: CardService | None = None
+        self.video_service: VideoService | None = None
         self._model_lock = asyncio.Lock()
         self._model_sig = model_signature(config)
         self._scheduler: TaskScheduler | None = None
@@ -914,6 +933,9 @@ class Bot(PersonaRuntime):
         if self._closed:
             return
         self._closed = True
+        video_service = getattr(self, 'video_service', None)
+        if video_service is not None:
+            await video_service.close()
         service = getattr(self, 'card_service', None)
         if service is not None:
             await service.close()
@@ -936,7 +958,7 @@ class Bot(PersonaRuntime):
             await self._approval_worker.stop()
         await self.onebot.close()
         if self.dsh is not None:
-            self.dsh.close()
+            await asyncio.to_thread(self.dsh.close)
         if self.conversations is not None:
             self.conversations.close()
         await self.client.close()
@@ -2707,20 +2729,36 @@ class Bot(PersonaRuntime):
         started = time.time()
         service = getattr(self, 'card_service', None)
         lease = None
+        video_lease = None
+        video_service = getattr(self, 'video_service', None)
+        video_settings = getattr(self.config, 'video', VideoSettings(enabled=False))
         try:
+            turn_env = {}
+            if event.message_id > 0 and isinstance(dsh, DSHClient) and video_settings.enabled:
+                if video_service is None:
+                    video_service = self.video_service = VideoService(video_settings)
+                await video_service.start()
+                video_lease = video_service.open(event, conversation_id, session_id,
+                                                 lifetime=dsh.config.request_timeout + 10)
+                turn_env.update(video_service.env(video_lease))
             if self.is_admin(event.user_id) and event.message_id > 0 and isinstance(dsh, DSHClient):
                 if service is None:
                     service = self.card_service = CardService(self)
                 await service.start()
                 lease = service.open(event, conversation_id, session_id, text,
                                      self.personas.effective(conversation_id).token)
+                turn_env.update(service.env(lease))
+            if turn_env:
                 worker = asyncio.create_task(asyncio.to_thread(
-                    dsh.run_authorized, session_id, prompt, images, service.env(lease)
+                    dsh.run_authorized, session_id, prompt, images, turn_env
                 ))
                 try:
                     reply, events = await asyncio.shield(worker)
                 except asyncio.CancelledError:
-                    service.revoke(lease)
+                    if lease is not None and service is not None:
+                        service.revoke(lease)
+                    if video_lease is not None and video_service is not None:
+                        video_service.revoke(video_lease)
                     # Keep this session's guard until the child actually closes.
                     try:
                         await asyncio.shield(worker)
@@ -2731,7 +2769,7 @@ class Bot(PersonaRuntime):
                 reply, events = await asyncio.to_thread(
                     self._dsh_turn, dsh, session_id, prompt, images
                 )
-        except DSHError as exc:
+        except (DSHError, ValueError, OSError) as exc:
             log.error("DSH failed after %.1fs: %s", time.time() - started, exc)
             if self.config.bot.notify_errors:
                 await self._send(event, self.config.bot.error_message)
@@ -2739,6 +2777,8 @@ class Bot(PersonaRuntime):
         finally:
             if lease is not None and service is not None:
                 service.revoke(lease)
+            if video_lease is not None and video_service is not None:
+                video_service.revoke(video_lease)
         self._record_dsh_usage(conversation_id, session_id, "chat", events)
         elapsed = time.time() - started
         self._touch_session(conversation_id)
