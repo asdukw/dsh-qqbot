@@ -152,7 +152,7 @@ class DshPlaceholderTests(unittest.TestCase):
             async def ensure_card():
                 return True
 
-            def turn_prompt(event, text):
+            def turn_prompt(event, text, **kwargs):
                 return "用户: 这是啥", 0
 
             async def recall(event, text):

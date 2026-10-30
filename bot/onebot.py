@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 from collections import deque
@@ -97,6 +98,18 @@ EMPTY_MENTION = "[空艾特]"
 EMPTY_REPLY = "[空引用]"
 
 
+def _message_id(value: Any) -> int | None:
+    """Real message IDs can be signed; bools/zero/noncanonical IDs are not IDs."""
+    if type(value) is int:
+        return value if value else None
+    if isinstance(value, str) and re.fullmatch(r"-?[1-9][0-9]*", value):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 class MessageParser:
     """Turn OneBot message events into MessageEvent, with id dedup."""
 
@@ -109,7 +122,7 @@ class MessageParser:
         if event.get("post_type") != "message":
             return None
         try:
-            message_id = int(event.get("message_id") or 0)
+            message_id = _message_id(event.get("message_id")) or 0
             if message_id and message_id in self._seen_set:
                 return None
             if message_id:
@@ -262,8 +275,8 @@ class MessageParser:
             if reply:
                 for item in reply.group(1).split(","):
                     key, _, value = item.partition("=")
-                    if key.strip() == "id" and value.strip().isdigit():
-                        reply_to = int(value.strip())
+                    if key.strip() == "id":
+                        reply_to = _message_id(value.strip())
             marker = f"[CQ:at,qq={self.self_id}]"
             at_me = marker in message
             text = message.replace(marker, "")
@@ -304,9 +317,7 @@ class MessageParser:
                         stickers.append(url)
                 parts.append("[表情包]" if sticker else "[图片]")
             elif kind == "reply":
-                value = str(data.get("id") or "")
-                if value.isdigit():
-                    reply_to = int(value)
+                reply_to = _message_id(data.get("id"))
             elif kind == "poke":
                 parts.append("[戳一戳]")
             elif kind == "face":
@@ -509,6 +520,35 @@ class OneBotWSClient:
             "group_id": group_id,
             "message": [{"type": "text", "data": {"text": text}}],
         })
+
+    async def send_interaction(
+        self, scope: str, chat_id: int, text: str, *, reply_to: int | None = None,
+        user_ids: tuple[int, ...] = (), timeout: float = 10,
+    ) -> dict:
+        """Send a fixed-destination structured reply/mention, never parsing raw CQ."""
+        if scope not in ("group", "private") or type(chat_id) is not int or chat_id <= 0:
+            raise ValueError("interaction requires a real group/private destination")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("interaction requires nonempty text")
+        if reply_to is not None and (type(reply_to) is not int or reply_to == 0):
+            raise ValueError("interaction reply requires a nonzero integer message ID")
+        if (not isinstance(user_ids, tuple) or len(user_ids) > 3
+                or any(type(user) is not int or user <= 0 for user in user_ids)
+                or len(set(user_ids)) != len(user_ids)):
+            raise ValueError("interaction mentions require at most three distinct positive QQ IDs")
+        if user_ids and scope != "group":
+            raise ValueError("mentions are only supported in groups")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("interaction timeout must be positive and finite")
+        segments = []
+        if reply_to is not None:
+            segments.append({"type": "reply", "data": {"id": str(reply_to)}})
+        segments.extend({"type": "at", "data": {"qq": str(user)}} for user in user_ids)
+        segments.append({"type": "text", "data": {"text": text}})
+        return await self.call(f"send_{scope}_msg", {
+            f"{scope if scope == 'group' else 'user'}_id": chat_id,
+            "message": segments,
+        }, timeout=timeout)
 
     async def send_private_image(self, user_id: int, file: str, timeout: float = 60.0) -> dict:
         """Send an image; `file` is a base64:// URI, http(s) URL or host path."""

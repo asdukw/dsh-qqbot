@@ -5,6 +5,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 # onebot imports websockets at module level; the parser does not need it.
 _ws = types.ModuleType("websockets")
@@ -12,7 +13,7 @@ _ws.exceptions = types.SimpleNamespace(WebSocketException=Exception)
 sys.modules.setdefault("websockets", _ws)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from onebot import MessageParser  # noqa: E402
+from onebot import MessageParser, OneBotConfig, OneBotWSClient  # noqa: E402
 
 
 def event(message, **extra):
@@ -200,6 +201,104 @@ class MessageParserTests(unittest.TestCase):
         assert parsed is not None
         self.assertEqual(parsed.stickers, ())
         self.assertEqual(parsed.text, "[图片]")
+
+
+class SignedMessageParserTests(unittest.TestCase):
+    def test_signed_quote_ids_in_array_and_cq(self):
+        for message in (
+            [{"type": "reply", "data": {"id": "-556"}}, {"type": "text", "data": {"text": "hi"}}],
+            "[CQ:reply,id=-556]hi",
+            [{"type": "reply", "data": {"id": -556}}, {"type": "text", "data": {"text": "hi"}}],
+        ):
+            with self.subTest(message=message):
+                parsed = MessageParser(999).parse(event(message, message_id=-1000))
+                self.assertIsNotNone(parsed)
+                self.assertEqual(parsed.message_id, -1000)
+                self.assertEqual(parsed.reply_to, -556)
+                self.assertEqual(parsed.text, "hi")
+
+    def test_invalid_quote_ids_are_not_authority(self):
+        for value in (True, False, 0, 1.5, "0", "-0", "001", "+1", "1.0", "١٢", "all"):
+            with self.subTest(value=value):
+                parsed = MessageParser(999).parse(event([
+                    {"type": "reply", "data": {"id": value}},
+                    {"type": "text", "data": {"text": "hi"}},
+                ]))
+                self.assertIsNotNone(parsed)
+                self.assertIsNone(parsed.reply_to)
+
+    def test_signed_ids_are_deduplicated_and_invalid_ids_are_not_real(self):
+        parser = MessageParser(999)
+        self.assertEqual(parser.parse(event("hi", message_id="-1000")).message_id, -1000)
+        self.assertIsNone(parser.parse(event("hi", message_id=-1000)))
+        for value in (True, False, 1.5, "+2", "002", "0", "-0"):
+            with self.subTest(value=value):
+                self.assertEqual(parser.parse(event("hi", message_id=value)).message_id, 0)
+
+    def test_bare_negative_quote_is_not_discarded(self):
+        for message in ("[CQ:reply,id=-77]", [{"type": "reply", "data": {"id": "-77"}}]):
+            parsed = MessageParser(999).parse(event(message))
+            self.assertEqual(parsed.reply_to, -77)
+            self.assertEqual(parsed.text, "[空引用]")
+
+
+class SendInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.client = OneBotWSClient(OneBotConfig(), AsyncMock())
+        self.client.call = AsyncMock(return_value={"message_id": -901})
+
+    async def test_quote_and_two_mentions_use_ordered_segments_and_literal_cq_text(self):
+        text = "raw [CQ:at,qq=all][CQ:reply,id=123]"
+        result = await self.client.send_interaction("group", 42, text, reply_to=-202,
+                                                    user_ids=(8, 9), timeout=3.5)
+        self.assertEqual(result, {"message_id": -901})
+        self.client.call.assert_awaited_once_with("send_group_msg", {
+            "group_id": 42, "message": [
+                {"type": "reply", "data": {"id": "-202"}},
+                {"type": "at", "data": {"qq": "8"}},
+                {"type": "at", "data": {"qq": "9"}},
+                {"type": "text", "data": {"text": text}},
+            ],
+        }, timeout=3.5)
+
+    async def test_private_quote_and_group_mention_without_quote(self):
+        await self.client.send_interaction("private", 7, "hi", reply_to=101)
+        self.client.call.assert_awaited_with("send_private_msg", {
+            "user_id": 7, "message": [
+                {"type": "reply", "data": {"id": "101"}},
+                {"type": "text", "data": {"text": "hi"}},
+            ],
+        }, timeout=10)
+        await self.client.send_interaction("group", 42, "hello", user_ids=(8,))
+        self.client.call.assert_awaited_with("send_group_msg", {
+            "group_id": 42, "message": [
+                {"type": "at", "data": {"qq": "8"}},
+                {"type": "text", "data": {"text": "hello"}},
+            ],
+        }, timeout=10)
+
+    async def test_rejects_invalid_scope_ids_mentions_text_and_timeouts(self):
+        for scope, chat, text, kwargs in (
+            ("channel", 42, "hi", {}), ("group", True, "hi", {}),
+            ("group", 0, "hi", {}), ("group", "42", "hi", {}),
+            ("group", 42, "hi", {"reply_to": True}),
+            ("group", 42, "hi", {"reply_to": 0}),
+            ("group", 42, "hi", {"reply_to": "-202"}),
+            ("group", 42, "hi", {"user_ids": (True,)}),
+            ("group", 42, "hi", {"user_ids": (0,)}),
+            ("group", 42, "hi", {"user_ids": ("all",)}),
+            ("group", 42, "hi", {"user_ids": (7, 8, 9, 10)}),
+            ("group", 42, "hi", {"user_ids": (8, 8)}),
+            ("group", 42, "hi", {"user_ids": [8]}),
+            ("private", 7, "hi", {"user_ids": (8,)}),
+            ("group", 42, " ", {}), ("group", 42, None, {}),
+            ("group", 42, "hi", {"timeout": True}),
+            ("group", 42, "hi", {"timeout": 0}),
+            ("group", 42, "hi", {"timeout": float("inf")}),
+        ):
+            with self.subTest(scope=scope, chat=chat, kwargs=kwargs), self.assertRaises(ValueError):
+                await self.client.send_interaction(scope, chat, text, **kwargs)
+        self.client.call.assert_not_awaited()
 
 
 if __name__ == "__main__":

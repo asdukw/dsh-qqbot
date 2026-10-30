@@ -77,5 +77,33 @@ class GroupContextTests(unittest.TestCase):
         self.assertIn("[有人 @ 你]", out)
 
 
+
+
+class TargetSnapshotTests(unittest.TestCase):
+    def test_signed_message_identity_and_quote_are_rendered(self):
+        line = GroupLine('同名', 'hello', user_id=12, message_id=-123, reply_to=456)
+        text = format_group_turn([line], '同名', 'trigger', 1000, user_id=13, message_id=789)
+        self.assertIn('[消息ID:-123 引用:456] 同名(12)', text)
+        self.assertIn('[消息ID:789] 同名(13)', text)
+
+    def test_capture_consumption_retains_later_identical_messages(self):
+        buffer = GroupContextBuffer(10)
+        buffer.add(1, 'a', 'same', user_id=1, message_id=4)
+        captured = tuple(buffer.peek(1))
+        buffer.add(1, 'a', 'same', user_id=1, message_id=4)
+        buffer.consume(1, captured)
+        self.assertEqual(len(buffer.peek(1)), 1)
+        self.assertIsNot(buffer.peek(1)[0], captured[0])
+
+    def test_targets_and_images_are_only_visible_budgeted_lines(self):
+        from group_context import TurnSnapshot, visible_lines
+        lines = (GroupLine('old', 'x' * 100, ('old.png',), 1, 101),
+                 GroupLine('new', 'short', ('new.png',), 2, 102),
+                 GroupLine('poke', 'synthetic', (), 3))
+        snapshot = TurnSnapshot(lines, visible_lines(lines, 80))
+        self.assertEqual([line.message_id for line in snapshot.targets], [102])
+        self.assertEqual(snapshot.images(3), ['new.png'])
+
+
 if __name__ == "__main__":
     unittest.main()

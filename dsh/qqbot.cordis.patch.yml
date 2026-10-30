@@ -110,6 +110,9 @@
       name: '@deepseek-ai/dsh-web-fetch-http'
     - id: video-tools
       name: '/opt/qqbot/dsh/plugins/video-tools.mjs'
+    # Autonomous interactions use their own current-snapshot lease, not card/video authority.
+    - id: interaction-tools
+      name: '/opt/qqbot/dsh/plugins/interaction-tools.mjs'
     - id: card-tools
       name: '/opt/qqbot/dsh/plugins/card-tools.mjs'
     - id: tool-web

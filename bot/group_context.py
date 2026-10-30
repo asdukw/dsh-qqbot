@@ -1,4 +1,4 @@
-"""Recent group chatter, so an @-mention arrives with the conversation around it."""
+"""Recent group chatter and immutable, budgeted per-turn message targets."""
 
 from __future__ import annotations
 
@@ -10,113 +10,115 @@ from dataclasses import dataclass
 class GroupLine:
     sender: str
     text: str
-    # Image URLs from that message, so an @ or a proactive turn can still see
-    # the picture after the message itself has scrolled into the context.
     images: tuple[str, ...] = ()
-    # Stable identity for the model; display names change with group cards.
     user_id: int = 0
+    message_id: int = 0
+    reply_to: int | None = None
+
+
+def render_line(line: GroupLine) -> str:
+    who = f"{line.sender or '某人'}({line.user_id})" if line.user_id else line.sender or '某人'
+    identity = f"[消息ID:{line.message_id}" if line.message_id else ''
+    if identity and line.reply_to:
+        identity += f" 引用:{line.reply_to}"
+    return (identity + '] ' if identity else '') + f"{who}: {line.text}"
+
+
+def visible_lines(lines: list[GroupLine] | tuple[GroupLine, ...], max_chars: int) -> tuple[GroupLine, ...]:
+    kept: list[GroupLine] = []
+    used = 0
+    for line in reversed(lines):
+        size = len(render_line(line))
+        if used + size > max_chars:
+            break
+        kept.append(line)
+        used += size + 1
+    return tuple(reversed(kept))
+
+
+def line_images(lines: list[GroupLine] | tuple[GroupLine, ...], limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    newest: list[str] = []
+    for line in reversed(lines):
+        for url in reversed(line.images):
+            if url not in newest:
+                newest.append(url)
+                if len(newest) >= limit:
+                    return list(reversed(newest))
+    return list(reversed(newest))
+
+
+@dataclass(frozen=True)
+class TurnSnapshot:
+    captured: tuple[GroupLine, ...]
+    lines: tuple[GroupLine, ...]
+    current: GroupLine | None = None
+
+    @property
+    def targets(self) -> tuple[GroupLine, ...]:
+        lines = (*self.lines, *((self.current,) if self.current else ()))
+        return tuple(line for line in lines if line.message_id and line.user_id > 0)
+
+    def images(self, limit: int) -> list[str]:
+        own = self.current.images if self.current else ()
+        return list(dict.fromkeys((*own, *line_images(self.lines, limit))))
 
 
 class GroupContextBuffer:
-    """Per-group ring buffer of messages the bot was not addressed in.
-
-    Lines stay in memory only and are drained when the bot is @-mentioned in
-    that group, so each line reaches the model at most once and never leaves
-    its own group.
-    """
+    """Per-group ring buffer; snapshot consumption never removes newer arrivals."""
 
     def __init__(self, max_messages: int, max_line_chars: int = 200):
         self.max_messages = max(0, max_messages)
         self.max_line_chars = max_line_chars
         self._buffers: dict[int, deque[GroupLine]] = {}
 
-    def add(
-        self,
-        group_id: int,
-        sender: str,
-        text: str,
-        images: tuple[str, ...] = (),
-        user_id: int = 0,
-    ) -> None:
+    def add(self, group_id: int, sender: str, text: str, images: tuple[str, ...] = (),
+            user_id: int = 0, message_id: int = 0, reply_to: int | None = None) -> None:
         if self.max_messages == 0 or not text.strip():
             return
         buffer = self._buffers.get(group_id)
         if buffer is None:
             buffer = self._buffers[group_id] = deque(maxlen=self.max_messages)
-        buffer.append(
-            GroupLine(
-                sender or "某人",
-                text.strip()[: self.max_line_chars],
-                tuple(images),
-                int(user_id or 0),
-            )
-        )
+        buffer.append(GroupLine(sender or '某人', text.strip()[:self.max_line_chars],
+                                tuple(images), int(user_id or 0), int(message_id or 0), reply_to))
 
     def drain(self, group_id: int) -> list[GroupLine]:
         buffer = self._buffers.pop(group_id, None)
         return list(buffer) if buffer else []
 
     def peek(self, group_id: int, limit: int | None = None) -> list[GroupLine]:
-        buffer = self._buffers.get(group_id)
-        if not buffer:
-            return []
-        lines = list(buffer)
+        lines = list(self._buffers.get(group_id, ()))
         return lines[-limit:] if limit else lines
 
+    def consume(self, group_id: int, captured: tuple[GroupLine, ...]) -> None:
+        buffer = self._buffers.get(group_id)
+        if buffer is None:
+            return
+        identities = {id(line) for line in captured}
+        remaining = [line for line in buffer if id(line) not in identities]
+        if remaining:
+            self._buffers[group_id] = deque(remaining, maxlen=self.max_messages)
+        else:
+            self._buffers.pop(group_id, None)
+
     def images(self, group_id: int, limit: int) -> list[str]:
-        """The newest buffered image URLs, oldest first, deduplicated."""
-        if limit <= 0:
-            return []
-        newest: list[str] = []
-        for line in reversed(self._buffers.get(group_id, ())):
-            for url in reversed(line.images):
-                if url in newest:
-                    continue
-                newest.append(url)
-                if len(newest) >= limit:
-                    return list(reversed(newest))
-        return list(reversed(newest))
+        return line_images(self.peek(group_id), limit)
 
 
-def _speaker(name: str, user_id: int) -> str:
-    """Name plus QQ number, so the model can tell同名 people apart."""
-    name = name or "某人"
-    return f"{name}({user_id})" if user_id else name
-
-
-def format_group_turn(
-    lines: list[GroupLine],
-    sender: str,
-    text: str,
-    max_chars: int,
-    user_id: int = 0,
-) -> str:
-    """Render recent group lines plus the @-message as one user turn."""
-    trigger = f"{_speaker(sender, user_id)}: {text}"
-    kept: list[str] = []
-    used = 0
-    for line in reversed(lines):  # keep the newest lines within the budget
-        rendered = f"{_speaker(line.sender, line.user_id)}: {line.text}"
-        if used + len(rendered) > max_chars:
-            break
-        kept.append(rendered)
-        used += len(rendered) + 1
+def format_group_turn(lines: list[GroupLine] | tuple[GroupLine, ...], sender: str, text: str,
+                      max_chars: int, user_id: int = 0, message_id: int = 0,
+                      reply_to: int | None = None) -> str:
+    trigger = render_line(GroupLine(sender, text, user_id=user_id,
+                                    message_id=message_id, reply_to=reply_to))
+    kept = visible_lines(lines, max_chars)
     if not kept:
         return trigger
-    kept.reverse()
-    return "[群聊里最近的消息]\n" + "\n".join(kept) + "\n\n[有人 @ 你]\n" + trigger
+    return '[群聊里最近的消息]\n' + '\n'.join(map(render_line, kept)) + '\n\n[有人 @ 你]\n' + trigger
 
 
-def format_proactive_turn(lines: list[GroupLine], instruction: str, max_chars: int) -> str:
-    """Render recent group lines for a turn the bot joins on its own."""
-    kept: list[str] = []
-    used = 0
-    for line in reversed(lines):
-        rendered = f"{_speaker(line.sender, line.user_id)}: {line.text}"
-        if used + len(rendered) > max_chars:
-            break
-        kept.append(rendered)
-        used += len(rendered) + 1
-    kept.reverse()
-    body = "\n".join(kept) if kept else "（群里暂时没有更多消息）"
-    return "[群聊里最近的消息]\n" + body + "\n\n" + instruction.strip()
+def format_proactive_turn(lines: list[GroupLine] | tuple[GroupLine, ...], instruction: str,
+                          max_chars: int) -> str:
+    kept = visible_lines(lines, max_chars)
+    body = '\n'.join(map(render_line, kept)) if kept else '（群里暂时没有更多消息）'
+    return '[群聊里最近的消息]\n' + body + '\n\n' + instruction.strip()
