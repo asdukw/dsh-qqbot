@@ -7,7 +7,9 @@ and passes the user's text through.
 
 from __future__ import annotations
 
+import json
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +56,71 @@ def _turn_error(events: Any) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class DSHTurn:
+    reply: str
+    events: list[Any]
+    finish_reason: str | None = None
+    error: str = ""
+    interaction_unknown: bool = False
+
+
+def _interaction_unknown(events: list[Any]) -> bool:
+    """Use SDK-owned tool events, never model text, for transport arbitration."""
+    calls = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        data = event.get('data') or {}
+        if not isinstance(data, dict):
+            continue
+        if event.get('type') == 'tool/call' and data.get('name') in (
+            'reply_to_others', 'mention_others', 'react_to_others'
+        ):
+            calls.add(data.get('callId'))
+        elif event.get('type') == 'tool/result':
+            message = data.get('message') or {}
+            if not isinstance(message, dict) or message.get('toolCallId') not in calls:
+                continue
+            content = message.get('content', [])
+            if not isinstance(content, list):
+                continue
+            text = ''.join(block.get('text', '') for block in content
+                           if isinstance(block, dict) and block.get('type') == 'text'
+                           and isinstance(block.get('text'), str))
+            try:
+                result = json.loads(text) if len(text) <= 16384 else None
+            except (ValueError, RecursionError):
+                result = None
+            if message.get('isError') or (isinstance(result, dict) and result.get('status') == 'unknown'):
+                return True
+    return False
+
+
+def _raw_turn(result: Any) -> DSHTurn:
+    events = list(getattr(result, "events", None) or [])
+    reply = (getattr(result, "final_response", "") or "").strip()
+    # The SDK returns the last assistant message, even if it only announced
+    # a tool call. Such text is not a terminal answer.
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "assistant/message":
+            continue
+        data = event.get("data") or {}
+        message = data.get("message", data)
+        content = message.get("content", [])
+        if message.get("toolCalls") or any(
+            isinstance(block, dict) and block.get("type") in
+            ("tool_use", "tool_call", "tool-call", "toolCall") for block in content
+        ):
+            reply = ""
+        break
+    finish = getattr(result, "finish_reason", None)
+    error = _turn_error(events)
+    if finish in ("error", "cancelled", "canceled", "aborted", "interrupted") and not error:
+        error = f"DSH turn ended: {finish}"
+    return DSHTurn(reply, events, finish, error, _interaction_unknown(events))
+
+
 class DSHClient:
     def __init__(self, config: DSHConfig, system_prompt: str = ""):
         self.config = config
@@ -92,7 +159,8 @@ class DSHClient:
 
         env = {"DSH_SYSTEM_PROMPT": self._system_prompt,
                "QQBOT_CARD_BRIDGE": "", "QQBOT_CARD_SECRET": "", "QQBOT_CARD_LEASE": "",
-               "QQBOT_VIDEO_BRIDGE": "", "QQBOT_VIDEO_SECRET": "", "QQBOT_VIDEO_LEASE": ""}
+               "QQBOT_VIDEO_BRIDGE": "", "QQBOT_VIDEO_SECRET": "", "QQBOT_VIDEO_LEASE": "",
+               "QQBOT_INTERACTION_BRIDGE": "", "QQBOT_INTERACTION_SECRET": "", "QQBOT_INTERACTION_LEASE": ""}
         if turn_env:
             env.update(turn_env)
         log.info(
@@ -195,6 +263,26 @@ class DSHClient:
                 harness = self._ensure_locked(turn_env)
                 result = self._run_locked(harness, session_id, text, images)
                 return self._reply_from_result(result), list(getattr(result, "events", None) or [])
+            except Exception as exc:
+                raise DSHError(f"DSH authorized turn failed: {type(exc).__name__}") from exc
+            finally:
+                self._reset_locked()
+
+    def run_authorized_result(
+        self, session_id: str, text: str, images: Any,
+        turn_env: dict[str, str] | Callable[[], dict[str, str]],
+    ) -> DSHTurn:
+        """Return the terminal result, including empty text, for action arbitration.
+
+        This is not permission to accept an empty answer: the async caller must
+        have a confirmed action in its server-side interaction ledger.
+        """
+        with self._lock:
+            self._reset_locked()
+            try:
+                env = turn_env() if callable(turn_env) else turn_env
+                harness = self._ensure_locked(env)
+                return _raw_turn(self._run_locked(harness, session_id, text, images))
             except Exception as exc:
                 raise DSHError(f"DSH authorized turn failed: {type(exc).__name__}") from exc
             finally:

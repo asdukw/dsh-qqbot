@@ -76,6 +76,9 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         self.bot.onebot = SimpleNamespace(send_group=group, send_private=private)
 
     async def asyncTearDown(self) -> None:
+        interaction = getattr(self.bot, 'interaction_service', None)
+        if interaction is not None:
+            await interaction.close()
         video = getattr(self.bot, 'video_service', None)
         if video is not None:
             await video.close()
@@ -489,7 +492,7 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dsh_send_failure_discards_tool_deferred_and_revokes_lease(self) -> None:
         from card_service import CardService
-        from dsh_client import DSHClient, DSHConfig
+        from dsh_client import DSHClient, DSHConfig, DSHTurn
         self.bot.card_service = service = CardService(self.bot)
         self.bot.dsh = DSHClient(DSHConfig())
         self.bot.ensure_card = AsyncMock(return_value=True)
@@ -505,9 +508,9 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         def run(session, text, images, env):
             lease = service.authorize(env['QQBOT_CARD_LEASE'], session)
             service.library(lease, {'action': 'use', 'query': str(self.b.id)})
-            return '已受理，回复后切换', []
+            return DSHTurn('已受理，回复后切换', [], 'completed')
 
-        self.bot.dsh.run_authorized = Mock(side_effect=run)
+        self.bot.dsh.run_authorized_result = Mock(side_effect=run)
         try:
             deferred = await self.bot._reply_dsh('private:1', self.private_event(1), '切换角色')
             self.assertIsNone(deferred)
@@ -522,7 +525,7 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         import threading
 
         from card_service import CardService
-        from dsh_client import DSHClient, DSHConfig
+        from dsh_client import DSHClient, DSHConfig, DSHTurn
         self.bot.card_service = service = CardService(self.bot)
         self.bot.dsh = DSHClient(DSHConfig())
         self.bot.ensure_card = AsyncMock(return_value=True)
@@ -540,9 +543,9 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
             finish.wait(5)
             with self.assertRaises(ValueError):
                 service.authorize(env['QQBOT_CARD_LEASE'], session)
-            return 'late reply', []
+            return DSHTurn('late reply', [])
 
-        self.bot.dsh.run_authorized = Mock(side_effect=run)
+        self.bot.dsh.run_authorized_result = Mock(side_effect=run)
         task = asyncio.create_task(self.bot._reply_dsh('private:1', self.private_event(1), '切换角色'))
         try:
             await asyncio.to_thread(entered.wait, 3)
@@ -560,7 +563,7 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
             await service.close()
 
     async def test_video_tools_ordinary_admin_and_synthetic_turn_authority(self) -> None:
-        from dsh_client import DSHClient, DSHConfig
+        from dsh_client import DSHClient, DSHConfig, DSHTurn
         self.bot.dsh = DSHClient(DSHConfig())
         self.bot.ensure_card = AsyncMock(return_value=True)
         self.bot._session_for = Mock(return_value=('video-session', False))
@@ -576,9 +579,9 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         def authorized(session, text, images, env):
             captured.append(env)
             self.bot.video_service.authorize(env['QQBOT_VIDEO_LEASE'], session)
-            return 'metadata only', []
+            return DSHTurn('metadata only', [])
 
-        self.bot.dsh.run_authorized = Mock(side_effect=authorized)
+        self.bot.dsh.run_authorized_result = Mock(side_effect=authorized)
         self.bot.dsh.run_with_events = Mock(return_value=('ordinary', []))
         try:
             await self.bot._reply_dsh('private:2', self.private_event(2), '解析视频')
@@ -611,6 +614,61 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OneBotError):
             await self.bot._send_video_receipt('group:42', 'file:///app/qqbot-video/c.mp4', 8)
         self.bot._remember_own_message.assert_called_once()
+
+    async def test_interaction_text_receipts_can_ack_deferred_switch_but_reaction_cannot(self):
+        from card_service import CardService
+        from dsh_client import DSHClient, DSHConfig, DSHTurn
+        self.bot.card_service = service = CardService(self.bot)
+        self.bot.config.video.enabled = False
+        self.bot.dsh = DSHClient(DSHConfig())
+        self.bot.ensure_card = AsyncMock(return_value=True)
+        self.bot._session_for = Mock(return_value=('social-switch', False))
+        self.bot._turn_prompt = Mock(return_value=('switch', 0))
+        self.bot._prepare_persona = Mock()
+        self.bot._recall_block = AsyncMock(return_value='')
+        self.bot._record_dsh_usage = Mock()
+        self.bot._touch_session = Mock()
+        self.bot._send_reply = AsyncMock(return_value=[])
+        self.bot._send = AsyncMock()
+        self.bot.onebot.send_interaction = AsyncMock(return_value={'message_id': -99})
+        self.bot.onebot.set_msg_emoji_like = AsyncMock(return_value={})
+        loop = asyncio.get_running_loop()
+        operation = 'reply'
+        final = ''
+        termination = 'completed'
+
+        def run(session, prompt, images, env):
+            card = service.authorize(env['QQBOT_CARD_LEASE'], session)
+            service.library(card, {'action': 'use', 'query': str(self.b.id)})
+            interactions = self.bot.interaction_service
+            args = {'message_id': '1', 'text': 'switch acknowledged'} if operation == 'reply' else {
+                'message_id': '1', 'emoji_id': '76'}
+            asyncio.run_coroutine_threadsafe(interactions.call(
+                env['QQBOT_INTERACTION_LEASE'], session, args, operation), loop).result(5)
+            return DSHTurn(final, [], termination)
+
+        self.bot.dsh.run_authorized_result = Mock(side_effect=run)
+        try:
+            event = self.private_event(1)
+            deferred = await self.bot._reply_dsh('private:1', event, '切换角色')
+            self.assertIsNotNone(deferred)
+            self.assertEqual(self.store.queued(), [])
+            self.bot._send_reply.assert_not_awaited()
+            termination = 'max-tokens'
+            deferred = await self.bot._reply_dsh('private:1', event, '切换角色')
+            self.assertIsNone(deferred)
+            termination = 'completed'
+            operation = 'react'
+            deferred = await self.bot._reply_dsh('private:1', event, '切换角色')
+            self.assertIsNone(deferred)
+            self.bot._send_reply.assert_not_awaited()
+            final = '[好感+1]'
+            deferred = await self.bot._reply_dsh('private:1', event, '切换角色')
+            self.assertIsNone(deferred)
+            self.assertTrue(self.bot._send_reply.await_args.kwargs['allow_silent'])
+            self.assertTrue(self.bot._send_reply.await_args.kwargs['strict_receipts'])
+        finally:
+            await service.close()
 
     async def test_fallback_card_request_reports_unavailable_instead_of_model_success(self) -> None:
         self.bot._send = AsyncMock()

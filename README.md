@@ -327,6 +327,24 @@ $M --remove-card-alias 肥鱼
 
 `/proactive status` 可以查看当前概率、冷却、配额和本群用量；`/proactive on|off` 临时开关。
 
+### 自主引用、@ 与消息表情回应
+
+DSH 安装 `interaction-tools.mjs` 后，agent 会根据聊天语境自行决定如何与大家互动，不要求管理员身份或用户每次下命令；也可不用工具，照常回复文字。群聊仍先经过原有 @、叫名、引用或主动参与策略，不会因此对每条消息新增模型调用。
+
+| 工具 | 参数 | 作用 |
+|---|---|---|
+| `reply_to_others` | `message_id, text, user_ids?` | 引用本轮可见消息回复，群聊可同时 @ 多位可见参与者。 |
+| `mention_others` | `user_ids, text` | 在当前群发送真实 @ 消息段及正文。 |
+| `react_to_others` | `message_id, emoji_id` | 给可见消息添加 QQ reaction，不另发一条文字。 |
+
+- 正常及策略选中的主动群聊支持三种工具；私聊仅引用/reaction 本轮对话消息，不可 @。定时、日报、戳一戳等合成轮次不授予互动权限；关闭 DSH 时保持原有文字回退。
+- 目标只来自本轮实际展示的可信消息快照，包含消息 ID、QQ 号及显示名；同名用户靠 QQ 号区分。正文自称的 ID、历史搜索结果和未展示的被引用消息都不增加权限，不支持跨群、另发私信、任意历史消息或 `@all`。
+- 工具 ID 使用规范十进制字符串，不用可能丢精度的 JavaScript 数值。消息 ID 可为非零负数（引用支持）；当前 reaction helper 仅支持正消息 ID，负数会明确拒绝。QQ reaction ID 可用已有例子 `76`（赞）、`124`（OK），其他支持情况及实际显示取决于 QQ/NapCat 版本，API 确认不保证所有客户端都展示。
+- 每轮最多 6 个不同动作，其中最多 3 条文字，每条最多 @ 3 人；单条文字不超过配置的正数 `max_reply_chars` 及 4000 字硬上限。超长明确失败，模型应缩短，不会暗中截断或拆包。正文仍受内容策略检查，隐藏控制标记须改用普通 final 流程。
+- 已确认发送的工具文字就是回复，不再补发或重复 final；仅 reaction 时可静默结束。`unknown` 或传输失败可能已经生效，该轮停止动作和 final，不自动重试或假报成功。
+
+离线实际 SDK 验证：`python scripts/check_interaction_tools_runtime.py`。使用固定 `0.2.1rc2` SDK、本地假模型、mock OneBot 与临时目录，覆盖实际工具 schema/执行/结果回灌、引用加多人 @、主动/私聊、仅 reaction 空 final，以及后续未授权运行时不暴露工具；不调用真实 QQ 或外部模型。真实 SDK 会把完全无内容块的模型终态记为 `EMPTY_RESPONSE` 错误，仍保留此错误；已确认 reaction 不回滚，也不追加错误聊天。合法的 thinking-only 或空白文字终态可在无可见文字时正常静默完成。
+
 ### 身份如何传给 DSH
 
 DSH SDK 的 prompt 接口只有 session id 和消息内容，没有元数据字段。所以 adapter 每轮调用前，把这个 session 的 `scope`（private/group）、QQ 号、群号、群名片写进 `profile.db` 的 `conversations` 表（`bot/conversations.py`），插件按 session id 查这张表拿身份，**不解析 session id**。查不到身份的会话，画像工具会直接报错。

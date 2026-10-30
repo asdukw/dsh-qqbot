@@ -96,6 +96,23 @@ systemd 再叠加一层：`ProtectSystem=strict`、`ReadWritePaths=/var/lib/qqbo
 10. 用户消息和助手回复同时写入本地 SQLite `messages` 表，仅作审计。
 11. DSH 回复处理结束记录 `rid=... reply processing finished: conv=... queue=... prep=... dsh=... total=...`，直连 LLM 和主动回复也有相应结束日志；这不是全部内容已送达的证明，发送失败另记 ERROR。在锁/信号量上等待超过 3 秒会额外打一条 warning，便于定位排队、图片准备或 DSH 生成造成的延迟。
 
+## 自主互动工具与可信目标快照
+
+`dsh/interaction-tools.mjs` 注册 `reply_to_others(message_id,text,user_ids?)`、`mention_others(user_ids,text)`、`react_to_others(message_id,emoji_id)`。工具由 agent 按语境自主选择，不继承角色卡管理员门槛或视频发送的逐次明确请求门槛。群聊在原有正常/主动回复策略入场后可用三者；私聊仅引用/reaction；定时、日报、戳一戳等合成轮次不获得 lease，DSH 关闭时不额外引入 tool-call loop。
+
+`GroupLine` 保留真实 `user_id/message_id/reply_to`，adapter 为每轮建立不可变、经预算裁剪的可见快照。prompt、图片和可操作集合都从该快照派生，裁掉的消息不能成为隐藏目标；引用关系本身不授权未展示的原消息，数据库审计行号不是 QQ message_id。规范十进制字符串避免 JS 精度损失；非零有符号消息 ID 可用于引用，现有 reaction helper 对负 ID 返回不支持。主动轮次在确认/可能互动后只消费已捕获的上下文，保留模型执行期间新到的消息。
+
+`InteractionService` 在随机 loopback 端口发放绑定 session、固定 conversation、可信快照、截止时间与预算的独立 lease。插件仅在 `QQBOT_INTERACTION_BRIDGE/SECRET/LEASE` 有效时注册 schema 与 agent-scoped 提示词；`node:http` 直连 `/interaction`，动作请求 JSON 为 `{lease,session,args,operation,receipt_ack:true}`，Bearer secret 验证，不走代理或重定向，请求/响应及取消超时均有界。模型不能指定收件会话；bridge 重验额外字段、目标、时限、正文内容策略/隐藏标记及预算，禁止任意收件人和 `@all`。每轮至多 6 个不同动作、3 条文字，每条至多 @ 3 人；正文受 `max_reply_chars` 与硬上限 4000 约束，超长明确失败。
+
+动作在首次外部 I/O 前认领预算并记录规范化指纹，重复/并发调用复用结果而不重复发送。OneBot 窄 helper 组装独立 `reply/at/text` 消息段，CQ 字符串不能借正文变成控制动作。文字需有效发送回执才记 `sent` 并登记 own-message/proactive 状态；reaction 经现有 `set_msg_emoji_like`（2 秒）确认才记 `reacted`，不虚构新消息。超时、取消、断连或缺失回执记 `unknown`，冻结该轮后续外部动作，不自动重试；撤销或到期不能抹掉已发生的发送事实。
+
+`DSHClient` 对普通 runtime 显式清空互动 env，授权轮次单独创建/关闭 runtime，保留 session 历史且不修改全局环境。正常轮次按各自权限合并 interaction/card/video env；主动轮次只新增 interaction 权限。取消先撤销 lease，再等待 runtime 退出，桥接关闭先于 DSH 关闭。收尾以服务端账本为准：unknown 不发 final；模型失败保留真实错误及已确认动作，不补发错误文字；已确认工具文字跳过 final 和其隐藏标记；仅 reaction 可带正常 final 或空 final 静默完成；没有动作仍按原有非空回复/错误策略处理。已发送工具文字只记忆一次，reaction 不伪装成聊天正文；deferred card switch 仍需正常结束且所有文字严格确认、无 unknown，仅 reaction 不满足门槛。
+
+
+互动执行期限在 DSH 取得实际 runtime 锁后才启动，排队时间单独有界；取消中的记忆、session 及主动配额收尾由 shield 保护到完成。插件在本地串行分发后才启动单请求 deadline，避免并发工具请求在服务端队列中提前超时。已确认结果通过内部 receipt ACK 清除待确认投递标记；若原结果丢失，服务端保留不确定门槛，SDK 的真实 `tool/result` unknown 也会抑制 final，不解析模型自述。已验证 sent/reacted 后仅 ACK 响应丢失不推翻动作结果；ACK 根本未到则服务端保守抑制 final，不重试原动作。互动 unknown 同时撤销该轮其他 bridge 权限。
+
+安装/profile 都注册 `/opt/qqbot/dsh/plugins/interaction-tools.mjs`。`scripts/check_interaction_tools_runtime.py` 在临时目录运行固定 SDK `0.2.1rc2`，本地 SSE 假模型检查实际 schema 并驱动三个工具，经真实 bridge 与 OneBot helper 到 mock API，验证多人引用/@、主动/私聊边界、仅 reaction 空终态及后续权限清空，不连接外部模型或 QQ。真实 SDK 的 no-block 终态会触发 `EMPTY_RESPONSE` 和内部模型重试，smoke 明确断言错误保留且 QQ reaction 只执行一次；thinking-only/空白文字终态另行断言正常完成且 visible final 为空，不把前者伪装成成功。QQ/NapCat 是否在客户端展示 reaction 仍需后续明确授权的真实客户端验收；已有视频链接自动 reaction 不因此改变。
+
 ## 身份传递
 
 DSH SDK 的 `session/prompt` 只接受 `sessionId` 和 `contentBlocks`，没有元数据字段，插件拿到的只有 `agent.id`（即 session id）。因此身份走旁路：adapter 在每轮调用前写 `conversations` 表，插件在渲染 system prompt 和执行工具时按 session id 查询。插件不解析 session id 的格式；查不到身份时画像工具直接报错，system prompt 里画像显示为空。

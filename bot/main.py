@@ -37,7 +37,7 @@ from daily import (
     DayStats,
     write_commentary,
 )
-from dsh_client import DSHClient, DSHConfig, DSHError
+from dsh_client import DSHClient, DSHConfig, DSHError, DSHTurn
 from feeds import (
     FeedError,
     FeedPoller,
@@ -50,8 +50,17 @@ from feeds import (
     format_entry,
     parse_feed,
 )
-from group_context import GroupContextBuffer, format_group_turn, format_proactive_turn
+from group_context import (
+    GroupContextBuffer,
+    GroupLine,
+    TurnSnapshot,
+    format_group_turn,
+    format_proactive_turn,
+    render_line,
+    visible_lines,
+)
 from images import ImageStore, StoredImage
+from interaction_service import InteractionLease, InteractionService
 from llm import LLMClient, LLMConfig, LLMError
 from log_context import get_logger, request_context
 from meme import (
@@ -919,6 +928,7 @@ class Bot(PersonaRuntime):
         self._system_prompt = ""
         self.card_service: CardService | None = None
         self.video_service: VideoService | None = None
+        self.interaction_service: InteractionService | None = None
         self._reaction_seen: dict[tuple[str, int, int], None] = {}
         self._reaction_inflight = 0
         self._model_lock = asyncio.Lock()
@@ -948,6 +958,9 @@ class Bot(PersonaRuntime):
         if self._closed:
             return
         self._closed = True
+        interaction = getattr(self, 'interaction_service', None)
+        if interaction is not None:
+            await interaction.close()
         video_service = getattr(self, 'video_service', None)
         if video_service is not None:
             await video_service.close()
@@ -1055,6 +1068,8 @@ class Bot(PersonaRuntime):
                     text,
                     images=event.images,
                     user_id=event.user_id,
+                    message_id=event.message_id,
+                    reply_to=event.reply_to,
                 )
                 if not addressed:
                     await self._maybe_reply_proactively(conversation_id, event, text)
@@ -1928,8 +1943,10 @@ class Bot(PersonaRuntime):
         *,
         proactive: bool = False,
         strict_receipts: bool = False,
-    ) -> None:
+        allow_silent: bool = False,
+    ) -> list[dict]:
         """Send visible text; deferred card switches require acknowledged text."""
+        receipts: list[dict] = []
         story = getattr(self, 'story', None)
         reply = require_safe(reply)
         reply, proposal = parse_chat_proposal(reply)
@@ -1969,7 +1986,7 @@ class Bot(PersonaRuntime):
         reply, wants_voice = extract_voice_marker(reply)
         visible, hint = extract_sticker_marker(reply)
         spoken = spoken_text(visible)
-        if not visible.strip() and meme_text is None and hint is None:
+        if not visible.strip() and meme_text is None and hint is None and not allow_silent:
             # A model can emit only hidden markers; do not leave the user with
             # silence after the relation update.
             visible = "……"
@@ -1989,7 +2006,10 @@ class Bot(PersonaRuntime):
                     chat = event.group_id if scope == 'group' else event.user_id
                     if chat is None:
                         raise OneBotError('missing reply target')
-                    await self._send_receipt(scope, chat, chunk)
+                    receipt = await self._send_receipt(scope, chat, chunk)
+                    if type(receipt.get("message_id")) is not int or not receipt["message_id"]:
+                        raise OneBotError("text delivery unknown: no valid receipt")
+                    receipts.append(receipt)
                 else:
                     await self._send(event, chunk)
                 await asyncio.sleep(0.35)
@@ -1998,9 +2018,10 @@ class Bot(PersonaRuntime):
         )
         if hint is not None and not meme_sent:
             await self._send_sticker(event, hint)
+        return receipts
 
     def _remember_own_message(self, group_id: int, message_id: int) -> None:
-        if message_id <= 0:
+        if type(message_id) is not int or message_id == 0:
             return
         ids = self._own_messages.get(group_id)
         if ids is None:
@@ -2018,37 +2039,163 @@ class Bot(PersonaRuntime):
             return f"[群聊 {event.group_id} | 当前时间 {now} | 发言者 {who}]"
         return f"[私聊 | 当前时间 {now} | 用户 {who}]"
 
-    def _turn_prompt(self, event: MessageEvent, text: str) -> tuple[str, int]:
-        """Per-chat context: fresh time/identity plus that chat's recent lines."""
-        if event.message_type == "group" and event.group_id is not None:
-            lines = self.group_context.drain(event.group_id)
-            body = format_group_turn(
-                lines,
-                event.sender_name,
-                text,
-                self.config.bot.group_context_chars,
-                user_id=event.user_id,
-            )
-            return (
-                self._context_header(event)
-                + "\n"
-                + body
-                + self._sticker_hint()
-                + self._task_hint(event)
-                + self._voice_hint()
-                + self._meme_hint(),
-                len(lines),
-            )
-        return (
-            self._context_header(event)
-            + "\n"
-            + text
-            + self._sticker_hint()
-            + self._task_hint(event)
-            + self._voice_hint()
-            + self._meme_hint(),
-            0,
-        )
+    def _turn_snapshot(self, event: MessageEvent, text: str, *, proactive: bool = False) -> TurnSnapshot:
+        current = GroupLine(event.sender_name, text, tuple(event.images), event.user_id,
+                            event.message_id, event.reply_to)
+        captured: tuple[GroupLine, ...] = ()
+        if event.message_type == 'group' and event.group_id is not None:
+            captured = tuple(self.group_context.peek(event.group_id)) if proactive else tuple(
+                self.group_context.drain(event.group_id))
+        # A proactive trigger is normally already buffered. Test hooks may
+        # have no such entry; only actually rendered lines become targets.
+        if proactive:
+            if current.message_id and not any(line.message_id == current.message_id for line in captured):
+                lines = (*captured, current)
+            else:
+                lines = captured
+            return TurnSnapshot(captured, visible_lines(lines, self.config.bot.group_context_chars))
+        lines = tuple(line for line in captured if not current.message_id or line.message_id != current.message_id)
+        return TurnSnapshot(captured, visible_lines(lines, self.config.bot.group_context_chars), current)
+
+    def _turn_prompt(self, event: MessageEvent, text: str, *, snapshot: TurnSnapshot | None = None) -> tuple[str, int]:
+        """Use exactly the snapshot also supplied to the interaction bridge."""
+        snapshot = snapshot or self._turn_snapshot(event, text)
+        if event.message_type == 'group' and event.group_id is not None:
+            body = format_group_turn(snapshot.lines, event.sender_name, text,
+                                     self.config.bot.group_context_chars, user_id=event.user_id,
+                                     message_id=event.message_id, reply_to=event.reply_to)
+        else:
+            body = render_line(snapshot.current) if snapshot.current else text
+        return (self._context_header(event) + '\n' + body + self._sticker_hint()
+                + self._task_hint(event) + self._voice_hint() + self._meme_hint(), len(snapshot.lines))
+
+    @staticmethod
+    def _visible_reply(reply: str) -> str:
+        visible, _ = parse_chat_proposal(reply)
+        visible, _ = extract_relation_markers(visible)
+        outer, schedule = extract_schedule(visible)
+        visible = (outer + '\n' + render_schedule(schedule)).strip() if schedule else outer
+        for extract in (extract_task_marker, extract_task_management, extract_meme_marker,
+                        extract_voice_marker, extract_sticker_marker):
+            visible, _ = extract(visible)
+        return visible.strip()
+
+    @staticmethod
+    def _interaction_text_complete(lease: InteractionLease) -> bool:
+        return lease.text_complete
+
+    async def _open_interactions(self, dsh: Any, event: MessageEvent, conversation: str,
+                                 session: str, snapshot: TurnSnapshot) -> InteractionLease | None:
+        if (not isinstance(dsh, DSHClient) or type(event.message_id) is not int
+                or not event.message_id or not snapshot.targets):
+            return None
+        service = getattr(self, 'interaction_service', None)
+        if service is None:
+            service = self.interaction_service = InteractionService(
+                self._send_interaction_receipt, self._react_interaction)
+        await service.start()
+        return service.open(event, conversation, session, snapshot.targets,
+                            lifetime=dsh.config.request_timeout,
+                            max_text_chars=self.config.bot.max_reply_chars if self.config.bot.max_reply_chars > 0 else 4000,
+                            deferred=True)
+
+    async def _react_interaction(self, message_id: int, emoji_id: str, *, timeout: float) -> dict:
+        return await self.onebot.set_msg_emoji_like(message_id, emoji_id, timeout=timeout)
+
+    async def _run_leased_turn(self, dsh: Any, session: str, prompt: str, images: list[str],
+                               env: dict[str, str], revocations: list[tuple[Any, Any]],
+                               *, usage: tuple[str, str] | None = None) -> DSHTurn:
+        if not env:
+            reply, events = await asyncio.to_thread(self._dsh_turn, dsh, session, prompt, images)
+            return DSHTurn(reply, events)
+        runner = dsh.run_authorized_result if env.get('QQBOT_INTERACTION_LEASE') else dsh.run_authorized
+        turn_env: Any = env
+        if getattr(runner, '__func__', None) is DSHClient.run_authorized_result:
+            loop = asyncio.get_running_loop()
+
+            async def activate() -> dict[str, str]:
+                for service, lease in revocations:
+                    if isinstance(service, InteractionService):
+                        service.activate(lease)
+                return env
+
+            def ready_env() -> dict[str, str]:
+                return asyncio.run_coroutine_threadsafe(activate(), loop).result(5)
+
+            turn_env = ready_env
+        else:
+            for service, lease in revocations:
+                if isinstance(service, InteractionService):
+                    service.activate(lease)
+        worker = asyncio.create_task(asyncio.to_thread(runner, session, prompt, images, turn_env))
+        try:
+            result = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            for service, lease in revocations:
+                service.revoke(lease)
+            # Retain the session guard even when cancellation is repeated.
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except DSHError:
+                    break
+            if worker.done() and not worker.cancelled() and worker.exception() is None and usage:
+                result = worker.result()
+                turn = result if isinstance(result, DSHTurn) else DSHTurn(*result)
+                self._record_dsh_usage(usage[0], session, usage[1], turn.events)
+            raise
+        turn = result if isinstance(result, DSHTurn) else DSHTurn(*result)
+        if turn.interaction_unknown:
+            for service, lease in revocations:
+                if isinstance(service, InteractionService):
+                    lease.transport_unknown = True
+                    lease.freeze()
+        return turn
+
+    async def _record_interactions(self, conversation: str, lease: InteractionLease | None,
+                                    *, count_turn: bool = True) -> None:
+        if lease is None:
+            return
+        service = self.interaction_service
+        if service is not None:
+            service.revoke(lease)
+            await service.settle(lease)
+        for text in lease.sent_texts:
+            await self.memory.add(conversation, 'assistant', text)
+        if count_turn and (lease.has_confirmed or lease.has_unknown):
+            self._touch_session(conversation)
+        if lease.has_confirmed:
+            self.personas.consume_opening(conversation)
+        if lease.has_confirmed or lease.has_unknown:
+            log.info('interaction outcomes: conv=%s texts=%d confirmed=%s unknown=%s',
+                     conversation, len(lease.sent_texts), lease.has_confirmed, lease.has_unknown)
+
+    async def _finish_interaction_turn(self, conversation: str, lease: InteractionLease | None,
+                                       *, count_turn: bool, event: MessageEvent | None = None,
+                                       snapshot: TurnSnapshot | None = None,
+                                       participated: bool = False) -> None:
+        async def finish() -> None:
+            try:
+                await self._record_interactions(conversation, lease, count_turn=count_turn)
+            finally:
+                if event is not None and event.group_id is not None and snapshot is not None and (
+                    participated or (lease and (lease.has_confirmed or lease.has_unknown))
+                ):
+                    self.proactive.record(event.group_id, time.time())
+                    self.group_context.consume(event.group_id, snapshot.captured)
+
+        cleanup = asyncio.create_task(finish())
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     def refresh_card(self, force: bool = False) -> bool:
         """Load the active card, reloading when /card use or --use-card changed it."""
@@ -2160,6 +2307,8 @@ class Bot(PersonaRuntime):
                 event.text,
                 images=event.images,
                 user_id=event.user_id,
+                message_id=event.message_id,
+                reply_to=event.reply_to,
             )
         await self._maybe_reload_model()
         lock = self._locks.setdefault(conversation_id, asyncio.Lock())
@@ -2182,55 +2331,65 @@ class Bot(PersonaRuntime):
             log.exception("cannot prepare proactive persona")
             return
 
-        lines = self.group_context.peek(event.group_id, self.config.bot.group_context_messages)
-        image_urls = self.group_context.images(
-            event.group_id, self.config.bot.group_context_images
-        )
-        prompt = (
-            self._context_header(event)
-            + "\n"
-            + format_proactive_turn(
-                lines,
-                self.config.bot.proactive.prompt,
-                self.config.bot.group_context_chars,
-            )
-            + self._sticker_hint()
-        )
-        prompt += self._opening_context(conversation_id)
+        snapshot = self._turn_snapshot(event, event.text, proactive=True)
+        image_urls = snapshot.images(self.config.bot.group_context_images)
+        prompt = (self._context_header(event) + '\n' + format_proactive_turn(
+            snapshot.lines, self.config.bot.proactive.prompt, self.config.bot.group_context_chars)
+            + self._sticker_hint() + self._opening_context(conversation_id))
         images: list[str] = []
         prepared: list[PreparedImage] = []
         if image_urls:
-            if self.config.dsh.image_mode == "inline":
+            if self.config.dsh.image_mode == 'inline':
                 images = await self._image_urls(image_urls)
             else:
-                prepared = await self._prepare_images(
-                    image_urls, conversation_id=conversation_id
-                )
+                prepared = await self._prepare_images(image_urls, conversation_id=conversation_id)
                 prompt += self._image_hint(prepared)
-        image_count = len(prepared) if prepared else len(images)
-        await self.memory.add(conversation_id, "user", f"{event.sender_name}: {event.text}")
-        log.info(
-            "proactive reply: group=%s user=%s context=%d images=%d",
-            event.group_id, event.user_id, len(lines), image_count,
-        )
+        await self.memory.add(conversation_id, 'user', f'{event.sender_name}: {event.text}')
+        log.info('proactive reply: group=%s user=%s context=%d images=%d',
+                 event.group_id, event.user_id, len(snapshot.lines), len(prepared) or len(images))
         started = time.time()
+        interaction: InteractionLease | None = None
+        revocations: list[tuple[Any, Any]] = []
+        participated = False
+        turn_counted = False
         try:
-            reply, events = await asyncio.to_thread(
-                self._dsh_turn, dsh, session_id, prompt, images
-            )
-        except DSHError as exc:
-            log.error("proactive DSH failed after %.1fs: %s", time.time() - started, exc)
-            return
-        self._record_dsh_usage(conversation_id, session_id, "proactive", events)
-        log.info("proactive DSH turn took %.1fs", time.time() - started)
-        self._touch_session(conversation_id)
-
-        self.proactive.record(event.group_id, time.time())
-        self.group_context.drain(event.group_id)
-        await self.memory.add(conversation_id, "assistant", reply)
-        self.personas.consume_opening(conversation_id)
-        await self._send_reply(event, conversation_id, reply, proactive=True)
-        log.info("proactive reply processing finished: conv=%s total=%.1fs", conversation_id, time.time() - started)
+            interaction = await self._open_interactions(dsh, event, conversation_id, session_id, snapshot)
+            env = {}
+            if interaction is not None:
+                service = self.interaction_service
+                assert service is not None
+                revocations.append((service, interaction))
+                env.update(service.env(interaction))
+            turn = await self._run_leased_turn(dsh, session_id, prompt, images, env, revocations,
+                                               usage=(conversation_id, 'proactive'))
+            for bridge, authority in revocations:
+                bridge.revoke(authority)
+            if interaction is not None and self.interaction_service is not None:
+                await self.interaction_service.settle(interaction)
+            self._record_dsh_usage(conversation_id, session_id, 'proactive', turn.events)
+            self._touch_session(conversation_id)
+            turn_counted = True
+            if turn.error:
+                raise DSHError(turn.error)
+            if interaction is not None and (interaction.has_unknown or interaction.has_text):
+                return
+            if not turn.reply and not (interaction and interaction.has_confirmed):
+                raise DSHError('DSH turn ended without a reply or confirmed interaction')
+            if turn.reply:
+                kwargs = {'allow_silent': True} if interaction and interaction.has_confirmed else {}
+                await self._send_reply(event, conversation_id, turn.reply, proactive=True, **kwargs)
+                if self._visible_reply(turn.reply):
+                    await self.memory.add(conversation_id, 'assistant', turn.reply)
+            self.personas.consume_opening(conversation_id)
+            participated = True
+        except (DSHError, ValueError, OSError, OneBotError) as exc:
+            log.error('proactive DSH failed after %.1fs: %s', time.time() - started, exc)
+        finally:
+            for service, lease in revocations:
+                service.revoke(lease)
+            await self._finish_interaction_turn(conversation_id, interaction, count_turn=not turn_counted,
+                                                event=event, snapshot=snapshot, participated=participated)
+        log.info('proactive reply processing finished: conv=%s total=%.1fs', conversation_id, time.time() - started)
 
     async def _maybe_reload_model(self) -> None:
         """Pick up --use-model / --set-model changes on the next turn."""
@@ -2758,8 +2917,9 @@ class Bot(PersonaRuntime):
         # the model sees a description plus a path, not an image block that
         # would be replayed from the session on every later turn.
         prep_start = time.time()
-        image_urls = self._turn_images(event)
-        prompt, context_lines = self._turn_prompt(event, text)
+        snapshot = self._turn_snapshot(event, text)
+        image_urls = snapshot.images(self.config.bot.group_context_images)
+        prompt, context_lines = self._turn_prompt(event, text, snapshot=snapshot)
         prompt += await self._recall_block(event, text)
         prompt += self._opening_context(conversation_id)
         images: list[str] = []
@@ -2785,10 +2945,24 @@ class Bot(PersonaRuntime):
         service = getattr(self, 'card_service', None)
         lease = None
         video_lease = None
+        interaction: InteractionLease | None = None
+        revocations: list[tuple[Any, Any]] = []
         video_service = getattr(self, 'video_service', None)
         video_settings = getattr(self.config, 'video', VideoSettings(enabled=False))
+        turn_counted = False
         try:
             turn_env = {}
+            interaction = await self._open_interactions(dsh, event, conversation_id, session_id, snapshot)
+            if interaction is not None:
+                interaction_service = self.interaction_service
+                assert interaction_service is not None
+                revocations.append((interaction_service, interaction))
+                turn_env.update(interaction_service.env(interaction))
+                def stop_external_actions() -> None:
+                    for bridge, authority in revocations:
+                        if authority is not interaction:
+                            bridge.revoke(authority)
+                interaction.on_unknown = stop_external_actions
             if event.message_id > 0 and isinstance(dsh, DSHClient) and video_settings.enabled:
                 if video_service is None:
                     video_service = self.video_service = VideoService(video_settings, self._send_video_receipt)
@@ -2796,6 +2970,7 @@ class Bot(PersonaRuntime):
                 video_lease = video_service.open(event, conversation_id, session_id,
                                                  lifetime=dsh.config.request_timeout + 10, text=text,
                                                  deadline=time.monotonic() + dsh.config.request_timeout)
+                revocations.append((video_service, video_lease))
                 turn_env.update(video_service.env(video_lease))
             if self.is_admin(event.user_id) and event.message_id > 0 and isinstance(dsh, DSHClient):
                 if service is None:
@@ -2803,64 +2978,61 @@ class Bot(PersonaRuntime):
                 await service.start()
                 lease = service.open(event, conversation_id, session_id, text,
                                      self.personas.effective(conversation_id).token)
+                revocations.append((service, lease))
                 turn_env.update(service.env(lease))
-            if turn_env:
-                worker = asyncio.create_task(asyncio.to_thread(
-                    dsh.run_authorized, session_id, prompt, images, turn_env
-                ))
-                try:
-                    reply, events = await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    if lease is not None and service is not None:
-                        service.revoke(lease)
-                    if video_lease is not None and video_service is not None:
-                        video_service.revoke(video_lease)
-                    # Keep this session's guard until the child actually closes.
-                    try:
-                        await asyncio.shield(worker)
-                    except (DSHError, asyncio.CancelledError):
-                        pass
-                    raise
-            else:
-                reply, events = await asyncio.to_thread(
-                    self._dsh_turn, dsh, session_id, prompt, images
-                )
-        except (DSHError, ValueError, OSError) as exc:
-            log.error("DSH failed after %.1fs: %s", time.time() - started, exc)
-            if self.config.bot.notify_errors:
-                await self._send(event, self.config.bot.error_message)
-            return
-        finally:
-            if lease is not None and service is not None:
-                service.revoke(lease)
-            if video_lease is not None and video_service is not None:
-                video_service.revoke(video_lease)
-        self._record_dsh_usage(conversation_id, session_id, "chat", events)
-        elapsed = time.time() - started
-        self._touch_session(conversation_id)
-        log.info("DSH turn took %.1fs (images=%d, prompt=%d chars)", elapsed, image_count, len(prompt))
-
-        await self.memory.add(conversation_id, "assistant", reply)
-        self.personas.consume_opening(conversation_id)
-        deferred = lease.deferred if lease is not None else None
-        try:
+            turn = await self._run_leased_turn(dsh, session_id, prompt, images, turn_env, revocations,
+                                               usage=(conversation_id, 'chat'))
+            # No model-side action can race final processing after revocation.
+            for bridge, authority in revocations:
+                bridge.revoke(authority)
+            if interaction is not None and self.interaction_service is not None:
+                await self.interaction_service.settle(interaction)
+            self._record_dsh_usage(conversation_id, session_id, 'chat', turn.events)
+            self._touch_session(conversation_id)
+            turn_counted = True
+            if turn.error:
+                raise DSHError(turn.error)
+            if interaction is not None and interaction.has_unknown:
+                log.warning('interaction delivery unknown; final and deferred switch suppressed: conv=%s', conversation_id)
+                return None
+            deferred = lease.deferred if lease is not None and turn.finish_reason == 'completed' else None
+            if interaction is not None and interaction.has_text:
+                # Tool text IS the reply. Skip final and its hidden markers.
+                return deferred if self._interaction_text_complete(interaction) else None
+            if not turn.reply:
+                if interaction is not None and interaction.has_confirmed:
+                    return None
+                raise DSHError('DSH turn ended without a reply or confirmed interaction')
+            kwargs = {'allow_silent': True} if interaction and interaction.has_confirmed else {}
             if deferred is not None:
-                await self._send_reply(event, conversation_id, reply, strict_receipts=True)
+                receipts = await self._send_reply(event, conversation_id, turn.reply,
+                                                   strict_receipts=True, **kwargs)
+                if not receipts:
+                    deferred = None
             else:
-                await self._send_reply(event, conversation_id, reply)
-        except (OneBotError, OSError):
-            log.warning('reply delivery failed; deferred card switch discarded')
+                await self._send_reply(event, conversation_id, turn.reply, **kwargs)
+            if self._visible_reply(turn.reply):
+                await self.memory.add(conversation_id, 'assistant', turn.reply)
+            self.personas.consume_opening(conversation_id)
+            elapsed = time.time() - started
+            received = event.received_at or prep_start
+            log.info('reply processing finished: conv=%s queue=%.1fs prep=%.1fs dsh=%.1fs total=%.1fs',
+                     conversation_id, max(0.0, prep_start - received), prep_elapsed,
+                     elapsed, time.time() - received)
+            return deferred
+        except (DSHError, ValueError, OSError, OneBotError) as exc:
+            for bridge, authority in revocations:
+                bridge.revoke(authority)
+            if interaction is not None and self.interaction_service is not None:
+                await self.interaction_service.settle(interaction)
+            log.error('DSH failed after %.1fs: %s', time.time() - started, exc)
+            if self.config.bot.notify_errors and not (interaction and (interaction.has_confirmed or interaction.has_unknown)):
+                await self._send(event, self.config.bot.error_message)
             return None
-        received = event.received_at or prep_start
-        log.info(
-            "reply processing finished: conv=%s queue=%.1fs prep=%.1fs dsh=%.1fs total=%.1fs",
-            conversation_id,
-            max(0.0, prep_start - received),
-            prep_elapsed,
-            elapsed,
-            time.time() - received,
-        )
-        return deferred
+        finally:
+            for bridge, authority in revocations:
+                bridge.revoke(authority)
+            await self._finish_interaction_turn(conversation_id, interaction, count_turn=not turn_counted)
 
     @request_context
     async def _reply_llm(self, conversation_id: str, event: MessageEvent, text: str) -> None:
@@ -2958,6 +3130,23 @@ class Bot(PersonaRuntime):
         self.personas.consume_opening(conversation_id)
         await self._send_reply(event, conversation_id, reply)
         log.info("reply processing finished: conv=%s llm=%.1fs", conversation_id, elapsed)
+
+    async def _send_interaction_receipt(self, conversation: str, text: str,
+                                        reply_to: int | None, user_ids: tuple[int, ...],
+                                        timeout: float) -> dict:
+        require_safe(text)
+        scope, separator, chat = conversation.partition(':')
+        if not separator or scope not in ('group', 'private') or not chat.isdecimal() or int(chat) <= 0:
+            raise ValueError('invalid interaction destination')
+        result = await self.onebot.send_interaction(scope, int(chat), text, reply_to=reply_to,
+                                                    user_ids=user_ids, timeout=timeout)
+        message_id = result.get('message_id') if isinstance(result, dict) else None
+        if type(message_id) is not int or message_id == 0:
+            raise OneBotError('interaction delivery unknown: no valid receipt')
+        if scope == 'group':
+            self._remember_own_message(int(chat), message_id)
+            self.proactive.note_speaking(int(chat), time.time())
+        return result
 
     async def _send_video_receipt(self, conversation: str, uri: str, timeout: float) -> dict:
         scope, _, chat = conversation.partition(':')
