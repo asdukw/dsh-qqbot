@@ -182,6 +182,7 @@ class StoryAdminDataTests(unittest.TestCase):
                 db.commit()
             data = story_data(str(profile), {}, card_db=str(cards))
             self.assertEqual(data['worlds'][0]['character_name'], '爱丽丝')
+            self.assertEqual(data['worlds'][0]['title'], '雨中的约定')
             missing = story_data(str(profile), {}, card_db=str(root / 'missing.db'))
             self.assertEqual(missing['worlds'][0]['character_name'], '')
 

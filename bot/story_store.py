@@ -478,7 +478,7 @@ class StoryStore:
             for row in runs:
                 relation = Relationship.model_validate_json(row.pop('data'))
                 row['stage'] = relation.stage
-            worlds = [dict(row) for row in self._db.execute('SELECT id,conversation,character,fingerprint,created FROM story_worlds ORDER BY created DESC LIMIT 30 OFFSET ?', (offset,))]
+            worlds = [dict(row) for row in self._db.execute("SELECT id,conversation,character,fingerprint,created,json_extract(definition, '$.title') AS title FROM story_worlds ORDER BY created DESC LIMIT 30 OFFSET ?", (offset,))]
             operations = [dict(row) for row in self._db.execute('SELECT id,kind,status,result,created FROM story_operations ORDER BY created DESC LIMIT 30')]
             deliveries = [dict(row) for row in self._db.execute("SELECT id,run_id,status,error,created FROM story_outbox WHERE status NOT IN ('sent','superseded') ORDER BY created DESC LIMIT 30")]
             audit = [dict(row) for row in self._db.execute('SELECT actor,kind,target,created FROM story_audit ORDER BY id DESC LIMIT 30')]

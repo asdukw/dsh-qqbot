@@ -38,7 +38,7 @@ import { requestJson } from "@/lib/api";
 import { conversationLabel } from "@/lib/format";
 
 type Run = { id: string; revision: number; conversation: string; character: string; user: string; stage: string; status: string };
-type World = { id: string; conversation: string; character: string; character_name?: string; fingerprint: string };
+type World = { id: string; conversation: string; character: string; character_name?: string; title?: string; fingerprint: string };
 type Operation = { id: string; kind: string; status: string; result: string };
 type Delivery = { id: string; run_id: string; status: string; error: string };
 type Audit = { actor: string; kind: string; target: string };
@@ -272,10 +272,11 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
                     className="block truncate text-sm font-medium text-slate-800"
                     title={world.character}
                   >
-                    {world.character_name || `角色 #${world.character.slice(0, 12)}`}
+                    {world.character_name || world.title || `角色 #${world.character.slice(0, 12)}`}
                   </span>
                   <span className="block truncate text-xs text-slate-500">
                     {conversationLabel(world.conversation)}
+                    {world.character_name && world.title ? ` · ${world.title}` : ""}
                   </span>
                 </span>
                 <div className="flex flex-wrap items-center gap-2">
