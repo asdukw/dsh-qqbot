@@ -167,6 +167,14 @@ class StoryStore:
         return self._one('SELECT * FROM story_worlds WHERE conversation=? AND character=? ORDER BY created DESC,id DESC LIMIT 1',
                          (conversation, character))
 
+    def shared_world(self, character: str, fingerprint: str) -> dict | None:
+        """Newest world for this card, regardless of conversation."""
+        return self._one(
+            'SELECT * FROM story_worlds WHERE character=? AND fingerprint=? '
+            'ORDER BY created DESC,id DESC LIMIT 1',
+            (character, fingerprint),
+        )
+
     def save_world(self, conversation: str, character: str, fingerprint: str, definition: StoryDefinition) -> dict:
         with self.transaction() as db:
             db.execute('INSERT OR IGNORE INTO story_worlds VALUES(?,?,?,?,?,?)',

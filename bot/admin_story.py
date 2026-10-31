@@ -41,8 +41,25 @@ def story_data(path: str, defaults: dict, *, offset: int = 0, card_db: str = '')
     finally:
         store.close()
     names = _card_names(card_db)
+    grouped: dict[tuple[str, str, str], dict] = {}
     for world in data['worlds']:
         world['character_name'] = names.get(str(world.get('character') or ''), '')
+        key = (
+            str(world.get('character') or ''),
+            str(world.get('fingerprint') or ''),
+            str(world.get('title') or ''),
+        )
+        entry = grouped.get(key)
+        if entry is None:
+            grouped[key] = {
+                **world,
+                'conversations': [world['conversation']],
+                'conversation_count': 1,
+            }
+        elif world['conversation'] not in entry['conversations']:
+            entry['conversations'].append(world['conversation'])
+            entry['conversation_count'] += 1
+    data['worlds'] = list(grouped.values())
     return data
 
 

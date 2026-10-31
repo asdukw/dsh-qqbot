@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowLeft,
   BookOpen,
+  Check,
+  Copy,
   FileJson,
-  FileSearch,
   Globe2,
   Users,
 } from "lucide-react";
@@ -15,15 +17,13 @@ import {
   LoadingHint,
   Notice,
   PageStack,
+  PillTabs,
   SectionCard,
-  SectionHeading,
   Toolbar,
 } from "@/components/common/Bits";
-import { Modal } from "@/components/models/Modal";
 import { StoryGraph, StoryNodeDetails } from "@/components/story/StoryGraph";
 import type { StoryGraphData } from "@/components/story/StoryGraph";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Field } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
@@ -38,14 +38,17 @@ import { requestJson } from "@/lib/api";
 import { conversationLabel } from "@/lib/format";
 
 type Run = { id: string; revision: number; conversation: string; character: string; user: string; stage: string; status: string };
-type World = { id: string; conversation: string; character: string; character_name?: string; title?: string; fingerprint: string };
-type Operation = { id: string; kind: string; status: string; result: string };
-type Delivery = { id: string; run_id: string; status: string; error: string };
-type Audit = { actor: string; kind: string; target: string };
-type Generation = { conversation: string; purpose: string; status: string; elapsed: number };
-type Attempt = { conversation: string; purpose: string; elapsed: number; details: { status: string; attempt: number; finish_reason: string; chars: number; issues: Array<{ path: string; code: string; message: string }> } };
-type Draft = { conversation: string; character: string; status: string; error: string; warnings: Array<{ code: string; path: string }> };
-type Data = { attempts: Attempt[]; drafts: Draft[]; audit: Audit[]; generations: Generation[]; runs: Run[]; worlds: World[]; operations: Operation[]; deliveries: Delivery[] };
+type World = {
+  id: string;
+  conversation: string;
+  conversations?: string[];
+  conversation_count?: number;
+  character: string;
+  character_name?: string;
+  title?: string;
+  fingerprint: string;
+};
+type Data = { runs: Run[]; worlds: World[] };
 type NoticeState = { text: string; tone: "success" | "danger" };
 
 export default function StoryPage({ refreshKey }: { refreshKey: number }) {
@@ -64,6 +67,8 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
   const [graphLoading, setGraphLoading] = useState(false);
   const [graphError, setGraphError] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [tab, setTab] = useState<"graph" | "definition">("graph");
+  const [copied, setCopied] = useState(false);
   const graphSeq = useRef(0);
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -98,6 +103,8 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
     setGraph(null);
     setGraphError("");
     setSelectedNodeId(null);
+    setTab("graph");
+    setCopied(false);
     setGraphLoading(true);
     try {
       const payload = await requestJson<StoryGraphData>(`/api/story/${world.id}?kind=graph`);
@@ -120,6 +127,18 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
     setGraphLoading(false);
     setSelectedNodeId(null);
   }
+  function copyDefinition() {
+    if (!graph) return;
+    const text = JSON.stringify({ definition: graph.definition, nodes: graph.nodes }, null, 2);
+    navigator.clipboard
+      ?.writeText(text)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => undefined);
+  }
+
   async function inspect(id: string, kind: string, detailOffset = 0) {
     setDetailQuery({ id, kind, offset: detailOffset });
     try { setDetail(await requestJson(`/api/story/${id}?kind=${kind}&offset=${detailOffset}`)); }
@@ -129,10 +148,85 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
   const runs = data?.runs ?? [];
   const worlds = data?.worlds ?? [];
   const selectedNode = graph?.nodes.find(node => node.id === selectedNodeId) ?? null;
-  const hasDiagnostics = Boolean(
-    data?.deliveries.length || data?.operations.length || data?.drafts.length ||
-    data?.attempts.length || data?.generations.length || data?.audit.length
-  );
+
+  if (graphWorld) {
+    const conversations = graphWorld.conversations ?? [graphWorld.conversation];
+    return (
+      <PageStack error={error} loading={loading} hasData={!!data}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button variant="ghost" size="sm" onClick={closeGraph}>
+            <ArrowLeft className="h-4 w-4" />
+            返回世界包
+          </Button>
+          <span className="text-xs text-slate-500">{conversations.length} 个会话</span>
+        </div>
+        <SectionCard
+          icon={Globe2}
+          title={graph?.definition.title || graphWorld.title || "世界包详情"}
+          description={conversations.map(id => conversationLabel(id)).join(" · ")}
+          actions={
+            <PillTabs
+              value={tab}
+              options={[
+                { value: "graph", label: "剧情树" },
+                { value: "definition", label: "定义" },
+              ]}
+              onChange={setTab}
+              label="世界包详情分区"
+            />
+          }
+        >
+          <div className="p-5">
+            {graphLoading ? (
+              <div className="flex h-64 items-center justify-center">
+                <LoadingHint loading label="正在加载世界包…" />
+              </div>
+            ) : graphError ? (
+              <div className="space-y-3">
+                <Notice tone="danger">{graphError}</Notice>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void openGraph(graphWorld)}
+                >
+                  重试
+                </Button>
+              </div>
+            ) : graph ? (
+              tab === "graph" ? (
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+                  <StoryGraph
+                    data={graph}
+                    selectedId={selectedNodeId}
+                    onSelect={node => setSelectedNodeId(node ? node.id : null)}
+                  />
+                  <StoryNodeDetails
+                    node={selectedNode}
+                    nodes={graph.nodes}
+                    start={graph.definition.start}
+                    onSelect={setSelectedNodeId}
+                  />
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-slate-500">完整定义（只读）</p>
+                    <Button variant="outline" size="sm" onClick={copyDefinition}>
+                      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      {copied ? "已复制" : "复制 JSON"}
+                    </Button>
+                  </div>
+                  <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs">
+                    {JSON.stringify({ definition: graph.definition, nodes: graph.nodes }, null, 2)}
+                  </pre>
+                </div>
+              )
+            ) : null}
+          </div>
+        </SectionCard>
+      </PageStack>
+    );
+  }
 
   return (
     <PageStack error={error} loading={loading} hasData={!!data}>
@@ -275,18 +369,13 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
                     {world.character_name || world.title || `角色 #${world.character.slice(0, 12)}`}
                   </span>
                   <span className="block truncate text-xs text-slate-500">
-                    {conversationLabel(world.conversation)}
+                    {(world.conversations ?? [world.conversation]).map(id => conversationLabel(id)).join(" · ")}
                     {world.character_name && world.title ? ` · ${world.title}` : ""}
                   </span>
                 </span>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button variant="outline" size="sm" onClick={() => void openGraph(world)}>
-                    剧情树
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => inspect(world.id, "world")}>
-                    查看定义
-                  </Button>
-                </div>
+                <Button variant="outline" size="sm" onClick={() => void openGraph(world)}>
+                  详情
+                </Button>
               </div>
             ))}
           </div>
@@ -344,78 +433,6 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
         </div>
       </SectionCard>
 
-      <Card className="overflow-hidden">
-        <details>
-          <summary className="cursor-pointer list-none px-5 py-4 text-sm font-semibold text-slate-900 [&::-webkit-details-marker]:hidden">
-            诊断与审计（不含正文）
-          </summary>
-          <div className="border-t border-slate-100 p-5">
-            {hasDiagnostics ? (
-              <div className="space-y-4">
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <SectionHeading title="投递与操作" />
-                  <div className="mt-2 divide-y divide-slate-200 text-sm text-slate-700">
-                    {data?.deliveries.map(row => (
-                      <p key={row.id} className="break-all py-1.5">
-                        {row.run_id.slice(0, 12)} · {row.status} · {row.error}
-                      </p>
-                    ))}
-                    {data?.operations.map(row => (
-                      <p key={row.id} className="break-all py-1.5">
-                        {row.id.slice(0, 12)} · {row.kind} · {row.status} · {row.result}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <SectionHeading title="生成诊断" />
-                  <div className="mt-2 divide-y divide-slate-200 text-sm text-slate-700">
-                    {data?.drafts.map((row, index) => (
-                      <p key={`draft-${index}`} className="break-all py-1.5">
-                        草稿 {conversationLabel(row.conversation)} · {row.character.slice(0, 12)}… · {row.status} · {row.error} ·{" "}
-                        {row.warnings.map(w => w.code).join(", ")}
-                      </p>
-                    ))}
-                    {data?.attempts.map((row, index) => (
-                      <div key={`attempt-${index}`} className="break-all py-1.5">
-                        <p>
-                          {conversationLabel(row.conversation)} · {row.purpose} · 第 {row.details.attempt} 次 · {row.details.status} ·{" "}
-                          {row.elapsed.toFixed(1)}s · {row.details.chars} 字 · {row.details.finish_reason}
-                        </p>
-                        {row.details.issues.length ? (
-                          <p className="text-xs text-slate-500">
-                            {row.details.issues.map(item => `${item.path}: ${item.message}`).join("；")}
-                          </p>
-                        ) : null}
-                      </div>
-                    ))}
-                    {data?.generations.map((row, index) => (
-                      <p key={`generation-${index}`} className="break-all py-1.5">
-                        {conversationLabel(row.conversation)} · {row.purpose} · {row.status} · {row.elapsed.toFixed(1)}s
-                      </p>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <SectionHeading title="审计" />
-                  <div className="mt-2 divide-y divide-slate-200 text-sm text-slate-700">
-                    {data?.audit.map((row, index) => (
-                      <p key={`audit-${index}`} className="break-all py-1.5">
-                        {row.actor} · {row.kind} · {row.target}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <EmptyState icon={FileSearch} text="暂无诊断记录" />
-            )}
-          </div>
-        </details>
-      </Card>
-
       {detail !== null ? (
         <SectionCard
           icon={FileJson}
@@ -451,58 +468,6 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
           </div>
         </SectionCard>
       ) : null}
-      <Modal
-        open={graphWorld !== null}
-        title={graph?.definition.title || "剧情树"}
-        description={
-          graphWorld
-            ? graph
-              ? `${conversationLabel(graphWorld.conversation)} · ${graph.total} 个节点`
-              : graphLoading
-                ? "正在加载剧情树…"
-                : undefined
-            : undefined
-        }
-        onClose={closeGraph}
-        wide
-        panelClassName="max-w-6xl"
-        footer={
-          <Button variant="outline" size="sm" onClick={closeGraph}>
-            关闭
-          </Button>
-        }
-      >
-        {graphLoading ? (
-          <div className="flex h-64 items-center justify-center">
-            <LoadingHint loading label="正在加载剧情树…" />
-          </div>
-        ) : graphError ? (
-          <div className="space-y-3">
-            <Notice tone="danger">{graphError}</Notice>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => graphWorld && void openGraph(graphWorld)}
-            >
-              重试
-            </Button>
-          </div>
-        ) : graph ? (
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-            <StoryGraph
-              data={graph}
-              selectedId={selectedNodeId}
-              onSelect={node => setSelectedNodeId(node ? node.id : null)}
-            />
-            <StoryNodeDetails
-              node={selectedNode}
-              nodes={graph.nodes}
-              start={graph.definition.start}
-              onSelect={setSelectedNodeId}
-            />
-          </div>
-        ) : null}
-      </Modal>
     </PageStack>
   );
 }

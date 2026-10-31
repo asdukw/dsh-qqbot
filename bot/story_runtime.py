@@ -100,6 +100,13 @@ class StoryRuntime:
             existing = self.store.world(conversation, record.character_id, record.fingerprint)
             if existing:
                 return {'world': existing, 'returning': True}
+            shared = self.store.shared_world(record.character_id, record.fingerprint)
+            if shared is not None:
+                # The card/fingerprint already has a validated world; reuse it for
+                # a new conversation instead of paying for an identical generation.
+                definition = StoryDefinition.model_validate_json(shared['definition'])
+                world = self.store.save_world(conversation, record.character_id, record.fingerprint, definition)
+                return {'world': world, 'returning': False}
             # Mark first: conservatively protect the card even if generation fails.
             self.bot.cards.mark_story(record.id)
             definition = await self.generator().outline(record.payload, conversation, preferences,

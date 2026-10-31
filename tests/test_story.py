@@ -186,6 +186,20 @@ class StoryAdminDataTests(unittest.TestCase):
             missing = story_data(str(profile), {}, card_db=str(root / 'missing.db'))
             self.assertEqual(missing['worlds'][0]['character_name'], '')
 
+    def test_duplicate_worlds_are_grouped_by_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / 'profile.db'
+            store = StoryStore(profile)
+            try:
+                store.save_world('group:1', 'stable-character-id', 'fingerprint', definition())
+                store.save_world('group:2', 'stable-character-id', 'fingerprint', definition())
+            finally:
+                store.close()
+            data = story_data(str(profile), {})
+            self.assertEqual(len(data['worlds']), 1)
+            self.assertEqual(data['worlds'][0]['conversations'], ['group:1', 'group:2'])
+            self.assertEqual(data['worlds'][0]['conversation_count'], 2)
+
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -238,6 +252,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = self.store.current_menu(run_id)
         assert result is not None
         return result
+
+    async def test_new_conversation_reuses_the_same_world(self) -> None:
+        first = await self.story.prepare_switch('group:42', self.a)
+        second = await self.story.prepare_switch('group:43', self.a)
+        self.assertEqual(self.generator.outline.await_count, 1)
+        assert first is not None and second is not None
+        self.assertEqual(first['world']['definition'], second['world']['definition'])
+        self.assertFalse(second['returning'])
+        self.assertEqual(len(self.store.admin()['worlds']), 2)
 
     async def test_two_players_own_choices_and_delayed_endings(self):
         await self.story.enter(self.event())
