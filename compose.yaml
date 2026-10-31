@@ -1,0 +1,70 @@
+services:
+  bot:
+    build: .
+    image: ${QQBOT_IMAGE:-qqbot:local}
+    restart: unless-stopped
+    environment:
+      QQBOT_ROLE: bot
+      ADMIN_UI_PASSWORD: ${ADMIN_UI_PASSWORD:?set ADMIN_UI_PASSWORD in .env}
+      ADMIN_UI_SECRET: ${ADMIN_UI_SECRET:-}
+      ONEBOT_TOKEN: ${ONEBOT_TOKEN:?set ONEBOT_TOKEN in .env}
+      ADMIN_QQ_IDS: ${ADMIN_QQ_IDS:-}
+    volumes:
+      - qqbot-data:/var/lib/qqbot
+      - qqbot-config:/etc/qqbot
+      - video-outbox:/var/lib/qqbot/video-media/outbox
+    depends_on:
+      - napcat
+  admin:
+    image: ${QQBOT_IMAGE:-qqbot:local}
+    restart: unless-stopped
+    environment:
+      QQBOT_ROLE: admin
+      ADMIN_UI_PASSWORD: ${ADMIN_UI_PASSWORD:?set ADMIN_UI_PASSWORD in .env}
+      ADMIN_UI_SECRET: ${ADMIN_UI_SECRET:-}
+    ports:
+      - "127.0.0.1:${ADMIN_PORT:-8080}:8080"
+    volumes:
+      - qqbot-data:/var/lib/qqbot
+      - qqbot-config:/etc/qqbot
+    depends_on:
+      - bot
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+  napcat-init:
+    image: ${QQBOT_IMAGE:-qqbot:local}
+    user: "0:0"
+    entrypoint: ["python", "/opt/qqbot/deploy/init-napcat.py"]
+    environment:
+      ONEBOT_TOKEN: ${ONEBOT_TOKEN:?set ONEBOT_TOKEN in .env}
+    volumes:
+      - napcat-config:/napcat-config
+  napcat:
+    depends_on:
+      napcat-init:
+        condition: service_completed_successfully
+    image: mlikiowa/napcat-docker@sha256:696e9574a0f6fb2f86cbecba8a32048f2a5823117dc9b13c6c02637ad890fa8b
+    restart: unless-stopped
+    environment:
+      MODE: ws
+      WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN:?set NAPCAT_WEBUI_TOKEN in .env}
+      NAPCAT_UID: "0"
+      NAPCAT_GID: "0"
+    ports:
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - napcat-qq:/app/.config/QQ
+      - napcat-config:/app/napcat/config
+      - napcat-plugins:/app/napcat/plugins
+      - video-outbox:/app/qqbot-video:ro
+volumes:
+  qqbot-data:
+  qqbot-config:
+  video-outbox:
+  napcat-qq:
+  napcat-config:
+  napcat-plugins:

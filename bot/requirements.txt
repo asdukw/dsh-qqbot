@@ -6,3 +6,4 @@ Pillow>=10.0
 jieba>=0.42.1
 yt-dlp==2026.10.26
 curl-cffi==0.17.0
+deepseek-harness-sdk==0.2.1rc2

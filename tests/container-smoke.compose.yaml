@@ -1,0 +1,12 @@
+# 必须与根 compose.yaml 合并；外部 NapCat 完全替换为本地模拟。
+services:
+  napcat:
+    image: ${QQBOT_IMAGE:-qqbot:local}
+    entrypoint: ["python", "/smoke/fixtures/container_services.py"]
+    volumes:
+      - ./tests:/smoke:ro
+  admin:
+    ports: !reset []
+networks:
+  default:
+    internal: true

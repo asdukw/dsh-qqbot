@@ -49,6 +49,10 @@ DSH runtime (custom profile: qqbot)
 
 细节见 [`docs/architecture.md`](docs/architecture.md)。
 
+## 全容器安装
+
+不想在宿主机安装 Python/Node，可使用根目录 Docker Compose；首次启动、持久化、更新和隔离测试见 [`docs/containers.md`](docs/containers.md)。
+
 ## 快速开始（Ubuntu 24.04+ / Debian 13+，需要 Docker Compose v2）
 
 ### 0. 准备
