@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from video_backend import VideoBackend, bounded_read, stop_process
+from video_media import hd_dimensions
 from video_platforms import VideoError
 from video_resolver import VideoSettings, number
 
@@ -196,7 +197,7 @@ class VideoMaterializer:
         if not output.is_file() or output.is_symlink() or not 0 < output.stat().st_size <= max_bytes:
             raise VideoError('LIMIT_EXCEEDED', 'Final video exceeds the size limit')
         raw = await command(self.settings.ffprobe, ['-v', 'error', '-protocol_whitelist', 'file', '-f', 'mov',
-                            '-show_entries', 'stream=codec_type,codec_name,height:format=duration,format_name',
+                            '-show_entries', 'stream=codec_type,codec_name,width,height:format=duration,format_name',
                             '-of', 'json', str(output.resolve())], min(5, deadline - time.monotonic()))
         try:
             probe = json.loads(raw)
@@ -205,7 +206,7 @@ class VideoMaterializer:
             audios = [s for s in streams if s.get('codec_type') == 'audio']
             duration = float(probe['format']['duration'])
             if (len(videos) != 1 or videos[0].get('codec_name') != 'h264'
-                    or not 0 < videos[0].get('height', 0) <= 720
+                    or not hd_dimensions(videos[0].get('width'), videos[0].get('height'))
                     or (not silent and (len(audios) != 1 or audios[0].get('codec_name') != 'aac'))
                     or (silent and audios) or number(duration) is None
                     or not 0 < duration <= min(600, self.settings.max_send_duration)

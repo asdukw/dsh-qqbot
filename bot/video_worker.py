@@ -42,7 +42,7 @@ def extract(payload: dict) -> dict:
     DouyinIE: Any = importlib.import_module("yt_dlp.extractor.tiktok").DouyinIE
 
     target = parse_source(payload["source"], payload.get("part"))
-    transport = SafeHTTP(target.platform)
+    transport = SafeHTTP(target.platform, browser=True)
     cookies = importlib.import_module("yt_dlp.cookies").YoutubeDLCookieJar()
     cookie_path = payload.get("cookie_file", "")
     try:

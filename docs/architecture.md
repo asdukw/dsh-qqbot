@@ -374,7 +374,7 @@ auto: true
 
 `dsh/video-tools.mjs` 的 `video_resolve(source, part?)` 使用 Node 原生 HTTP 直连 loopback bridge，不使用环境代理或重定向。`VideoService` 在 `bot/main.py::_reply_dsh()` 为真实用户当前消息发放 session/actor/conversation 绑定的限时 lease；管理员轮次合并独立的 card/video 环境，普通用户不获得 card authority。定时、主动、合成事件不发 lease；`DSHClient` 清空未授权运行时的 video 环境。授权 runtime 在轮次前后关闭，session 数据保留；这以启动延迟换取简单、明确的权限边界。
 
-`video_platforms.py` 规范化单视频标识/短链/分 P，`video_resolver.py` 定义版本化输出；`video_backend.py` 管理并发、限时、输出上限和元数据 LRU；`video_worker.py` 隔离固定版提取器，按平台显式选择 extractor，不自动委派 Generic、合集或内置媒体下载器。B站在固定提取器初始JSON hook里校验BV/AV、分P及CID；不再强制调用view API，pages来自已验证页面，匹配CID且非预览的内嵌DASH可复用。`video_http.py` 是所有后端元数据请求唯一的传输层：固定 `RequestDirector` 不允许其他 handler 兜底，逐跳检查平台域名和公共 DNS，实际连接 pin IP、Host/SNI 保持源站；原始/解压响应大小、累计流量和请求数有界。该集成边界不是防任意恶意 Python 代码的 OS 沙箱。
+`video_platforms.py` 规范化单视频标识/短链/分 P，`video_resolver.py` 定义版本化输出；`video_backend.py` 管理并发、限时、输出上限和元数据 LRU；`video_worker.py` 隔离固定版提取器，按平台显式选择 extractor，不自动委派 Generic、合集或内置媒体下载器。B站在固定提取器初始JSON hook里校验BV/AV、分P及CID；不再强制调用view API，pages来自已验证页面，匹配CID且非预览的内嵌DASH可复用。`video_http.py` 是所有后端元数据请求唯一的传输边界：B站由 `video_curl.py` 适配固定版 curl-cffi / Chrome 151 兼容传输，其他平台保留 httpx。libcurl 使用原主机名与 RESOLVE pin 公网IP、开启证书校验，关闭代理和自动跳转；同步回调限制原始正文2MiB、响应头64KiB，无无界流队列。Cookie与有界解压仍复用共享路径，412保留错误分类与冷却，不保证消除出口风控。固定 `RequestDirector` 不允许其他 handler 兜底，逐跳检查平台域名和公共 DNS，实际连接 pin IP、Host/SNI 保持源站；原始/解压响应大小、累计流量和请求数有界。该集成边界不是防任意恶意 Python 代码的 OS 沙箱。
 
 缓存只含投影后的元数据/资源描述，键含平台、来源/规范ID、显式分P及凭据generation（legacy为路径/mtime/size）。短链成功结果同时缓存规范目标；平台block/限流仅在独立冷却表保存60秒安全错误，普通错误不缓存。相同key用独立owner task共享只读结果，最多8个active key/32等待者，各等待者独立shield/deadline；最后等待者离开才取消owner，shutdown取消回收全部活动worker。出队后检查平台+generation冷却，materialize也使用同一gate但不共享文件/QQ任务。更新凭据后不把旧结果发布入新缓存。
 
@@ -386,7 +386,7 @@ worker 以最小环境启动，不继承 bot 模型密钥、代理或 bridge sec
 
 `video_send` 通过同一 bridge 的 `operation=send` 调用 `video_sending.py`。`VideoLease` 附来源 message_id、原会话、服务器从当前未引用文本判定的单一来源及 DSH deadline；普通只读 lease 不自动变成发送授权。请求解析/下载/发视频时使用 send，讨论/总结仍 resolve。此保守规则不声称能完整识别任意自然语言；含糊或没有本轮链接时需重新确认附链接。
 
-`video_media.py` 在 worker 内用独立 CDN allowlist 与流式 pinned-IP transport 下载一或两条轨道；不使用 yt-dlp downloader、不向 CDN 发平台 Cookie。`video_delivery.py` 创建私有 staging job、磁盘预留、校验固定 artifact manifest；主进程直接管理 ffmpeg/ffprobe，强制本地 MOV/MP4 demuxer、file-only protocol、显式映射、stream-copy、faststart，限制输出体积并核验时长/编码。验证完成后原子发布到只读映射给 NapCat 的 outbox，模型从不拿到本地路径、Header 或签名 URL。
+`video_media.py` 在 worker 内用独立 CDN allowlist 与流式 pinned-IP transport 下载一或两条轨道；不使用 yt-dlp downloader、不向 CDN 发平台 Cookie。`video_delivery.py` 创建私有 staging job、磁盘预留、校验固定 artifact manifest；选流和成品共同要求短边≤720、长边≤1280，未知大小用含余量的码率估算，无法估算则拒绝；实际字节仍受硬限制。主进程直接管理 ffmpeg/ffprobe，强制本地 MOV/MP4 demuxer、file-only protocol、显式映射、stream-copy、faststart，限制输出体积并核验时长/编码。验证完成后原子发布到只读映射给 NapCat 的 outbox，模型从不拿到本地路径、Header 或签名 URL。
 
 发送前 `VideoService.authorize()` 再验单轮权限，`Bot._send_video_receipt()` 仅向 lease 原会话调用 OneBot video helper，不重取会话锁、不吞错误，群回执同步 own-message/proactive 记录。发送阶段使用剩余总 deadline，bridge/JS 发送上限 110 秒，只读 JS 65 秒；并非用更长 lease 延长 DSH 期限。
 

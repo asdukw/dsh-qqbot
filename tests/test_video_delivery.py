@@ -35,7 +35,7 @@ META = {'status': 'ok', 'canonical_url': URL, 'selected_part': 1, 'platform': 'b
 
 def video(**overrides):
     return {'url': 'https://cn-example.bilivideo.com/video.mp4?signature=secret', 'ext': 'mp4',
-            'height': 360, 'vcodec': 'avc1', 'acodec': 'mp4a', 'filesize': 1000, **overrides}
+            'width': 640, 'height': 360, 'vcodec': 'avc1', 'acodec': 'mp4a', 'filesize': 1000, **overrides}
 
 
 class MediaTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class MediaTests(unittest.TestCase):
                      {'duration': 601, 'formats': [progressive]},
                      {'formats': [progressive]},
                      {'duration': 10, 'formats': [video(vcodec='hevc')]},
-                     {'duration': 10, 'formats': [video(height=1080)]},
+                     {'duration': 10, 'formats': [video(width=1920, height=1080)]},
                      {'duration': 10, 'formats': [video(fragments=[{}])]},
                      {'duration': 10, 'formats': [video(filesize=10000)]}):
             with self.assertRaises(VideoError):
@@ -57,6 +57,21 @@ class MediaTests(unittest.TestCase):
         self.assertTrue(select_formats({'duration': 10, 'formats': [picture], 'audio_channels': 0}, 2000, 600)[1])
         chosen = select_formats({'duration': 10, 'formats': [video(height=720, filesize=9999), progressive]}, 2000, 600)[0]
         self.assertEqual(chosen, [progressive])
+
+    def test_portrait_hd_bitrate_estimates_and_unknowns(self):
+        def track(width, height, tbr):
+            return video(width=width, height=height, acodec='none', filesize=None, tbr=tbr)
+        audio = video(vcodec='none', acodec='mp4a.40.2', ext='m4a', filesize=None, tbr=66.172)
+        hd = track(720, 1280, 194.365)
+        lower = track(480, 852, 111.329)
+        info = {'duration': 554.911, 'formats': [track(1080, 1920, 354.576), hd, lower,
+                                               track(360, 640, 78.234), audio]}
+        self.assertEqual(select_formats(info, 64 * 1024 * 1024, 600)[0], [hd, audio])
+        self.assertEqual(select_formats(info, 15 * 1024 * 1024, 600)[0], [lower, audio])
+        for bad in (video(width=None), video(height=0), video(width=2000),
+                    video(filesize=None), video(filesize=None, tbr=0)):
+            with self.assertRaises(VideoError):
+                select_formats({'duration': 10, 'formats': [bad]}, 100000, 600)
 
     def test_cdn_url_boundary(self):
         self.assertIn('bilivideo.com', media_url(video()['url'], 'bilibili'))
@@ -87,7 +102,7 @@ class MediaTests(unittest.TestCase):
         dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, 443)) for ip in addresses]
         with tempfile.TemporaryDirectory() as tmp:
             with patch('httpx.Client', side_effect=client), patch('socket.getaddrinfo', return_value=dns):
-                manifest = download_tracks({'duration': 10, 'formats': [video(filesize=0)]}, 'bilibili', tmp, limit, 600)
+                manifest = download_tracks({'duration': 10, 'formats': [video(filesize=0, tbr=1)]}, 'bilibili', tmp, limit, 600)
             self.assertEqual((Path(tmp) / 'input0.mp4').read_bytes(), b'media')
             self.assertEqual(manifest['files'], ['input0.mp4'])
 
@@ -283,6 +298,32 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
 class AssemblyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_portrait_probe_accepts_hd_and_rejects_oversize(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            settings = VideoSettings(ffmpeg=str(Path(shutil.which('ffmpeg')).resolve()),
+                                     ffprobe=str(Path(shutil.which('ffprobe')).resolve()))
+            backend = VideoBackend(settings)
+            materializer = VideoMaterializer(settings, backend)
+            try:
+                for index, shape in enumerate(('720x1280', '1080x1920', '1600x360')):
+                    source = directory / f'portrait{index}.mp4'
+                    subprocess.run([settings.ffmpeg, '-nostdin', '-v', 'error', '-f', 'lavfi',
+                        '-i', f'color=c=black:s={shape}:r=10', '-t', '0.2', '-c:v', 'libx264',
+                        '-an', str(source)], check=True, capture_output=True)
+                    output = directory / f'output{index}.mp4'
+                    if index == 0:
+                        await materializer.assemble(directory, [source.name], True, output,
+                                                    time.monotonic() + 15, 1_000_000)
+                        self.assertTrue(output.is_file())
+                    else:
+                        with self.assertRaises(VideoError):
+                            await materializer.assemble(directory, [source.name], True, output,
+                                                        time.monotonic() + 15, 1_000_000)
+            finally:
+                await materializer.close()
+                await backend.close()
+
     async def test_real_dash_merge_probe_and_media_lifetime(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = VideoSettings(media_directory=str(Path(tmp) / 'media'),

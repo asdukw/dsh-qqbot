@@ -72,7 +72,11 @@ class ExtractorTests(unittest.TestCase):
                 return response
             return real_client(transport=httpx.MockTransport(streaming), **settings)
         dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.8.8.8', 443))]
-        with (patch('video_http.httpx.Client', side_effect=client),
+        def transport(platform, **options):
+            self.assertTrue(options.get('browser'))
+            return SafeHTTP(platform)
+        with (patch('video_worker.SafeHTTP', side_effect=transport),
+              patch('video_http.httpx.Client', side_effect=client),
               patch('socket.getaddrinfo', return_value=dns),
               patch.object(ydl_class, 'download', side_effect=AssertionError('download forbidden')),
               patch.object(ydl_class, 'add_default_info_extractors', side_effect=AssertionError('default extractors forbidden')),
@@ -107,9 +111,10 @@ class ExtractorTests(unittest.TestCase):
             if request.url.path == '/x/player/wbi/playurl':
                 body = response.json()
                 for fmt in body['data']['dash']['video']:
-                    fmt.update(height=360, baseUrl='https://cn-fixture.bilivideo.com/video?secret')
+                    fmt.update(width=640, height=360, bandwidth=1000, baseUrl='https://cn-fixture.bilivideo.com/video?secret')
                 for fmt in body['data']['dash']['audio']:
                     fmt['baseUrl'] = 'https://cn-fixture.bilivideo.com/audio?secret'
+                    fmt['bandwidth'] = 1000
                 return httpx.Response(200, json=body)
             return response
         with tempfile.TemporaryDirectory() as tmp:

@@ -29,6 +29,12 @@ def media_url(url: str, platform: str) -> str:
     return url
 
 
+def hd_dimensions(width, height):
+    width, height = number(width), number(height)
+    return (width is not None and height is not None and min(width, height) > 0
+            and min(width, height) <= 720 and max(width, height) <= 1280)
+
+
 def select_formats(info: dict, max_bytes: int, max_duration: float) -> tuple[list[dict], bool]:
     duration = number(info.get('duration'))
     if duration is None or duration <= 0 or duration > max_duration:
@@ -45,7 +51,7 @@ def select_formats(info: dict, max_bytes: int, max_duration: float) -> tuple[lis
     def estimate(f):
         size = number(f.get('filesize')) or number(f.get('filesize_approx'))
         bitrate = number(f.get('tbr'))
-        return size or (bitrate * 1000 * duration / 8 * 1.1 if bitrate else 0)
+        return size or (bitrate * 1000 * duration / 8 * 1.1 if bitrate else None)
 
     def h264(f):
         return str(f.get('vcodec', '')).lower().startswith(('avc1', 'avc3', 'h264'))
@@ -55,7 +61,7 @@ def select_formats(info: dict, max_bytes: int, max_duration: float) -> tuple[lis
 
     audio = [f for f in formats if direct(f) and f.get('vcodec') == 'none' and aac(f)]
     videos = [f for f in formats if direct(f) and h264(f)
-              and number(f.get('height')) is not None and 0 < f['height'] <= 720]
+              and hd_dimensions(f.get('width'), f.get('height'))]
     silent = info.get('audio_channels') == 0
     candidates = []
     for video in videos:
@@ -63,9 +69,12 @@ def select_formats(info: dict, max_bytes: int, max_duration: float) -> tuple[lis
         if not tracks and silent and video.get('acodec') == 'none':
             tracks = [[video]]
         for pair in tracks:
-            cost = sum(estimate(f) for f in pair)
+            estimates = [estimate(f) for f in pair]
+            if any(size is None for size in estimates):
+                continue
+            cost = sum(size for size in estimates if size is not None)
             if cost <= max_bytes:
-                candidates.append((video['height'], -cost, pair))
+                candidates.append((min(video['width'], video['height']), -cost, pair))
     if not candidates:
         raise VideoError('UNSUPPORTED_MEDIA', 'No supported H.264/AAC MP4 fits the sending limits')
     chosen = max(candidates, key=lambda item: item[:2])[2]

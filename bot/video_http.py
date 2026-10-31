@@ -22,8 +22,9 @@ MAX_TOTAL = 8 * 1024 * 1024
 
 
 class SafeHTTP:
-    def __init__(self, platform: str):
+    def __init__(self, platform: str, *, browser: bool = False):
         self.platform = platform
+        self.browser = browser and platform == "bilibili"
         self.requests = 0
         self.total = 0
         self.failure: VideoError | None = None
@@ -75,13 +76,16 @@ class SafeHTTP:
                     if cookie := req.get_header("Cookie"):
                         safe_headers["Cookie"] = cookie
                 client.cookies.clear()  # Never send cookies stored against the pinned IP.
-                with client.stream(
-                    "GET",
-                    original.copy_with(host=addresses[0]),
-                    headers=safe_headers,
-                    extensions={"sni_hostname": original.host},
-                    timeout=remaining,
-                ) as response:
+                if self.browser:
+                    # Let the maintained browser profile supply its matching User-Agent.
+                    safe_headers = {k: v for k, v in safe_headers.items() if k.lower() != "user-agent"}
+                    from video_curl import response as curl_response
+                    context = curl_response(url, addresses[0], safe_headers, remaining, MAX_RESPONSE)
+                else:
+                    context = client.stream(
+                        "GET", original.copy_with(host=addresses[0]), headers=safe_headers,
+                        extensions={"sni_hostname": original.host}, timeout=remaining)
+                with context as response:
                     if cookiejar is not None:
                         message = Message()
                         for key, value in response.headers.multi_items():
@@ -96,6 +100,12 @@ class SafeHTTP:
 
                         cookiejar.extract_cookies(cast(Any, CookieResponse(message)), req)
                     if response.status_code in (301, 302, 303, 307, 308):
+                        if self.browser:
+                            # curl_cffi buffers redirect bodies; count them so the
+                            # MAX_TOTAL budget covers every hop, not only 200s.
+                            self.total += len(response.read())
+                            if self.total > MAX_TOTAL:
+                                raise VideoError("LIMIT_EXCEEDED", "Video response too large")
                         location = response.headers.get("location")
                         if not location:
                             raise VideoError("UPSTREAM_ERROR", "Invalid video redirect")
