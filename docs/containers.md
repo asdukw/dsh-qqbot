@@ -2,21 +2,31 @@
 
 根目录的 `compose.yaml` 同时管理 bot、admin、NapCat 和一次性配置初始化器。
 不需要宿主机 Python/Node；镜像包含 Python 3.12、Node 22、DSH SDK/runtime、ffmpeg、中文字体与管理前端。
-目前验证平台为 Linux amd64（Windows Docker Desktop 的 Linux 引擎同样可用）。NapCat 固定上游多架构镜像 digest，更新需显式替换；QQ 协议兼容性不由本项目保证。arm64 manifest 虽存在，但整套流程尚未实测；Docker 可用不等于所有设备架构均已验证。目前尚未发布镜像。
+目前验证平台为 Linux amd64（Windows Docker Desktop 的 Linux 引擎同样可用）。NapCat 固定上游多架构镜像 digest，更新需显式替换；QQ 协议兼容性不由本项目保证。NapCat 的 arm64 manifest 虽存在，但整套流程尚未实测；本项目发布镜像仅构建 linux/amd64。镜像和部署包是否已发布，以 [GitHub Releases](https://github.com/asdukw/dsh-qqbot/releases) 的公开版本为准。
 
 ## 首次启动
 
 需要 Docker Engine、Compose **2.24.4+**（测试覆盖文件使用 `!reset`）和一个 QQ 小号。
 本方式与原有 systemd 安装二选一，避免两个 bot 同时接管同一账号。
 
-1. 复制 `.env.example` 为 `.env`，填入三个独立随机值：`ADMIN_UI_PASSWORD`、`ONEBOT_TOKEN`、`NAPCAT_WEBUI_TOKEN`。
-   `ADMIN_UI_SECRET` 可选；留空时使用管理密码签名 cookie。不要在命令行、日志或版本控制中暴露真实凭据。
-   `ADMIN_QQ_IDS` 填管理员 QQ，多个号码用逗号分隔。长期记忆默认开启：聊天样本会发送给配置的模型整理；历史回填默认关闭。
-2. 源码安装在仓库根目录执行：
+1. 推荐下载目标 [Release](https://github.com/asdukw/dsh-qqbot/releases) 的 `qqbot-deploy.tar.gz` 与 `SHA256SUMS` 到同一空目录，校验后解压：
 
    ```bash
-   docker compose build bot
-   docker compose up -d
+   sha256sum -c SHA256SUMS
+   tar -xzf qqbot-deploy.tar.gz
+   cd qqbot-deploy
+   cp .env.example .env
+   ```
+
+   部署包的 `.env.example` 已固定该版本的 `ghcr.io/asdukw/dsh-qqbot:v*` 镜像，不需要 git clone、源码或宿主机 Python/Node。
+   编辑 `.env`，填入三个独立随机值：`ADMIN_UI_PASSWORD`、`ONEBOT_TOKEN`、`NAPCAT_WEBUI_TOKEN`。
+   `ADMIN_UI_SECRET` 可选；留空时使用管理密码签名 cookie。不要在命令行、日志或版本控制中暴露真实凭据。
+   `ADMIN_QQ_IDS` 填管理员 QQ，多个号码用逗号分隔。长期记忆默认开启：聊天样本会发送给配置的模型整理；历史回填默认关闭。
+2. 在解压后的 `qqbot-deploy` 目录执行（不要执行 build；部署包不含 Dockerfile）：
+
+   ```bash
+   docker compose pull
+   docker compose up -d --no-build
    docker compose logs --tail=100 bot admin napcat
    ```
 
@@ -30,7 +40,17 @@
    docker compose restart bot
    ```
 
-未来的 Release 部署包已预填版本镜像，不含源码构建配置：使用 `docker compose pull && docker compose up -d`，无需在部署机器构建。源码安装仍使用上面的 build 命令。
+### 从源码构建（可选）
+
+只有需要修改代码时才 clone 仓库。在仓库根目录复制 `.env.example` 为 `.env`、填写上述配置并保持 `QQBOT_IMAGE=qqbot:local`，然后执行：
+
+```bash
+docker compose build bot
+docker compose up -d --no-build
+docker compose logs --tail=100 bot admin napcat
+```
+
+源码安装的后续扫码、面板配置与端口保护方式相同。
 
 只向宿主机 **127.0.0.1** 发布 admin 8080 与 NapCat WebUI 6099；OneBot 3001 不发布。
 远程机器通过 SSH 端口转发访问，例如 `ssh -L 8080:127.0.0.1:8080 -L 6099:127.0.0.1:6099 user@host`。
@@ -50,7 +70,8 @@ NapCat 为兼容上游保持 root，与 bot 用户分离。
 `napcat-init` 仅首次生成 `onebot11.json`；发现已有账号配置时验证启用的 WS 地址、端口和 token，不覆盖已有文件。
 改变 `.env` 的 `ONEBOT_TOKEN` 而未同步 NapCat 配置会阻止启动；请在备份后手动协调两端，不要删除登录卷重试。
 
-更新：`docker compose build bot && docker compose up -d`。
+发布版更新：先备份，阅读目标版本的变更说明并检查部署包的 Compose/配置变更；保留原项目名、卷和私有 `.env`，将 `QQBOT_IMAGE` 改为目标版本，然后执行 `docker compose pull && docker compose up -d --no-build`。
+源码版更新：`docker compose build bot && docker compose up -d --no-build`。
 镜像启动时初始化缺失的 DSH profile、刷新仓库维护的 profile patch；SDK/runtime 在构建阶段安装，不在聊天时临时下载。
 可选 Office/authoring 资源未打包，不属于本 bot 的聊天功能。
 停止：`docker compose down` 保留命名卷。**不要执行 `down -v`，除非明确要删除全部账号、模型凭据和历史。**
@@ -87,10 +108,10 @@ docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn
 ```bash
 # 示例项目名 myqqbot；备份文件落在命名卷内，不要求宿主机安装 tar/Python。
 docker volume create myqqbot-backups
-docker run --rm --user 0 --entrypoint sh -v myqqbot_qqbot-data:/source:ro -v myqqbot-backups:/backup qqbot:local -c 'tar -C /source -czpf /backup/qqbot-data.tar.gz .'
+docker run --rm --user 0 --entrypoint sh -v myqqbot_qqbot-data:/source:ro -v myqqbot-backups:/backup ghcr.io/asdukw/dsh-qqbot:v0.1.0 -c 'tar -C /source -czpf /backup/qqbot-data.tar.gz .'
 ```
 
-同样备份 qqbot-config、napcat-qq、napcat-config、napcat-plugins、video-outbox，记录镜像 digest/版本，并单独安全保存 `.env`。
+同样备份 qqbot-config、napcat-qq、napcat-config、napcat-plugins、video-outbox，记录镜像 digest/版本，并单独安全保存 `.env`。上例镜像应替换为实际部署的版本；源码安装可用 `qqbot:local`。
 恢复时先停服务，将备份解压到**新建的空卷**（反向挂载后 `tar -xzpf`），保留 uid/gid；不要直接覆盖正在使用的数据库。
 本地构建升级前用 `docker image tag qqbot:local qqbot:rollback` 保存旧镜像；发布版在 `.env` 固定版本，不使用 latest。
 回滚把 `QQBOT_IMAGE` 改回旧版本并 `docker compose up -d`；如果新版本包含不兼容的数据迁移，必须同时恢复升级前匹配的数据备份。
@@ -103,5 +124,11 @@ docker run --rm --user 0 --entrypoint sh -v myqqbot_qqbot-data:/source:ro -v myq
 
 ## 许可与第三方组件
 
-本仓库为 MIT，但发行镜像中的 DSH SDK/runtime、Node、Python、FFmpeg、字体及其依赖分别适用各自许可证，不能把整个发行镜像统称为 MIT。
-NapCat 引用上游镜像而不合并到 qqbot 镜像。正式公开发布前，维护者应复核固定版本的许可证、再分发要求及随附声明，尤其是 DSH 运行时和 FFmpeg 的具体构建选项；本次本地冒烟验证不等于完成许可审计。
+本仓库为 MIT，镜像内 `/opt/qqbot/LICENSE` 和部署包内 `LICENSE` 保留本项目声明；这不把整个发行镜像变为 MIT。
+
+- 已检查的 `deepseek-harness-sdk==0.2.1rc2` 与 `deepseek-harness-runtime-bin==0.2.1rc2` wheel 元数据声明 MIT；pip 安装保留各自 `.dist-info/licenses/LICENSE`，runtime 还保留 `THIRD_PARTY_NOTICES.md`。该声明包含适用独立条款的组件列表，不代表列出的每个可选组件都装入本镜像，也不能把上游项目内部的分发决定当作本项目的授权。
+- Node 声明位于 `/usr/local/LICENSE`，Python 声明位于 `/usr/local/lib/python3.12/LICENSE.txt`；Python wheel 的随附许可保留在各包安装目录。
+- FFmpeg 使用 Debian 二进制包，实际版权/许可和依赖声明位于 `/usr/share/doc/ffmpeg/copyright` 及其他 `/usr/share/doc/*/copyright`；该构建启用 GPL，并非只适用 LGPL。公开再分发前还需落实对应版本源码的提供义务，不能只附本项目 MIT。
+- NapCat 通过固定上游镜像引用，并未合并到 qqbot 镜像；其软件、QQ 客户端及相关依赖适用各自条款，引用镜像不赋予额外分发或使用权。
+
+以上是已安装文件检查记录，不是完整许可审计或法律意见。正式发布前仍需复核打包二进制的实际组件、相应条款与源码/声明提供义务。

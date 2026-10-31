@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-no
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 999 qqbot && useradd --system --uid 999 --gid qqbot --home-dir /var/lib/qqbot --shell /usr/sbin/nologin qqbot
 WORKDIR /opt/qqbot
+COPY LICENSE ./LICENSE
 ARG PIP_INDEX_URL=https://pypi.org/simple
 COPY bot/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r /tmp/requirements.txt

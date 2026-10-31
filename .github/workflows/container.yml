@@ -76,10 +76,33 @@ jobs:
         shell: bash
         run: |
           mkdir -p bundle/qqbot-deploy
-          cp compose.yaml .env.example bundle/qqbot-deploy/
+          cp compose.yaml .env.example LICENSE bundle/qqbot-deploy/
           cp docs/containers.md bundle/qqbot-deploy/README.md
           sed -i "s|QQBOT_IMAGE=qqbot:local|QQBOT_IMAGE=$IMAGE|" bundle/qqbot-deploy/.env.example
           sed -i 's/^    build: \.$//' bundle/qqbot-deploy/compose.yaml
           tar -C bundle -czf qqbot-deploy.tar.gz qqbot-deploy
           sha256sum qqbot-deploy.tar.gz > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes qqbot-deploy.tar.gz SHA256SUMS
+          cat > RELEASE_NOTES.md <<EOF
+          ## DeepSeek Harness QQ Bot ${GITHUB_REF_NAME}
+
+          ### 镜像与快速开始
+
+          - 镜像：$IMAGE（仅构建并验证 linux/amd64）。
+          - 下载 qqbot-deploy.tar.gz 和 SHA256SUMS，执行 sha256sum -c SHA256SUMS 后解压。
+          - 在解压目录复制 .env.example 为 .env，填入独立的管理密码、OneBot token 和 NapCat WebUI token。
+          - 执行 docker compose pull && docker compose up -d --no-build；部署包不需要源码、Python 或 Node。
+
+          ### 配置与限制
+
+          - 管理面板和 NapCat WebUI 默认只绑定宿主机 localhost；远程访问请使用 SSH 端口转发，不要直接暴露公网。
+          - 模型在管理面板「模型」页配置供应商、模型和 API key 后激活；凭据存入持久化数据卷。
+          - 持久化卷包括 bot 数据、配置、视频 outbox、NapCat QQ 登录态、配置和插件；升级前请备份并保留同一 Compose 项目名。
+          - 本版本未进行真实 QQ 扫码/消息发送验收，arm64 也未进行整套验收；QQ 协议兼容性不由本项目保证。
+
+          ### 许可证与第三方组件
+
+          - 本项目源代码使用 MIT；镜像内的 DeepSeek Harness SDK/runtime 为 0.2.1rc2，并随包保留其 MIT LICENSE 和 runtime 的 THIRD_PARTY_NOTICES.md。
+          - Python、Node、FFmpeg、字体及其他依赖各自适用其许可证；镜像保留相应发行版元数据/声明，不能将整个镜像统称为 MIT。
+          - NapCat 使用 compose 中固定 digest 的上游镜像，未合并进 qqbot 镜像；请按上游项目条款使用。
+          EOF
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "${GITHUB_REF_NAME}" --notes-file RELEASE_NOTES.md qqbot-deploy.tar.gz SHA256SUMS
