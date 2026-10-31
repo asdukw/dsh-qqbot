@@ -2,7 +2,8 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, ExternalLink, Trash2 } from "lucide-react";
 
-import { CheckboxRow, Modal } from "@/components/models/Modal";
+import { Modal } from "@/components/models/Modal";
+import { CheckboxRow } from "@/components/ui/form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { StickerRow } from "@/lib/analytics";
@@ -14,7 +15,9 @@ function MetaRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-1.5">
       <dt className="shrink-0 text-xs text-slate-500">{label}</dt>
-      <dd className="min-w-0 truncate text-right text-xs text-slate-700">{children}</dd>
+      <dd className="min-w-0 truncate text-right text-xs tabular-nums text-slate-700">
+        {children}
+      </dd>
     </div>
   );
 }
@@ -64,7 +67,7 @@ export function StickerDetailModal({
       }
     >
       <div className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_16rem]">
-        <div className="flex min-h-[14rem] items-center justify-center overflow-hidden rounded-xl border border-blue-50 bg-[radial-gradient(circle_at_50%_35%,rgba(219,234,254,0.6),rgba(248,250,252,0.9))] p-4">
+        <div className="flex min-h-[14rem] items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-4">
           <StickerThumb
             id={sticker.id}
             hasImage={sticker.has_image}
@@ -101,11 +104,11 @@ export function StickerDetailModal({
                 </Badge>
               ))
             ) : (
-              <span className="text-xs text-slate-400">没有标签</span>
+              <span className="text-xs text-slate-500">没有标签</span>
             )}
           </div>
 
-          <dl className="divide-y divide-blue-50 rounded-lg border border-blue-50 px-3">
+          <dl className="divide-y divide-slate-100 rounded-xl border border-slate-200 px-3">
             <MetaRow label="使用次数">{formatNumber(sticker.uses)}</MetaRow>
             <MetaRow label="文件大小">{formatBytes(sticker.size)}</MetaRow>
             <MetaRow label="来源">{sticker.source || "-"}</MetaRow>
@@ -126,7 +129,7 @@ export function StickerDetailModal({
               <ExternalLink className="h-3 w-3" /> 在新标签打开原图
             </a>
           ) : (
-            <p className="text-xs text-amber-600">图片文件已不在表情库目录里。</p>
+            <Badge variant="warning">图片文件已不在表情库目录里</Badge>
           )}
         </div>
       </div>

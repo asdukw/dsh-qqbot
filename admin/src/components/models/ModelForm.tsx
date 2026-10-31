@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Gauge, RefreshCw, Save } from "lucide-react";
 
-import { ErrorBanner } from "@/components/common/Bits";
-import { Field, Modal, Select } from "@/components/models/Modal";
+import { Notice } from "@/components/common/Bits";
+import { Modal } from "@/components/models/Modal";
+import { CheckboxRow, Field, FormSelect } from "@/components/ui/form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -211,7 +212,6 @@ export function ModelForm({
     <Modal
       open={open}
       title={mode === "edit" ? "编辑模型" : `添加模型 · ${provider.display_name}`}
-      description={`模型挂在供应商 ${provider.provider} 下，连接信息跟随供应商。`}
       onClose={onClose}
       wide
       footer={
@@ -227,9 +227,9 @@ export function ModelForm({
       }
     >
       <form id="model-form" className="space-y-4" onSubmit={handleSubmit}>
-        {error ? <ErrorBanner message={error} /> : null}
+        {error ? <Notice tone="danger">{error}</Notice> : null}
 
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/50 px-3 py-2 text-[11px] text-slate-500">
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
           <span className="font-mono">{provider.base_url || "（未配置 base_url）"}</span>
           <Badge variant="outline">{provider.api || "openai-completions"}</Badge>
           <Badge variant={provider.enabled ? "success" : "muted"}>
@@ -238,80 +238,73 @@ export function ModelForm({
         </div>
 
         <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <label
-                htmlFor="model-id"
-                className="text-xs font-medium text-slate-600"
+          <div className="flex items-center justify-between gap-2">
+            <label htmlFor="model-id" className="text-xs font-medium text-slate-600">
+              模型 ID
+            </label>
+            {mode === "create" ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void fetchModels()}
+                disabled={modelsBusy}
               >
-                模型 ID
-              </label>
-              {mode === "create" ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void fetchModels()}
-                  disabled={modelsBusy}
-                >
-                  <RefreshCw className={cn("h-3.5 w-3.5", modelsBusy && "animate-spin")} />
-                  {modelsBusy ? "获取中…" : "获取模型"}
-                </Button>
-              ) : null}
-            </div>
-            {modelOptions.length && !manualId ? (
-              <Select
-                id="model-id"
-                value={values.model_id}
-                onChange={(value) =>
-                  setValues((current) => ({ ...current, model_id: value }))
-                }
-              >
-                {modelOptions.map((modelId) => (
-                  <option key={modelId} value={modelId}>
-                    {modelId}
-                  </option>
-                ))}
-              </Select>
-            ) : (
-              <Input
-                id="model-id"
-                value={values.model_id}
-                onChange={(event) =>
-                  setValues((current) => ({ ...current, model_id: event.target.value }))
-                }
-                disabled={mode === "edit"}
-                placeholder={mode === "edit" ? values.model_id : "点击“获取模型”或手动输入"}
-                spellCheck={false}
-              />
-            )}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-[11px] text-slate-400">
-                {modelOptions.length && !manualId
-                  ? `已从供应商拉取 ${modelOptions.length} 个模型。`
-                  : "发给上游的 model 字段；创建后不可修改。"}
-              </p>
-              {modelOptions.length && !manualId && mode === "create" ? (
-                <button
-                  type="button"
-                  onClick={startManual}
-                  className="text-[11px] text-blue-600 hover:underline"
-                >
-                  手动填写
-                </button>
-              ) : null}
-            </div>
-            {modelsError ? (
-              <p className="rounded-lg border border-red-100 bg-red-50 px-2 py-1 text-[11px] text-red-700">
-                {modelsError}
-              </p>
+                <RefreshCw className={cn("h-3.5 w-3.5", modelsBusy && "animate-spin")} />
+                {modelsBusy ? "获取中…" : "获取模型"}
+              </Button>
             ) : null}
+          </div>
+          {modelOptions.length && !manualId ? (
+            <FormSelect
+              id="model-id"
+              value={values.model_id}
+              onChange={(value) =>
+                setValues((current) => ({ ...current, model_id: value }))
+              }
+            >
+              {modelOptions.map((modelId) => (
+                <option key={modelId} value={modelId}>
+                  {modelId}
+                </option>
+              ))}
+            </FormSelect>
+          ) : (
+            <Input
+              id="model-id"
+              value={values.model_id}
+              onChange={(event) =>
+                setValues((current) => ({ ...current, model_id: event.target.value }))
+              }
+              disabled={mode === "edit"}
+              placeholder={mode === "edit" ? values.model_id : "点击“获取模型”或手动输入"}
+              spellCheck={false}
+            />
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-500">
+              {modelOptions.length && !manualId
+                ? `已从供应商拉取 ${modelOptions.length} 个模型。`
+                : "创建后不可修改。"}
+            </p>
+            {modelOptions.length && !manualId && mode === "create" ? (
+              <button
+                type="button"
+                onClick={startManual}
+                className="text-xs text-blue-600 hover:underline"
+              >
+                手动填写
+              </button>
+            ) : null}
+          </div>
+          {modelsError ? <Notice tone="danger">{modelsError}</Notice> : null}
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
             className="sm:col-span-2"
             label="上下文窗口"
-            hint="tokens；留空默认 1000000。DSH 的 token meter 和自动压缩用它。"
+            hint="tokens；留空默认 1000000。"
           >
             <Input
               type="number"
@@ -325,14 +318,14 @@ export function ModelForm({
           </Field>
         </div>
 
-        <div className="space-y-3 rounded-xl border border-blue-100 p-3">
+        <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
           <div className="flex items-center gap-2">
-            <Gauge className="h-4 w-4 text-blue-500" />
-            <span className="text-xs font-medium text-slate-600">能力与推理</span>
+            <Gauge className="h-4 w-4 text-slate-500" />
+            <span className="text-sm font-semibold text-slate-900">能力与推理</span>
             {extraKeys.length ? (
               <span className="ml-auto flex flex-wrap gap-1">
                 {extraKeys.map((key) => (
-                  <Badge key={key} variant="outline" className="text-[10px]">
+                  <Badge key={key} variant="outline">
                     {key}
                   </Badge>
                 ))}
@@ -340,33 +333,24 @@ export function ModelForm({
             ) : null}
           </div>
 
-          <Field
-            label="默认推理强度"
-            hint="发送给上游的 reasoning_effort；选 none 表示不发送这个参数。"
-          >
-            <Select value={reasoningEffort} onChange={setReasoningEffort}>
+          <Field label="默认推理强度" hint="选 none 表示不发送该参数。">
+            <FormSelect value={reasoningEffort} onChange={setReasoningEffort}>
               {effortOptions.map((effort) => (
                 <option key={effort} value={effort}>
                   {effort}
                 </option>
               ))}
-            </Select>
+            </FormSelect>
           </Field>
         </div>
 
-        <label className="flex items-center gap-2.5 rounded-lg border border-blue-100 px-3 py-2.5 text-sm text-slate-700">
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={model?.is_active}
-            onChange={(event) => setEnabled(event.target.checked)}
-            className="h-4 w-4 rounded border-blue-300 accent-blue-600"
-          />
-          启用该模型
-          {model?.is_active ? (
-            <span className="ml-auto text-[11px] text-slate-400">当前模型不能禁用</span>
-          ) : null}
-        </label>
+        <CheckboxRow
+          label="启用该模型"
+          hint={model?.is_active ? "当前模型不能禁用" : undefined}
+          checked={enabled}
+          disabled={model?.is_active}
+          onChange={setEnabled}
+        />
       </form>
     </Modal>
   );

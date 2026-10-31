@@ -1,16 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { AudioLines, Check, Play, RefreshCw } from "lucide-react";
 
-import { ErrorBanner, InfoRow, SectionCard } from "@/components/common/Bits";
+import {
+  ErrorBanner,
+  InfoRow,
+  Notice,
+  PageStack,
+  SectionCard,
+} from "@/components/common/Bits";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import type { VoiceData, VoiceEntry, VoiceProviderId } from "@/lib/analytics";
 import { requestBlob, requestJson } from "@/lib/api";
 import { formatTs } from "@/lib/format";
@@ -58,7 +57,7 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: entry.provider, voice: entry.voice, name: entry.name }),
       });
-      setNotice(`已切换到「${entry.name || entry.voice}」；下一条语音回复立即生效，无需重启。`);
+      setNotice(`已切换到「${entry.name || entry.voice}」。`);
       reload();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "切换失败");
@@ -68,7 +67,7 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
   }
 
   async function resetVoice() {
-    if (!window.confirm("恢复 config.toml 里的默认音色？会删除面板保存的覆盖值。")) return;
+    if (!window.confirm("恢复配置文件里的默认音色？会删除面板保存的覆盖值。")) return;
     setBusy("reset");
     setActionError("");
     setNotice("");
@@ -78,7 +77,7 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ clear: true }),
       });
-      setNotice("已恢复 config.toml 的默认音色。");
+      setNotice("已恢复默认音色。");
       reload();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "恢复失败");
@@ -130,33 +129,20 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-lg font-semibold">音色管理</h2>
-        <Badge variant="secondary">在线切换</Badge>
-        {loading ? <span className="text-xs text-slate-500">加载中…</span> : null}
-      </div>
-      <p className="text-sm text-muted-foreground">
-        切换只影响之后的语音回复，不需要重启 bot；config.toml 的 [voice] 仍是未切换时的默认值。
-        试听使用固定短句，走与 bot 相同的 provider 参数。
-      </p>
-      {error ? <ErrorBanner message={error} /> : null}
+    <PageStack error={error} loading={loading} hasData={!!data}>
       {actionError ? <ErrorBanner message={actionError} /> : null}
-      {notice ? (
-        <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-          {notice}
-        </p>
-      ) : null}
+      {notice ? <Notice tone="success">{notice}</Notice> : null}
       {data && !data.enabled ? (
-        <ErrorBanner message="[voice] enabled = false：模型目前不会使用语音，切换会在开启后才生效。" />
+        <Notice tone="warning">
+          语音功能未启用：模型目前不会使用语音，切换会在开启后生效。
+        </Notice>
       ) : null}
 
       {data ? (
         <SectionCard
           icon={AudioLines}
           title="当前音色"
-          description={`来源：${data.source === "panel" ? "面板在线切换" : "config.toml"} · 状态文件 ${data.state_file}`}
-          badge={data.source === "panel" ? "面板" : "配置"}
+          description={`来源：${data.source === "panel" ? "面板在线切换" : "config.toml"}`}
           actions={
             <>
               <Button
@@ -184,7 +170,7 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
           }
         >
           <div className="grid gap-x-6 md:grid-cols-2">
-            <InfoRow label="Provider" value={PROVIDER_LABELS[data.active.provider]} />
+            <InfoRow label="供应商" value={PROVIDER_LABELS[data.active.provider]} />
             <InfoRow
               label="音色"
               value={data.active.name ? `${data.active.name} · ${data.active.voice}` : data.active.voice}
@@ -215,36 +201,39 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
       <SectionCard
         icon={AudioLines}
         title="选择音色"
-        description="面板目前只上架这两个 Fish Audio 中文音色；试听后点「切换」立即生效。"
+        description="试听后点「切换」，之后的消息立即生效。"
         badge={choices.length}
+        contentClassName="p-5"
       >
-        <div className="grid gap-4 p-5 md:grid-cols-2">
+        <div className="grid gap-4 md:grid-cols-2">
           {choices.map((entry) => {
             const key = voiceKey(entry.provider, entry.id);
             const current = key === activeKey;
             const listening = previewing === key;
             return (
-              <Card
+              <div
                 key={key}
                 className={cn(
-                  "flex flex-col justify-between transition-shadow",
-                  current ? "border-blue-300 bg-blue-50/40" : "hover:shadow-md"
+                  "flex flex-col justify-between rounded-xl border p-4 transition-colors",
+                  current
+                    ? "border-blue-300 bg-white ring-1 ring-blue-200"
+                    : "border-slate-200 bg-slate-50"
                 )}
               >
-                <CardHeader className="pb-3">
-                  <CardTitle className="flex items-center gap-2 text-base">
-                    {entry.name}
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-slate-900">{entry.name}</h3>
                     {current ? (
                       <Badge variant="secondary">
                         <Check className="mr-1 h-3 w-3" />
                         当前
                       </Badge>
                     ) : null}
-                  </CardTitle>
-                  <CardDescription className="text-xs">{entry.tags || "Fish Audio 中文音色"}</CardDescription>
-                  <p className="pt-1 font-mono text-[11px] text-slate-400">{entry.id}</p>
-                </CardHeader>
-                <CardContent className="flex gap-2 pt-0">
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">{entry.tags || "Fish Audio 中文音色"}</p>
+                  <p className="mt-0.5 font-mono text-[11px] text-slate-400">{entry.id}</p>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
                   <Button
                     variant="outline"
                     size="sm"
@@ -263,16 +252,15 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
                     {busy === `switch:${key}` ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
                     {current ? "使用中" : "切换"}
                   </Button>
-                </CardContent>
-              </Card>
+                </div>
+              </div>
             );
           })}
         </div>
-        <p className="px-5 pb-4 text-xs leading-relaxed text-muted-foreground">
-          切换结果写入 {data?.state_file ?? "voice-state.json"}；「恢复配置默认」会删除该文件。
-          需要其他音色时在 config.toml 的 [voice] 配置，或先加到面板音色目录。
+        <p className="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-500">
+          需要其他音色时，在 config.toml 的 [voice] 配置。
         </p>
       </SectionCard>
-    </div>
+    </PageStack>
   );
 }

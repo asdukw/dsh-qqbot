@@ -1,15 +1,18 @@
 import { useState } from "react";
-import { MessageSquareText, MessagesSquare, Sparkles, Trophy } from "lucide-react";
+import { MessageSquareText, MessagesSquare, Trophy } from "lucide-react";
 
 import {
   EmptyState,
-  ErrorBanner,
+  LoadingHint,
+  PageStack,
   PillTabs,
   SectionCard,
   StatCard,
+  Toolbar,
 } from "@/components/common/Bits";
 import FunPanel from "@/components/FunPanel";
-import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import type { FunData } from "@/lib/analytics";
 import { conversationLabel, formatNumber } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -22,9 +25,6 @@ const QUICK_OPTIONS: Array<{ value: QuickRange; label: string }> = [
   { value: "week", label: "近一周" },
   { value: "month", label: "近一月" },
 ];
-
-const DATE_INPUT =
-  "h-9 rounded-lg border border-blue-200 bg-white px-2.5 text-sm text-slate-700 shadow-sm outline-none focus:ring-2 focus:ring-blue-500";
 
 function isoDate(date: Date): string {
   const year = date.getFullYear();
@@ -50,11 +50,6 @@ function shiftedDate(base: string, days: number): string {
   const date = new Date(year, month - 1, day);
   date.setDate(date.getDate() + days);
   return isoDate(date);
-}
-
-function rangeLabel(data: FunData | null): string {
-  if (!data) return "加载中…";
-  return data.start === data.end ? data.start : `${data.start} ~ ${data.end}`;
 }
 
 export default function InsightsPage({ refreshKey }: { refreshKey: number }) {
@@ -104,40 +99,40 @@ export default function InsightsPage({ refreshKey }: { refreshKey: number }) {
   }
 
   return (
-    <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <PageStack error={error} loading={loading} hasData={!!data}>
+      <Toolbar className="justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-medium text-slate-500">时间范围</span>
-          <PillTabs value={quick} options={QUICK_OPTIONS} onChange={applyQuick} />
+          <PillTabs
+            value={quick}
+            options={QUICK_OPTIONS}
+            onChange={applyQuick}
+            label="时间范围"
+          />
           <div className="flex items-center gap-1.5">
-            <input
+            <Input
               type="date"
               value={start}
               max={end}
               onChange={(event) => changeStart(event.target.value)}
-              className={DATE_INPUT}
+              className="w-36"
               aria-label="起始日期"
             />
             <span className="text-xs text-slate-400">至</span>
-            <input
+            <Input
               type="date"
               value={end}
               min={start}
               max={today}
               onChange={(event) => changeEnd(event.target.value)}
-              className={DATE_INPUT}
+              className="w-36"
               aria-label="终止日期"
             />
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-medium text-slate-500">会话</span>
-          <select
+          <Select
             value={conversation}
             onChange={(event) => setConversation(event.target.value)}
-            className="h-9 rounded-lg border border-blue-200 bg-white px-3 text-sm text-slate-700 shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-48"
+            aria-label="会话筛选"
           >
             <option value="">全部会话</option>
             {options.map((item) => (
@@ -148,55 +143,41 @@ export default function InsightsPage({ refreshKey }: { refreshKey: number }) {
             {conversation && !known ? (
               <option value={conversation}>{conversationLabel(conversation)}</option>
             ) : null}
-          </select>
-          {loading ? <span className="text-xs text-slate-500">加载中…</span> : null}
+          </Select>
         </div>
-      </div>
+        <LoadingHint loading={loading} />
+      </Toolbar>
 
-      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-        <Badge variant="outline">{rangeLabel(data)}</Badge>
-        {data && data.days > 1 ? <span>{data.days} 天</span> : null}
-        <span>·</span>
-        <span>排行取前 10 名，词云按范围内消息均匀抽样（最多 2000 条）</span>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-3">
         <StatCard
           icon={MessageSquareText}
           label="消息总数"
           value={formatNumber(data?.messages)}
-          hint="当前筛选范围"
         />
         <StatCard
           icon={Trophy}
-          label="排行人数"
+          label="参与人数"
           value={formatNumber(data?.ranking.length)}
-          hint="发言排行取前 10 名"
         />
         <StatCard
           icon={MessagesSquare}
           label="会话数"
           value={formatNumber(data?.conversation_total)}
-          hint="范围内产生过消息的群 / 好友"
-        />
-        <StatCard
-          icon={Sparkles}
-          label="热词"
-          value={formatNumber(data?.words.length)}
-          hint="词云候选词数量"
         />
       </div>
 
       <SectionCard
         icon={MessagesSquare}
         title="会话分布"
-        description="按入站消息数排序，取前 8 个会话"
+        description="消息最多的 8 个会话"
         badge={distribution.length}
       >
         {loading && !data ? (
-          <div className="px-5 py-10 text-center text-sm text-slate-400">加载中…</div>
+          <div className="px-5 py-6">
+            <LoadingHint loading />
+          </div>
         ) : distribution.length ? (
-          <div className="divide-y divide-blue-50">
+          <div className="divide-y divide-slate-100">
             {distribution.map((item) => (
               <div key={item.id} className="px-5 py-3">
                 <div className="flex items-center justify-between gap-3 text-sm">
@@ -205,7 +186,9 @@ export default function InsightsPage({ refreshKey }: { refreshKey: number }) {
                     onClick={() => setConversation(item.id)}
                     className={cn(
                       "truncate text-left font-medium",
-                      item.id === conversation ? "text-blue-700" : "text-slate-700 hover:text-blue-700"
+                      item.id === conversation
+                        ? "text-primary"
+                        : "text-slate-700 hover:text-primary"
                     )}
                   >
                     {item.label}
@@ -214,10 +197,13 @@ export default function InsightsPage({ refreshKey }: { refreshKey: number }) {
                     {formatNumber(item.messages)} 条
                   </span>
                 </div>
-                <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-50">
+                <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
                   <div
-                    className="h-full rounded-full bg-blue-500"
-                    style={{ width: `${Math.max(3, (item.messages / maxMessages) * 100)}%` }}
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${Math.max(3, (item.messages / maxMessages) * 100)}%`,
+                      backgroundColor: "var(--chart-1)",
+                    }}
                   />
                 </div>
               </div>
@@ -229,6 +215,6 @@ export default function InsightsPage({ refreshKey }: { refreshKey: number }) {
       </SectionCard>
 
       <FunPanel data={data} loading={loading} />
-    </div>
+    </PageStack>
   );
 }

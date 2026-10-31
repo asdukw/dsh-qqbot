@@ -1,23 +1,15 @@
 import { useMemo, useState } from "react";
-import { CalendarClock, CheckCircle2, CreditCard, Eye, Hash } from "lucide-react";
+import { CheckCircle2, CreditCard } from "lucide-react";
 
 import {
   EmptyState,
-  ErrorBanner,
+  PageStack,
   SearchField,
   SectionCard,
   StatCard,
 } from "@/components/common/Bits";
 import { CardDetailModal } from "@/components/cards/CardDetailModal";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import type { CardsData } from "@/lib/analytics";
 import { formatDate, formatNumber } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -45,81 +37,76 @@ export default function CardsPage({ refreshKey }: { refreshKey: number }) {
   }, [data, search]);
 
   const all = data?.cards ?? [];
-  const aliases = all.reduce((sum, card) => sum + card.aliases.length, 0);
 
   return (
-    <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard icon={CreditCard} label="角色卡总数" value={formatNumber(all.length)} hint="SillyTavern V1 / V2 / V3" />
-        <StatCard icon={CheckCircle2} label="当前角色卡" value={data?.active_card ?? "-"} hint="active card" tone="emerald" />
-        <StatCard icon={Hash} label="别名总数" value={formatNumber(aliases)} hint="可用于点名与主动接话" />
+    <PageStack error={error} loading={loading} hasData={!!data}>
+      <div className="grid gap-3 sm:grid-cols-2">
         <StatCard
-          icon={CalendarClock}
-          label="最近导入"
-          value={all.length ? formatDate(Math.max(...all.map((card) => card.updated_at))) : "-"}
-          hint="updated_at"
+          icon={CreditCard}
+          label="角色卡总数"
+          value={formatNumber(all.length)}
+          hint="SillyTavern V1 / V2 / V3"
+        />
+        <StatCard
+          icon={CheckCircle2}
+          label="当前角色卡"
+          value={data?.active_card || "-"}
+          tone="emerald"
         />
       </div>
 
       <SectionCard
         icon={CreditCard}
         title="角色卡库"
-        description="当前角色卡会随 /card use 热切换，点击卡片查看 V3 规范详情"
         badge={rows.length}
         actions={
           <SearchField
             value={search}
             onChange={setSearch}
             placeholder="搜索名称、标签、作者或别名…"
-            className="w-64"
+            className="w-full sm:w-64"
           />
         }
-        contentClassName="p-5"
+        contentClassName="p-4"
       >
         {rows.length ? (
-          <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
             {rows.map((card) => (
-              <Card
+              <div
                 key={card.id}
                 className={cn(
-                  "flex cursor-pointer flex-col transition-shadow hover:shadow-md focus-within:shadow-md",
-                  card.is_active && "border-blue-300 ring-1 ring-blue-200"
+                  "relative flex flex-col rounded-xl border bg-white transition-colors",
+                  card.is_active
+                    ? "border-blue-300 ring-1 ring-blue-200"
+                    : "border-slate-200 hover:border-slate-300"
                 )}
-                onClick={() => setDetailId(card.id)}
               >
-                <CardHeader className="pb-3">
+                <button
+                  type="button"
+                  onClick={() => setDetailId(card.id)}
+                  aria-label={`查看角色卡 ${card.nickname || card.name}`}
+                  className="absolute inset-0 z-10 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                />
+                <div className="pointer-events-none flex flex-1 flex-col gap-3 p-4">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <CardTitle
-                        className="cursor-pointer truncate hover:text-blue-700"
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            setDetailId(card.id);
-                          }
-                        }}
-                      >
+                      <h3 className="truncate text-sm font-semibold text-slate-900">
                         {card.nickname || card.name}
-                      </CardTitle>
-                      <CardDescription className="mt-1 truncate">
+                      </h3>
+                      <p className="mt-0.5 truncate text-xs tabular-nums text-slate-500">
                         #{card.id} · {card.name}
                         {card.character_version ? ` · v${card.character_version}` : ""}
-                      </CardDescription>
+                      </p>
                     </div>
                     {card.is_active ? <Badge>当前</Badge> : null}
                   </div>
-                </CardHeader>
-                <CardContent className="flex flex-1 flex-col gap-3 pt-0">
-                  <p className="line-clamp-3 min-h-[3.6rem] text-sm text-slate-600">
+
+                  <p className="line-clamp-3 min-h-[3.6rem] text-sm text-slate-700">
                     {card.description || "没有简介。"}
                   </p>
 
                   <div className="space-y-1.5">
-                    <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">别名</p>
+                    <p className="text-xs text-slate-500">别名</p>
                     <div className="flex flex-wrap gap-1.5">
                       {card.aliases.length ? (
                         card.aliases.map((alias) => (
@@ -128,62 +115,47 @@ export default function CardsPage({ refreshKey }: { refreshKey: number }) {
                           </Badge>
                         ))
                       ) : (
-                        <span className="text-xs text-muted-foreground">无别名</span>
+                        <span className="text-xs text-slate-500">无别名</span>
                       )}
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-1.5">
-                    {card.tags.map((tag) => (
-                      <Badge key={tag} variant="outline" className="text-[10px]">
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
+                  {card.tags.length ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {card.tags.map((tag) => (
+                        <Badge key={tag} variant="outline">
+                          {tag}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
 
-                  <div className="mt-auto space-y-1 border-t border-blue-50 pt-3 text-[11px] text-slate-400">
+                  <dl className="mt-auto space-y-1 border-t border-slate-100 pt-3 text-xs">
                     <div className="flex justify-between gap-2">
-                      <span>作者</span>
-                      <span className="truncate text-slate-600">{card.creator || "-"}</span>
+                      <dt className="text-slate-500">作者</dt>
+                      <dd className="truncate text-slate-700">{card.creator || "-"}</dd>
                     </div>
                     <div className="flex justify-between gap-2">
-                      <span>来源</span>
-                      <span className="truncate font-mono text-slate-500" title={card.source}>
-                        {card.source_kind || "file"} · {card.source || "-"}
-                      </span>
+                      <dt className="text-slate-500">更新时间</dt>
+                      <dd className="tabular-nums text-slate-700">
+                        {formatDate(card.updated_at)}
+                      </dd>
                     </div>
-                    <div className="flex justify-between gap-2">
-                      <span>更新时间</span>
-                      <span className="text-slate-600">{formatDate(card.updated_at)}</span>
-                    </div>
-                  </div>
-
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setDetailId(card.id);
-                    }}
-                  >
-                    <Eye className="h-3.5 w-3.5" />
-                    查看详情
-                  </Button>
-                </CardContent>
-              </Card>
+                  </dl>
+                </div>
+              </div>
             ))}
           </div>
         ) : (
           <EmptyState
             icon={CreditCard}
             text="没有匹配的角色卡。"
-            hint="用 /card install <url|路径> 导入 SillyTavern 角色卡。"
+            hint={"用 /card install <url|路径> 导入 SillyTavern 角色卡。"}
           />
         )}
       </SectionCard>
 
       <CardDetailModal cardId={detailId} onClose={() => setDetailId(null)} />
-    </div>
+    </PageStack>
   );
 }

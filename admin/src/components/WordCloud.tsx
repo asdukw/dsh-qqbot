@@ -25,7 +25,14 @@ const WIDTH = 900;
 const HEIGHT = 420;
 const FONT_FAMILY =
   'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
-const COLORS = ["#1d4ed8", "#2563eb", "#0284c7", "#4f46e5", "#0891b2", "#3b82f6"];
+const COLORS = [
+  "var(--chart-1)",
+  "var(--chart-2)",
+  "var(--chart-3)",
+  "var(--chart-4)",
+  "var(--chart-5)",
+  "var(--chart-6)",
+];
 
 function hashSeed(seed: string): number {
   let hash = 2166136261;
@@ -205,11 +212,10 @@ export default function WordCloud({
           y={word.y}
           textAnchor="middle"
           dominantBaseline="central"
-          fill={word.fill}
           opacity={word.opacity}
           fontSize={word.fontSize}
           fontWeight={word.fontWeight}
-          style={{ fontFamily: FONT_FAMILY }}
+          style={{ fill: word.fill, fontFamily: FONT_FAMILY }}
         >
           <title>{`${word.text} · ${word.count} 条消息`}</title>
           {word.text}

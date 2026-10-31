@@ -4,8 +4,6 @@ import {
   ArrowLeft,
   Boxes,
   CheckCircle2,
-  CircleSlash2,
-  Hash,
   KeyRound,
   Pencil,
   Plus,
@@ -17,7 +15,8 @@ import {
 
 import {
   EmptyState,
-  ErrorBanner,
+  Notice,
+  PageStack,
   SearchField,
   SectionCard,
   StatCard,
@@ -27,6 +26,7 @@ import { ProviderForm, type ProviderFormValues } from "@/components/models/Provi
 import { ProviderIcon } from "@/components/models/ProviderIcon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -51,7 +51,13 @@ type ModelModalState =
   | { mode: "edit"; model: ModelRow }
   | null;
 
-type Notice = { kind: "ok" | "error"; text: string } | null;
+type NoticeState = { kind: "ok" | "error"; text: string } | null;
+
+function keySourceLabel(source: ProviderRow["api_key_source"]) {
+  if (source === "stored") return "Key 已保存";
+  if (source === "env") return "Key 来自环境";
+  return "Key 未设置";
+}
 
 export default function ModelsPage({ refreshKey }: { refreshKey: number }) {
   const { data, loading, error, reload } = useApi<ModelsData>("/api/models", refreshKey);
@@ -61,7 +67,7 @@ export default function ModelsPage({ refreshKey }: { refreshKey: number }) {
   const [modelModal, setModelModal] = useState<ModelModalState>(null);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState("");
-  const [notice, setNotice] = useState<Notice>(null);
+  const [notice, setNotice] = useState<NoticeState>(null);
 
   const providers = data?.providers ?? [];
   const models = data?.models ?? [];
@@ -240,51 +246,45 @@ export default function ModelsPage({ refreshKey }: { refreshKey: number }) {
   }
 
   return (
-    <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
+    <PageStack error={error} loading={loading} hasData={!!data}>
       {notice ? (
-        <div
-          className={cn(
-            "flex items-start gap-2 rounded-xl border px-4 py-3 text-sm",
-            notice.kind === "ok"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-              : "border-red-200 bg-red-50 text-red-700"
-          )}
-        >
-          {notice.kind === "ok" ? (
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-          ) : (
-            <CircleSlash2 className="mt-0.5 h-4 w-4 shrink-0" />
-          )}
-          <span>{notice.text}</span>
-        </div>
+        <Notice tone={notice.kind === "ok" ? "success" : "danger"}>
+          {notice.text}
+        </Notice>
       ) : null}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           icon={Boxes}
           label="供应商"
           value={formatNumber(providers.length)}
-          hint={`${enabledProviders} 个已启用 · 端点与 key 配置`}
+          hint={`${enabledProviders} 个已启用`}
         />
         <StatCard
           icon={Server}
           label="模型总数"
           value={formatNumber(models.length)}
-          hint="SQLite 注册表"
+          hint={
+            models.length > enabledModels
+              ? `${models.length - enabledModels} 个已禁用`
+              : undefined
+          }
         />
         <StatCard
           icon={CheckCircle2}
           label="已启用"
           value={formatNumber(enabledModels)}
-          hint="可用于 /model 切换"
           tone="emerald"
         />
         <StatCard
           icon={Zap}
           label="当前模型"
           value={activeModel?.model_id ?? data?.active ?? "-"}
-          hint={activeModel ? activeModel.provider_display_name || activeModel.provider : "DSH route"}
+          hint={
+            activeModel
+              ? activeModel.provider_display_name || activeModel.provider
+              : undefined
+          }
         />
       </div>
 
@@ -311,7 +311,7 @@ export default function ModelsPage({ refreshKey }: { refreshKey: number }) {
         <SectionCard
           icon={Boxes}
           title="供应商"
-          description="先添加供应商，再进入供应商添加模型"
+          description="点进供应商即可管理其模型"
           badge={visibleProviders.length}
           actions={
             <div className="flex flex-wrap items-center gap-2">
@@ -346,7 +346,7 @@ export default function ModelsPage({ refreshKey }: { refreshKey: number }) {
             <EmptyState
               icon={Boxes}
               text={providers.length ? "没有匹配的供应商。" : "还没有供应商。"}
-              hint="添加供应商后，点进供应商卡片即可登记该供应商的模型。"
+              hint="添加供应商后，点进卡片即可登记其模型。"
             />
           )}
         </SectionCard>
@@ -376,7 +376,7 @@ export default function ModelsPage({ refreshKey }: { refreshKey: number }) {
           onSubmit={(values) => void submitModel(values)}
         />
       ) : null}
-    </div>
+    </PageStack>
   );
 }
 
@@ -391,14 +391,18 @@ function ProviderCard({
     <button
       type="button"
       onClick={onClick}
-      className="group flex h-full flex-col rounded-xl border border-blue-100 bg-white p-4 text-left transition-all hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md"
+      className="flex h-full flex-col rounded-xl border border-slate-200 bg-white p-4 text-left transition-colors hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-3">
-          <ProviderIcon provider={provider.provider} className="h-11 w-11" />
+          <ProviderIcon provider={provider.provider} className="h-10 w-10" />
           <div className="min-w-0">
-            <p className="truncate font-medium text-slate-800">{provider.display_name}</p>
-            <p className="mt-0.5 font-mono text-[11px] text-slate-400">{provider.provider}</p>
+            <p className="truncate text-sm font-semibold text-slate-800">
+              {provider.display_name}
+            </p>
+            <p className="mt-0.5 truncate font-mono text-xs text-slate-500">
+              {provider.provider}
+            </p>
           </div>
         </div>
         <Badge variant={provider.enabled ? "success" : "muted"}>
@@ -406,38 +410,21 @@ function ProviderCard({
         </Badge>
       </div>
 
-      <p className="mt-3 truncate font-mono text-[11px] text-slate-500" title={provider.base_url}>
+      <p className="mt-3 truncate font-mono text-xs text-slate-500" title={provider.base_url}>
         {provider.base_url || "未配置 base_url"}
       </p>
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
-        <Badge variant="outline" className="text-[10px]">
-          {provider.model_count} 个模型
-        </Badge>
-        <Badge
-          variant={provider.api_key_set ? "success" : "outline"}
-          className="text-[10px]"
-        >
+        <Badge variant="outline">{provider.model_count} 个模型</Badge>
+        <Badge variant={provider.api_key_set ? "success" : "outline"}>
           <KeyRound className="mr-1 h-3 w-3" />
-          {provider.api_key_source === "stored"
-            ? "Key 已保存"
-            : provider.api_key_source === "env"
-              ? "Key 已注入"
-              : "Key 未设置"}
+          {keySourceLabel(provider.api_key_source)}
         </Badge>
         {provider.active_model_id ? (
-          <Badge className="text-[10px]">当前 {provider.active_model_id}</Badge>
+          <Badge>当前 {provider.active_model_id}</Badge>
         ) : null}
-        {provider.builtin ? (
-          <Badge variant="outline" className="text-[10px]">
-            DSH 内置
-          </Badge>
-        ) : null}
+        {provider.builtin ? <Badge variant="outline">内置</Badge> : null}
       </div>
-
-      <span className="mt-3 text-[11px] font-medium text-blue-600 opacity-0 transition-opacity group-hover:opacity-100">
-        查看模型 →
-      </span>
     </button>
   );
 }
@@ -527,7 +514,7 @@ function ProviderDetail({
         description={`${provider.provider} · ${provider.api || "openai-completions"}`}
         badge={`${models.length} 个模型`}
       >
-        <div className="grid gap-px bg-blue-50 sm:grid-cols-3">
+        <div className="grid gap-3 p-4 sm:grid-cols-3">
           <Detail label="Base URL" mono>
             {provider.base_url || "-"}
           </Detail>
@@ -542,53 +529,33 @@ function ProviderDetail({
               }
             >
               <KeyRound className="mr-1 h-3 w-3" />
-              {provider.api_key_source === "stored"
-                ? "已保存到数据库"
-                : provider.api_key_source === "env"
-                  ? "已注入"
-                  : "未设置"}
+              {keySourceLabel(provider.api_key_source)}
             </Badge>
           </Detail>
-          <Detail label="更新">
-            {formatTs(provider.updated_at)}
-          </Detail>
+          <Detail label="更新">{formatTs(provider.updated_at)}</Detail>
         </div>
 
-        <div className="border-t border-blue-50 px-5 py-3 text-xs text-slate-500">
+        <p className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
           {provider.api_key_source === "stored"
-            ? "密钥保存在 models.db（文件权限 600），面板不回显；修改后机器人在下一轮消息自动重载。"
+            ? "密钥保存在服务端，面板不回显。"
             : provider.api_key_source === "env"
-              ? "密钥由运行环境注入；在“编辑供应商”里填写可改为数据库保存。"
-              : "在“编辑供应商”里填写 API Key。"}
-          {provider.builtin ? " 内置 provider 的协议由 DSH 固定。" : ""}
-        </div>
+              ? "密钥由运行环境注入，可在编辑里改为面板保存。"
+              : "尚未设置 API Key，在“编辑供应商”里填写。"}
+        </p>
       </SectionCard>
 
       {!provider.enabled ? (
-        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-          <CircleSlash2 className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>该供应商已禁用，其模型不会写入 DSH route；启用后才能切换过去。</span>
-        </div>
+        <Notice tone="warning">该供应商已禁用，其模型无法切换；启用后才能使用。</Notice>
       ) : null}
 
-      <SectionCard
-        icon={Boxes}
-        title="模型"
-        badge={models.length}
-        actions={
-          <Button size="sm" variant="outline" onClick={onAddModel} disabled={busy}>
-            <Plus className="h-4 w-4" />
-            添加模型
-          </Button>
-        }
-      >
+      <SectionCard icon={Boxes} title="模型" badge={models.length}>
         {models.length ? (
           <Table className="table-auto">
             <TableHeader>
               <TableRow>
                 <TableHead>模型</TableHead>
                 <TableHead className="text-right">上下文</TableHead>
-                <TableHead>Reasoning</TableHead>
+                <TableHead>推理强度</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -623,7 +590,7 @@ function ProviderDetail({
                           )
                         );
                         return (
-                          <select
+                          <Select
                             value={model.reasoning_effort}
                             onChange={(event) =>
                               onChangeReasoning(model, event.target.value)
@@ -631,10 +598,10 @@ function ProviderDetail({
                             disabled={busy || options.length === 0}
                             title={
                               options.length
-                                ? "修改默认 reasoning_effort"
-                                : "先在编辑里声明 Reasoning 档位"
+                                ? "修改默认推理强度"
+                                : "先在编辑里设置推理档位"
                             }
-                            className="h-8 rounded-md border border-blue-200 bg-white px-2 text-xs text-slate-700 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                            className="h-8 w-auto min-w-[6.5rem] text-xs"
                           >
                             <option value="">默认</option>
                             {options.map((effort) => (
@@ -642,7 +609,7 @@ function ProviderDetail({
                                 {effort}
                               </option>
                             ))}
-                          </select>
+                          </Select>
                         );
                       })()}
                     </TableCell>
@@ -714,7 +681,7 @@ function ProviderDetail({
           <EmptyState
             icon={Boxes}
             text="这个供应商还没有模型。"
-            hint="添加模型时填写模型 ID、上下文窗口和输出上限；连接信息继承供应商。"
+            hint="添加时填写模型 ID；连接信息继承供应商。"
           />
         )}
       </SectionCard>
@@ -732,12 +699,12 @@ function Detail({
   mono?: boolean;
 }) {
   return (
-    <div className="bg-white px-5 py-3">
-      <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</p>
+    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+      <p className="text-xs text-slate-500">{label}</p>
       <p
         className={cn(
-          "mt-1 break-all text-sm text-slate-800",
-          mono && "font-mono text-[11px]"
+          "mt-1 break-all text-sm text-slate-800 tabular-nums",
+          mono && "font-mono text-xs"
         )}
       >
         {children}

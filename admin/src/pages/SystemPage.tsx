@@ -1,8 +1,11 @@
-import { Clock, Database, Server, Settings2 } from "lucide-react";
+import { Clock, Database, Server, Settings2, Wifi } from "lucide-react";
 
 import {
-  ErrorBanner,
+  EmptyState,
+  InfoList,
   InfoRow,
+  Notice,
+  PageStack,
   SectionCard,
   StatCard,
 } from "@/components/common/Bits";
@@ -18,7 +21,6 @@ import {
 import type { SystemData } from "@/lib/analytics";
 import { formatBytes, formatDuration, formatTs } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
-import { cn } from "@/lib/utils";
 
 const DB_LABELS: Record<string, string> = {
   memory: "记忆 / 会话",
@@ -34,21 +36,32 @@ const DB_LABELS: Record<string, string> = {
 export default function SystemPage({ refreshKey }: { refreshKey: number }) {
   const { data, loading, error } = useApi<SystemData>("/api/system", refreshKey);
 
-  const totalSize = (data?.databases ?? []).reduce(
+  const databases = data?.databases ?? [];
+  const totalSize = databases.reduce(
     (sum, database) => sum + (database.size ?? 0),
     0
   );
+  const transport = data?.transport;
+  const qqValue = !data
+    ? "-"
+    : transport
+      ? transport.ready
+        ? "在线"
+        : "离线"
+      : "未检查";
 
   return (
-    <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
-      {data?.transport && !data.transport.ready ? <ErrorBanner message="QQ 消息链路不可用：进程运行不代表账号在线。检查 NapCat 登录状态，必要时重新扫码；单纯重启 bot 不能恢复失效登录。" /> : null}
-      <p className="text-sm text-muted-foreground">QQ 连接：{data?.transport?.ready ? "在线，状态探测通过" : data?.transport?.state || "尚未检查"}；就绪检查 /readyz，离线返回 503。</p>
+    <PageStack error={error} loading={loading} hasData={!!data}>
+      {transport && !transport.ready ? (
+        <Notice tone="danger">
+          QQ 消息链路不可用：进程运行不代表账号在线。检查 NapCat 登录状态，必要时重新扫码；单纯重启 bot 不能恢复失效登录。
+        </Notice>
+      ) : null}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           icon={Clock}
-          label="面板运行时长"
+          label="运行时长"
           value={data ? formatDuration(data.uptime_seconds) : "-"}
           hint={data ? `启动于 ${formatTs(data.started_at)}` : undefined}
         />
@@ -56,7 +69,7 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
           icon={Database}
           label="数据库总大小"
           value={data ? formatBytes(totalSize) : "-"}
-          hint={`${data?.databases.length ?? 0} 个 SQLite 文件`}
+          hint={`${databases.length} 个数据库`}
         />
         <StatCard
           icon={Server}
@@ -65,17 +78,16 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
           hint="只绑定本机，通过端口转发访问"
         />
         <StatCard
-          icon={Settings2}
-          label="DSH profile"
-          value={data?.dsh.profile ?? "-"}
-          hint={data?.dsh.image_mode ? `image_mode=${data.dsh.image_mode}` : undefined}
+          icon={Wifi}
+          label="QQ 链路"
+          value={qqValue}
+          tone={transport?.ready ? "emerald" : transport ? "red" : "slate"}
         />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-2">
-        <SectionCard icon={Server} title="管理面板" description="模型、审批与剧情可管理；密码来自 bot.env">
-          <div className="divide-y divide-blue-50">
-            <InfoRow label="监听" value={data ? `${data.admin.host}:${data.admin.port}` : "-"} mono />
+      <div className="grid gap-4 xl:grid-cols-2">
+        <SectionCard icon={Server} title="管理面板">
+          <InfoList>
             <InfoRow
               label="Session 有效期"
               value={data ? `${data.admin.session_hours} 小时` : "-"}
@@ -90,16 +102,12 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
                 )
               }
             />
-            <InfoRow label="静态文件" value={data?.static_dir || "-"} mono />
-            <InfoRow label="Python" value={data?.python ?? "-"} />
-          </div>
+          </InfoList>
         </SectionCard>
 
-        <SectionCard icon={Settings2} title="DSH 与数据保留" description="运行时路径与清理策略">
-          <div className="divide-y divide-blue-50">
+        <SectionCard icon={Settings2} title="DSH 与数据保留">
+          <InfoList>
             <InfoRow label="profile" value={data?.dsh.profile ?? "-"} />
-            <InfoRow label="home" value={data?.dsh.home ?? "-"} mono />
-            <InfoRow label="workspace" value={data?.dsh.workspace ?? "-"} mono />
             <InfoRow label="图片模式" value={data?.dsh.image_mode || "-"} />
             <InfoRow
               label="用量保留"
@@ -109,52 +117,44 @@ export default function SystemPage({ refreshKey }: { refreshKey: number }) {
               label="事件保留"
               value={data ? `${data.usage.event_retention_days} 天` : "-"}
             />
-          </div>
+          </InfoList>
         </SectionCard>
       </div>
 
-      <SectionCard
-        icon={Database}
-        title="数据库"
-        description="面板读取的 SQLite 文件；文件大小取自面板进程可见的路径"
-        badge={data?.databases.length ?? 0}
-      >
-        <Table className="min-w-[720px]">
-          <TableHeader>
-            <TableRow>
-              <TableHead>数据库</TableHead>
-              <TableHead>路径</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead className="text-right">大小</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {(data?.databases ?? []).map((database) => (
-              <TableRow key={database.key}>
-                <TableCell>
-                  <div className="font-medium text-slate-800">
-                    {DB_LABELS[database.key] || database.key}
-                  </div>
-                  <div className="font-mono text-[11px] text-slate-400">{database.key}.db</div>
-                </TableCell>
-                <TableCell className="max-w-[26rem] truncate font-mono text-[11px] text-slate-500" title={database.path}>
-                  {database.path}
-                </TableCell>
-                <TableCell>
-                  {database.exists ? (
-                    <Badge variant="success">可用</Badge>
-                  ) : (
-                    <Badge variant="muted">未创建</Badge>
-                  )}
-                </TableCell>
-                <TableCell className="text-right text-xs tabular-nums">
-                  {database.exists ? formatBytes(database.size) : "-"}
-                </TableCell>
+      <SectionCard icon={Database} title="数据库" badge={databases.length}>
+        {databases.length ? (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>数据库</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead className="text-right">大小</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {databases.map((database) => (
+                <TableRow key={database.key}>
+                  <TableCell className="font-medium text-slate-800">
+                    {DB_LABELS[database.key] || database.key}
+                  </TableCell>
+                  <TableCell>
+                    {database.exists ? (
+                      <Badge variant="success">可用</Badge>
+                    ) : (
+                      <Badge variant="muted">未创建</Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right text-xs tabular-nums">
+                    {database.exists ? formatBytes(database.size) : "-"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <EmptyState icon={Database} text="暂无数据库信息" />
+        )}
       </SectionCard>
-    </div>
+    </PageStack>
   );
 }

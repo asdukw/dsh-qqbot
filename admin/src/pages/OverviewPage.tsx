@@ -3,20 +3,21 @@ import {
   AlertTriangle,
   Bot,
   CalendarClock,
-  CreditCard,
+  LayoutDashboard,
   MessageSquare,
   MessagesSquare,
   Rss,
-  Smile,
   Zap,
 } from "lucide-react";
 
 import {
   EmptyState,
-  ErrorBanner,
   InfoRow,
+  LoadingHint,
+  PageStack,
   PillTabs,
   SectionCard,
+  SectionHeading,
   StatCard,
 } from "@/components/common/Bits";
 import TrendChart from "@/components/common/TrendChart";
@@ -26,7 +27,6 @@ import { useApi } from "@/lib/useApi";
 import type { OverviewData } from "@/lib/analytics";
 import { formatCompact, formatNumber, formatTs } from "@/lib/format";
 import type { RouteId } from "@/lib/router";
-import { cn } from "@/lib/utils";
 
 function Sparkline({ values }: { values: number[] }) {
   const width = 220;
@@ -45,16 +45,16 @@ function Sparkline({ values }: { values: number[] }) {
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="h-12 w-full" aria-hidden="true">
-      <path d={area} fill="#2563eb" fillOpacity={0.1} />
+      <path d={area} fill="var(--chart-2)" fillOpacity={0.1} />
       <polyline
         points={points.join(" ")}
         fill="none"
-        stroke="#2563eb"
+        stroke="var(--chart-2)"
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <circle cx={lastX} cy={lastY} r={3.5} fill="#2563eb" stroke="#ffffff" strokeWidth={2} />
+      <circle cx={lastX} cy={lastY} r={3.5} fill="var(--chart-2)" stroke="#ffffff" strokeWidth={2} />
     </svg>
   );
 }
@@ -74,14 +74,17 @@ export default function OverviewPage({
 
   if (!data) {
     return (
-      <>
-        {error ? <ErrorBanner message={error} /> : null}
+      <PageStack error={error} loading={loading} hasData={!!data}>
         <Card>
-          <CardContent className="flex h-40 items-center justify-center text-sm text-muted-foreground">
-            {loading ? "正在加载仪表盘…" : "没有仪表盘数据。"}
-          </CardContent>
+          <div className="flex h-40 items-center justify-center">
+            {loading ? (
+              <LoadingHint loading label="正在加载仪表盘…" />
+            ) : (
+              <EmptyState icon={LayoutDashboard} text="没有仪表盘数据。" />
+            )}
+          </div>
         </Card>
-      </>
+      </PageStack>
     );
   }
 
@@ -94,21 +97,19 @@ export default function OverviewPage({
   const spark = data.trend.slice(-7).map((point) => point.messages);
 
   return (
-    <div className={cn("space-y-6", loading && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
-
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Card className="overflow-hidden border-blue-100 bg-gradient-to-br from-white via-white to-blue-50/70 md:col-span-2 xl:col-span-2">
+    <PageStack error={error} loading={loading} hasData={!!data}>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Card className="overflow-hidden sm:col-span-2">
           <CardContent className="p-5">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
                   今日消息
                 </p>
-                <p className="mt-1 text-5xl font-semibold tracking-tight text-slate-900">
+                <p className="mt-1 text-5xl font-semibold tracking-tight text-slate-900 tabular-nums">
                   {formatNumber(today.messages)}
                 </p>
-                <p className="mt-1 text-xs text-muted-foreground">
+                <p className="mt-1 text-xs text-slate-500">
                   较昨日 {delta >= 0 ? "+" : ""}
                   {formatNumber(delta)} · {formatNumber(today.conversations)} 个会话
                 </p>
@@ -151,99 +152,81 @@ export default function OverviewPage({
           tone={counts.feeds.errors ? "red" : "blue"}
           onClick={() => onNavigate("feeds")}
         />
-        <StatCard
-          icon={Smile}
-          label="表情库"
-          value={formatNumber(counts.stickers.total)}
-          hint={`${formatNumber(counts.stickers.banned)} 张禁用`}
-          onClick={() => onNavigate("stickers")}
-        />
-        <StatCard
-          icon={CreditCard}
-          label="角色卡"
-          value={formatNumber(counts.cards.total)}
-          hint={`当前 ${data.active_card}`}
-          onClick={() => onNavigate("cards")}
-        />
       </div>
 
       <section className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold text-slate-800">趋势</h2>
-            <p className="text-xs text-muted-foreground">
-              按自然日统计，时区 Asia/Shanghai
-            </p>
-          </div>
-          <PillTabs
-            value={days}
-            options={[
-              { value: 7, label: "7 天" },
-              { value: 30, label: "30 天" },
-            ]}
-            onChange={setDays}
-          />
-        </div>
+        <SectionHeading
+          title="趋势"
+          description="按自然日统计"
+          actions={
+            <PillTabs
+              value={days}
+              label="统计范围"
+              options={[
+                { value: 7, label: "7 天" },
+                { value: 30, label: "30 天" },
+              ]}
+              onChange={setDays}
+            />
+          }
+        />
         <div className="grid gap-4 xl:grid-cols-2">
-          <TrendChart
-            title="消息量"
-            description="群聊与私聊的入站消息"
-            data={messageTrend}
-          />
+          <TrendChart title="消息量" description="入站消息" data={messageTrend} />
           <TrendChart
             title="Token 用量"
-            description="主会话、压缩与辅助调用"
+            description="模型调用消耗"
             data={tokenTrend}
             formatValue={formatCompact}
           />
         </div>
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-[1.25fr_1fr]">
+      <div className="grid gap-5 xl:grid-cols-[1.25fr_1fr]">
         <SectionCard
           icon={AlertTriangle}
           title="需要关注"
-          description="订阅抓取失败会显示在这里"
+          description="订阅拉取失败"
           badge={data.alerts.length}
         >
           {data.alerts.length ? (
-            <div className="divide-y divide-blue-50">
+            <div className="divide-y divide-slate-100">
               {data.alerts.map((alert) => (
                 <button
                   key={`${alert.kind}-${alert.id}`}
                   type="button"
                   onClick={() => onNavigate("feeds")}
-                  className="flex w-full items-start justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-blue-50/50"
+                  className="flex w-full items-start justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-slate-50"
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <Badge variant="destructive">
                         <AlertTriangle className="mr-1 h-3 w-3" /> 订阅异常
                       </Badge>
-                      <span className="truncate text-sm font-medium text-slate-800">
+                      <span className="truncate text-sm font-medium text-slate-900">
                         {alert.title}
                       </span>
                     </div>
                     <p className="mt-1 line-clamp-2 text-xs text-red-600">{alert.detail}</p>
                   </div>
-                  <span className="shrink-0 text-xs text-slate-400">{formatTs(alert.at)}</span>
+                  <span className="shrink-0 text-xs text-slate-500 tabular-nums">
+                    {formatTs(alert.at)}
+                  </span>
                 </button>
               ))}
             </div>
           ) : (
             <EmptyState
               icon={AlertTriangle}
-              text="没有需要关注的异常。"
-              hint="订阅拉取失败时，错误信息会出现在这里。"
+              text="暂无异常"
+              hint="订阅拉取失败时会显示在这里。"
             />
           )}
         </SectionCard>
 
-        <SectionCard icon={Bot} title="当前配置" description="DSH route 与激活角色卡">
-          <div className="divide-y divide-blue-50">
+        <SectionCard icon={Bot} title="当前配置">
+          <div className="divide-y divide-slate-100">
             <InfoRow label="当前模型" value={data.active_model} mono />
             <InfoRow label="当前角色卡" value={data.active_card} />
-            <InfoRow label="数据时间" value={formatTs(data.generated_at)} />
           </div>
         </SectionCard>
       </div>
@@ -251,20 +234,20 @@ export default function OverviewPage({
       <SectionCard
         icon={MessageSquare}
         title="最近消息"
-        description="chat_events 中最新的入站消息"
+        description="最新入站消息"
         badge={data.recent_messages.length}
         actions={
           <button
             type="button"
-            onClick={() => onNavigate("usage")}
+            onClick={() => onNavigate("insights")}
             className="text-xs font-medium text-blue-600 hover:text-blue-700"
           >
-            查看用量 →
+            查看聊天分析 →
           </button>
         }
       >
         {data.recent_messages.length ? (
-          <div className="divide-y divide-blue-50">
+          <div className="divide-y divide-slate-100">
             {data.recent_messages.map((message, index) => (
               <div
                 key={`${message.conversation_id}-${message.created_at}-${index}`}
@@ -275,15 +258,15 @@ export default function OverviewPage({
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                    <span className="truncate text-sm font-medium text-slate-800">
+                    <span className="truncate text-sm font-medium text-slate-900">
                       {message.sender_name || "未知"}
                     </span>
-                    <span className="text-xs text-muted-foreground">{message.label}</span>
-                    <span className="ml-auto text-[11px] text-slate-400">
+                    <span className="text-xs text-slate-500">{message.label}</span>
+                    <span className="ml-auto text-xs text-slate-500 tabular-nums">
                       {formatTs(message.created_at)}
                     </span>
                   </div>
-                  <p className="mt-0.5 line-clamp-1 text-xs text-slate-600" title={message.text}>
+                  <p className="mt-0.5 line-clamp-1 text-xs text-slate-500" title={message.text}>
                     {message.text || "（无文本）"}
                   </p>
                 </div>
@@ -291,9 +274,9 @@ export default function OverviewPage({
             ))}
           </div>
         ) : (
-          <EmptyState icon={MessageSquare} text="还没有聊天记录。" />
+          <EmptyState icon={MessageSquare} text="暂无消息" />
         )}
       </SectionCard>
-    </div>
+    </PageStack>
   );
 }

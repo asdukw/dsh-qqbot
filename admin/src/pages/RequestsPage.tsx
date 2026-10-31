@@ -3,7 +3,6 @@ import {
   Check,
   Clock,
   Inbox,
-  ShieldCheck,
   UserCheck,
   UserPlus,
   Users,
@@ -12,7 +11,10 @@ import {
 
 import {
   EmptyState,
-  ErrorBanner,
+  FilterBar,
+  LoadingHint,
+  Notice,
+  PageStack,
   PillTabs,
   SectionCard,
   StatCard,
@@ -31,11 +33,10 @@ import type { ApprovalRow, ApprovalsData } from "@/lib/analytics";
 import { requestJson } from "@/lib/api";
 import { formatNumber, formatTs } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
-import { cn } from "@/lib/utils";
 
 type Filter = "active" | "all";
 
-type Notice = { kind: "ok" | "error"; text: string } | null;
+type Result = { kind: "ok" | "error"; text: string } | null;
 
 const KIND_LABEL: Record<ApprovalRow["kind"], string> = {
   friend: "好友请求",
@@ -104,7 +105,7 @@ export default function RequestsPage({ refreshKey }: { refreshKey: number }) {
   );
   const [filter, setFilter] = useState<Filter>("active");
   const [busyId, setBusyId] = useState<number | null>(null);
-  const [notice, setNotice] = useState<Notice>(null);
+  const [notice, setNotice] = useState<Result>(null);
 
   const all = data?.requests ?? [];
   const active = useMemo(() => all.filter(isActive), [all]);
@@ -149,46 +150,35 @@ export default function RequestsPage({ refreshKey }: { refreshKey: number }) {
   }
 
   return (
-    <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
+    <PageStack error={error} loading={loading} hasData={!!data}>
       {data && !data.enabled ? (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          审批功能未启用（`[approvals] enabled = false`），收到的新请求不会入库。
-        </div>
+        <Notice tone="warning">
+          审批功能未启用，收到的新请求不会入库。
+        </Notice>
       ) : null}
       {notice ? (
-        <div
-          className={cn(
-            "flex items-start gap-2 rounded-xl border px-4 py-3 text-sm",
-            notice.kind === "ok"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-              : "border-red-200 bg-red-50 text-red-700"
-          )}
-        >
-          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{notice.text}</span>
-        </div>
+        <Notice tone={notice.kind === "ok" ? "success" : "danger"}>{notice.text}</Notice>
       ) : null}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           icon={Inbox}
           label="待处理"
           value={formatNumber(active.length)}
-          hint="好友 / 群邀请 / 入群申请"
           tone={active.length ? "amber" : "blue"}
         />
-        <StatCard icon={Clock} label="今日新增" value={formatNumber(todayCount)} hint="按北京时间自然日" />
-        <StatCard icon={Check} label="已同意" value={formatNumber(approved)} hint="由 bot 通过 NapCat 执行" tone="emerald" />
-        <StatCard icon={X} label="已拒绝" value={formatNumber(rejected)} hint="管理员拒绝的请求" tone="slate" />
+        <StatCard icon={Clock} label="今日新增" value={formatNumber(todayCount)} hint="北京时间自然日" />
+        <StatCard icon={Check} label="已同意" value={formatNumber(approved)} tone="emerald" />
+        <StatCard icon={X} label="已拒绝" value={formatNumber(rejected)} tone="slate" />
       </div>
 
       <SectionCard
         icon={UserCheck}
         title="请求列表"
-        description="NapCat 通过 OneBot 11 request 事件推送；同意或拒绝后由 bot 在几秒内执行"
+        description="同意或拒绝后由 bot 在几秒内执行"
         badge={rows.length}
-        actions={
+      >
+        <FilterBar>
           <PillTabs
             value={filter}
             options={[
@@ -196,11 +186,14 @@ export default function RequestsPage({ refreshKey }: { refreshKey: number }) {
               { value: "all", label: "全部" },
             ]}
             onChange={setFilter}
+            label="请求筛选"
           />
-        }
-      >
+        </FilterBar>
+
         {loading && !data ? (
-          <div className="px-5 py-12 text-center text-sm text-slate-400">加载中…</div>
+          <div className="flex justify-center px-5 py-10">
+            <LoadingHint loading />
+          </div>
         ) : rows.length ? (
           <Table className="min-w-[960px]">
             <TableHeader>
@@ -297,6 +290,6 @@ export default function RequestsPage({ refreshKey }: { refreshKey: number }) {
           />
         )}
       </SectionCard>
-    </div>
+    </PageStack>
   );
 }

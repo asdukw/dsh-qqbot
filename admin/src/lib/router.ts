@@ -3,6 +3,7 @@ import type { ComponentType } from "react";
 import {
   Activity,
   AudioLines,
+  BookOpen,
   CalendarClock,
   CreditCard,
   LayoutDashboard,
@@ -45,13 +46,13 @@ export const ROUTES: RouteMeta[] = [
   {
     id: "overview",
     label: "仪表盘",
-    description: "运行概览、今日趋势与需要关注的问题",
+    description: "运行状态、趋势与需要留意的问题",
     icon: LayoutDashboard,
   },
   {
     id: "insights",
     label: "聊天分析",
-    description: "今天的发言排行、词云与会话分布",
+    description: "发言排行、会话分布与词云",
     icon: Sparkles,
   },
   {
@@ -63,22 +64,22 @@ export const ROUTES: RouteMeta[] = [
   {
     id: "tasks",
     label: "定时任务",
-    description: "按群 / 私聊执行的定时消息与运行记录",
+    description: "定时消息与运行记录",
     icon: CalendarClock,
   },
   {
     id: "feeds",
     label: "订阅推送",
-    description: "B 站动态与通用 RSS / Atom 订阅",
+    description: "B 站动态与 RSS / Atom 订阅",
     icon: Rss,
   },
   {
     id: "models",
     label: "模型",
-    description: "供应商、SQLite 模型注册表与当前 DSH route",
+    description: "供应商、模型注册表与当前 route",
     icon: Server,
   },
-  { id: "story", label: "剧情与关系", description: "个人剧情、关系存档与投递恢复", icon: Sparkles },
+  { id: "story", label: "剧情与关系", description: "剧情存档、世界包与生成状态", icon: BookOpen },
   {
     id: "cards",
     label: "角色卡",
@@ -94,7 +95,7 @@ export const ROUTES: RouteMeta[] = [
   {
     id: "voice",
     label: "音色",
-    description: "TTS 音色目录、试听与在线切换",
+    description: "TTS 音色试听与在线切换",
     icon: AudioLines,
   },
   {
@@ -103,7 +104,7 @@ export const ROUTES: RouteMeta[] = [
     description: "主会话与辅助调用的 token 账本",
     icon: Activity,
   },
-  { id: "video-credentials", label: "视频凭据", description: "B站与抖音 Cookie 管理", icon: Settings2 },
+  { id: "video-credentials", label: "视频凭据", description: "B 站与抖音 Cookie 管理", icon: Settings2 },
   {
     id: "system",
     label: "系统状态",
@@ -115,8 +116,7 @@ export const ROUTES: RouteMeta[] = [
 const ROUTE_MAP = new Map(ROUTES.map((route) => [route.id, route]));
 
 export const NAV_GROUPS: NavGroup[] = [
-  { label: "概览", items: [ROUTE_MAP.get("overview")!] },
-  { label: "对话", items: [ROUTE_MAP.get("insights")!] },
+  { label: "概览", items: [ROUTE_MAP.get("overview")!, ROUTE_MAP.get("insights")!] },
   { label: "自动化", items: [ROUTE_MAP.get("requests")!, ROUTE_MAP.get("tasks")!, ROUTE_MAP.get("feeds")!] },
   { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("story")!, ROUTE_MAP.get("stickers")!, ROUTE_MAP.get("voice")!] },
   { label: "用量", items: [ROUTE_MAP.get("usage")!] },

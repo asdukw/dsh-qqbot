@@ -3,13 +3,14 @@ import {
   AlertTriangle,
   CheckCircle2,
   PauseCircle,
-  Radio,
   Rss,
 } from "lucide-react";
 
 import {
   EmptyState,
-  ErrorBanner,
+  FilterBar,
+  LoadingHint,
+  PageStack,
   PillTabs,
   SearchField,
   SectionCard,
@@ -27,7 +28,6 @@ import {
 import type { FeedsData } from "@/lib/analytics";
 import { formatNumber, formatTs, targetLabel } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
-import { cn } from "@/lib/utils";
 
 type FeedFilter = "all" | "errors" | "disabled";
 
@@ -51,23 +51,18 @@ export default function FeedsPage({ refreshKey }: { refreshKey: number }) {
 
   const all = data?.feeds ?? [];
   const enabled = all.filter((feed) => feed.enabled).length;
-  const seen = all.reduce((sum, feed) => sum + feed.seen_count, 0);
 
   return (
-    <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <PageStack error={error} loading={loading} hasData={!!data}>
+      <div className="grid gap-3 sm:grid-cols-3">
         <StatCard icon={Rss} label="订阅总数" value={formatNumber(all.length)} hint="B 站动态与 RSS/Atom" />
-        <StatCard icon={CheckCircle2} label="已启用" value={formatNumber(enabled)} hint="调度器会轮询" tone="emerald" />
+        <StatCard icon={CheckCircle2} label="已启用" value={formatNumber(enabled)} hint="持续推送" tone="emerald" />
         <StatCard
           icon={AlertTriangle}
           label="抓取异常"
           value={formatNumber(data?.errors)}
-          hint="last_error 非空"
           tone={data?.errors ? "red" : "slate"}
         />
-        <StatCard icon={Radio} label="已见条目" value={formatNumber(seen)} hint="所有订阅的 seen 去重集合" />
       </div>
 
       <SectionCard
@@ -76,28 +71,30 @@ export default function FeedsPage({ refreshKey }: { refreshKey: number }) {
         description="每个订阅绑定创建时的群或私聊"
         badge={rows.length}
       >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-50 p-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <PillTabs
-              value={filter}
-              options={[
-                { value: "all", label: "全部" },
-                { value: "errors", label: "异常" },
-                { value: "disabled", label: "已停用" },
-              ]}
-              onChange={setFilter}
-            />
-            <SearchField
-              value={search}
-              onChange={setSearch}
-              placeholder="搜索标题、URL 或目标…"
-              className="w-64"
-            />
-          </div>
-          {loading ? <span className="text-xs text-slate-500">加载中…</span> : null}
-        </div>
+        <FilterBar>
+          <PillTabs
+            value={filter}
+            options={[
+              { value: "all", label: "全部" },
+              { value: "errors", label: "异常" },
+              { value: "disabled", label: "已停用" },
+            ]}
+            onChange={setFilter}
+            label="订阅筛选"
+          />
+          <SearchField
+            value={search}
+            onChange={setSearch}
+            placeholder="搜索标题、URL 或目标…"
+            className="w-64"
+          />
+        </FilterBar>
 
-        {rows.length ? (
+        {loading && !data ? (
+          <div className="flex justify-center px-5 py-10">
+            <LoadingHint loading />
+          </div>
+        ) : rows.length ? (
           <Table className="min-w-[900px]">
             <TableHeader>
               <TableRow>
@@ -145,7 +142,7 @@ export default function FeedsPage({ refreshKey }: { refreshKey: number }) {
                   <TableCell className="text-right text-xs tabular-nums">
                     {formatNumber(feed.seen_count)}
                   </TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-slate-500">
+                  <TableCell className="whitespace-nowrap text-xs text-slate-500 tabular-nums">
                     {formatTs(feed.last_check)}
                   </TableCell>
                   <TableCell className="max-w-[16rem]">
@@ -165,10 +162,10 @@ export default function FeedsPage({ refreshKey }: { refreshKey: number }) {
           <EmptyState
             icon={Rss}
             text="没有匹配的订阅。"
-            hint="在群里或私聊发送 /sub add <B站UID|空间链接|RSS> 即可添加。"
+            hint="在群聊或私聊发送 /sub add <B站UID|空间链接|RSS> 即可添加。"
           />
         )}
       </SectionCard>
-    </div>
+    </PageStack>
   );
 }

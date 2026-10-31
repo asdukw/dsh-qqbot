@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { AlertTriangle, RefreshCw, ShieldCheck, Waves } from "lucide-react";
+import { RefreshCw, ShieldCheck, Waves } from "lucide-react";
 
 import AppShell from "@/components/layout/AppShell";
+import { Notice } from "@/components/common/Bits";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -12,10 +13,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
 import { requestJson, setUnauthorizedHandler, Unauthorized } from "@/lib/api";
 import { useHashRoute, type RouteId } from "@/lib/router";
-import StoryPage from "@/pages/StoryPage";
 import CardsPage from "@/pages/CardsPage";
 import FeedsPage from "@/pages/FeedsPage";
 import InsightsPage from "@/pages/InsightsPage";
@@ -23,6 +22,7 @@ import ModelsPage from "@/pages/ModelsPage";
 import OverviewPage from "@/pages/OverviewPage";
 import RequestsPage from "@/pages/RequestsPage";
 import StickersPage from "@/pages/StickersPage";
+import StoryPage from "@/pages/StoryPage";
 import SystemPage from "@/pages/SystemPage";
 import TasksPage from "@/pages/TasksPage";
 import UsagePage from "@/pages/UsagePage";
@@ -30,6 +30,10 @@ import VideoCredentialsPage from "@/pages/VideoCredentialsPage";
 import VoicePage from "@/pages/VoicePage";
 
 type View = "loading" | "login" | "ready";
+
+function nowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
 
 function LoginScreen({
   password,
@@ -45,23 +49,20 @@ function LoginScreen({
   onSubmit: (event: FormEvent) => void;
 }) {
   return (
-    <div className="relative min-h-screen overflow-hidden bg-canvas">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_8%,rgba(59,130,246,0.18),transparent_34%),radial-gradient(circle_at_82%_92%,rgba(147,197,253,0.28),transparent_42%)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(37,99,235,0.06)_1px,transparent_1px),linear-gradient(to_bottom,rgba(37,99,235,0.06)_1px,transparent_1px)] [background-size:48px_48px] [mask-image:radial-gradient(ellipse_at_center,black,transparent_70%)]" />
-      <div className="relative flex min-h-screen items-center justify-center p-4">
-        <Card className="w-full max-w-sm bg-white/95 backdrop-blur">
-          <CardHeader className="items-center pb-2 text-center">
-            <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/25">
-              <Waves className="h-7 w-7" />
-            </div>
-            <CardTitle className="text-xl">大肥鱼 Admin</CardTitle>
-            <CardDescription>QQ bot 运行面板 · 模型/审批可管理</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <form className="space-y-3" onSubmit={onSubmit}>
-              <label className="text-sm font-medium text-slate-700" htmlFor="password">
-                管理员密码
-              </label>
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-canvas p-4">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(59,130,246,0.10),transparent_38%),radial-gradient(circle_at_80%_90%,rgba(147,197,253,0.18),transparent_42%)]" />
+      <Card className="relative w-full max-w-sm">
+        <CardHeader className="items-center gap-1 pb-4 text-center">
+          <span className="mb-2 flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/25">
+            <Waves className="h-6 w-6" />
+          </span>
+          <CardTitle className="text-lg">大肥鱼 Admin</CardTitle>
+          <CardDescription>QQ bot 运行面板</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <form className="space-y-3" onSubmit={onSubmit}>
+            <label className="block space-y-1.5 text-sm font-medium text-slate-700" htmlFor="password">
+              管理员密码
               <Input
                 id="password"
                 type="password"
@@ -71,31 +72,20 @@ function LoginScreen({
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
-              {error ? (
-                <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{error}</span>
-                </div>
-              ) : null}
-              <Button className="w-full" type="submit" disabled={busy || !password}>
-                {busy ? (
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                ) : (
-                  <ShieldCheck className="h-4 w-4" />
-                )}
-                {busy ? "登录中…" : "登录"}
-              </Button>
-            </form>
-            <Separator />
-            <p className="text-center text-xs text-muted-foreground">
-              仪表盘 · 会话 · 自动化 · 内容 · 用量
-            </p>
-            <p className="text-center text-[11px] text-slate-400">
-              仅限本机 / 白名单访问 · 密码来自 bot.env
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+            </label>
+            {error ? <Notice tone="danger">{error}</Notice> : null}
+            <Button className="w-full" type="submit" disabled={busy || !password}>
+              {busy ? (
+                <RefreshCw className="h-4 w-4 animate-spin" />
+              ) : (
+                <ShieldCheck className="h-4 w-4" />
+              )}
+              {busy ? "登录中…" : "登录"}
+            </Button>
+          </form>
+          <p className="text-center text-[11px] text-slate-400">仅限本机或白名单地址访问</p>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -146,6 +136,7 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const { route, navigate } = useHashRoute();
 
   useEffect(() => {
@@ -175,14 +166,19 @@ export default function App() {
 
   useEffect(() => {
     if (view !== "ready") return;
-    const timer = window.setInterval(() => setRefreshKey((value) => value + 1), 60_000);
+    setLastUpdated(nowSeconds());
+    const timer = window.setInterval(() => {
+      setRefreshKey((value) => value + 1);
+      setLastUpdated(nowSeconds());
+    }, 60_000);
     return () => window.clearInterval(timer);
   }, [view]);
 
   const refresh = useCallback(() => {
     setRefreshing(true);
     setRefreshKey((value) => value + 1);
-    window.setTimeout(() => setRefreshing(false), 700);
+    setLastUpdated(nowSeconds());
+    window.setTimeout(() => setRefreshing(false), 600);
   }, []);
 
   async function handleLogin(event: FormEvent) {
@@ -197,6 +193,7 @@ export default function App() {
       });
       setPassword("");
       setRefreshKey((value) => value + 1);
+      setLastUpdated(nowSeconds());
       setView("ready");
     } catch (err) {
       if (err instanceof Unauthorized) {
@@ -215,6 +212,7 @@ export default function App() {
     );
     setView("login");
     setPassword("");
+    setLastUpdated(null);
   }
 
   if (view === "loading") {
@@ -245,6 +243,7 @@ export default function App() {
       onRefresh={refresh}
       onLogout={() => void handleLogout()}
       refreshing={refreshing}
+      lastUpdated={lastUpdated}
     >
       <Page route={route} refreshKey={refreshKey} navigate={navigate} />
     </AppShell>

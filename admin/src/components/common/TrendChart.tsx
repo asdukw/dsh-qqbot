@@ -2,13 +2,15 @@ import { useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { BarChart3, Table2 } from "lucide-react";
 
+import { EmptyState, SectionCard } from "@/components/common/Bits";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { formatCompact, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -44,7 +46,7 @@ export default function TrendChart({
   title,
   description,
   data,
-  color = "#2563eb",
+  color = "var(--chart-2)",
   formatValue = formatNumber,
   unit = "",
 }: {
@@ -96,25 +98,26 @@ export default function TrendChart({
   }
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="flex-row flex-wrap items-start justify-between gap-3 space-y-0 border-b border-blue-50 pb-4">
-        <div>
-          <CardTitle>{title}</CardTitle>
-          {description ? <CardDescription className="mt-1">{description}</CardDescription> : null}
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="text-sm font-semibold text-slate-900">
+    <SectionCard
+      title={title}
+      description={description}
+      contentClassName="p-4"
+      actions={
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm font-semibold tabular-nums text-slate-900">
             {last ? `${formatValue(last.value)}${unit}` : "-"}
           </span>
-          <div className="flex rounded-lg border border-blue-200 bg-white p-0.5">
+          <div className="flex rounded-lg border border-slate-200 bg-white p-0.5">
             <button
               type="button"
               onClick={() => setMode("chart")}
               aria-pressed={mode === "chart"}
               title="图表"
               className={cn(
-                "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium",
-                mode === "chart" ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-blue-50"
+                "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors",
+                mode === "chart"
+                  ? "bg-primary text-white shadow-sm"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-800"
               )}
             >
               <BarChart3 className="h-3.5 w-3.5" />
@@ -126,8 +129,10 @@ export default function TrendChart({
               aria-pressed={mode === "table"}
               title="表格"
               className={cn(
-                "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium",
-                mode === "table" ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-blue-50"
+                "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors",
+                mode === "table"
+                  ? "bg-primary text-white shadow-sm"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-800"
               )}
             >
               <Table2 className="h-3.5 w-3.5" />
@@ -135,171 +140,155 @@ export default function TrendChart({
             </button>
           </div>
         </div>
-      </CardHeader>
-      <CardContent className="p-4">
-        {!data.length ? (
-          <div className="flex h-52 items-center justify-center text-sm text-muted-foreground">
-            还没有数据。
-          </div>
-        ) : mode === "table" ? (
-          <div className="max-h-[248px] overflow-auto rounded-lg border border-blue-100">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-white">
-                <tr className="border-b border-blue-100 text-left text-xs text-slate-500">
-                  <th className="px-3 py-2 font-medium">日期</th>
-                  <th className="px-3 py-2 text-right font-medium">{title}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.map((point) => (
-                  <tr key={point.day} className="border-b border-blue-50 last:border-0">
-                    <td className="px-3 py-2 text-xs text-slate-600">{point.day}</td>
-                    <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-800">
-                      {formatValue(point.value)}
-                      {unit}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="relative">
-            <svg
-              viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-              className="h-auto w-full rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-              role="img"
-              aria-label={`${title}趋势，${data[0]?.day} 至 ${last?.day}`}
-              tabIndex={0}
-              onKeyDown={handleKey}
-              onBlur={() => setHover(null)}
-            >
-              <title>{`${title}：${data[0]?.day} 至 ${last?.day}`}</title>
-              {[0, 0.5, 1].map((ratio) => {
-                const value = max * ratio;
-                const y = yFor(value);
-                return (
-                  <g key={ratio}>
-                    <line
-                      x1={PAD.left}
-                      x2={PAD.left + PLOT_W}
-                      y1={y}
-                      y2={y}
-                      stroke="#e2e8f0"
-                      strokeWidth={1}
-                    />
-                    <text
-                      x={PAD.left - 10}
-                      y={y + 3.5}
-                      textAnchor="end"
-                      className="fill-slate-400 tabular-nums"
-                      fontSize={10}
-                    >
-                      {formatCompact(value)}
-                    </text>
-                  </g>
-                );
-              })}
-
-              <path d={area} fill={color} fillOpacity={0.1} />
-              <path
-                d={line}
-                fill="none"
-                stroke={color}
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-
-              {tickIndices(data.length).map((index) => (
-                <text
-                  key={data[index].day}
-                  x={xFor(index)}
-                  y={HEIGHT - 8}
-                  textAnchor="middle"
-                  className="fill-slate-400 tabular-nums"
-                  fontSize={10}
-                >
-                  {dayLabel(data[index].day)}
-                </text>
+      }
+    >
+      {!data.length ? (
+        <EmptyState icon={BarChart3} text="还没有数据" />
+      ) : mode === "table" ? (
+        <div className="max-h-[248px] overflow-auto rounded-xl border border-slate-200">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>日期</TableHead>
+                <TableHead className="text-right">{title}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.map((point) => (
+                <TableRow key={point.day}>
+                  <TableCell className="whitespace-nowrap text-xs tabular-nums text-slate-600">
+                    {point.day}
+                  </TableCell>
+                  <TableCell className="text-right text-xs tabular-nums text-slate-800">
+                    {formatValue(point.value)}
+                    {unit}
+                  </TableCell>
+                </TableRow>
               ))}
-
-              {last ? (
-                <>
-                  <circle
-                    cx={xFor(data.length - 1)}
-                    cy={yFor(last.value)}
-                    r={4}
-                    fill={color}
-                    stroke="#ffffff"
-                    strokeWidth={2}
-                  />
-                  <text
-                    x={xFor(data.length - 1) - 8}
-                    y={yFor(last.value) - 10}
-                    textAnchor="end"
-                    className="fill-slate-700 tabular-nums"
-                    fontSize={11}
-                    fontWeight={600}
-                    stroke="#ffffff"
-                    strokeWidth={3}
-                    paintOrder="stroke"
-                  >
-                    {formatValue(last.value)}
-                  </text>
-                </>
-              ) : null}
-
-              {active && hover !== null ? (
-                <>
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <div className="relative">
+          <svg
+            viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+            className="h-auto w-full rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            role="img"
+            aria-label={`${title}趋势，${data[0]?.day} 至 ${last?.day}`}
+            tabIndex={0}
+            onKeyDown={handleKey}
+            onBlur={() => setHover(null)}
+          >
+            <title>{`${title}：${data[0]?.day} 至 ${last?.day}`}</title>
+            {[0, 0.5, 1].map((ratio) => {
+              const value = max * ratio;
+              const y = yFor(value);
+              return (
+                <g key={ratio}>
                   <line
-                    x1={xFor(hover)}
-                    x2={xFor(hover)}
-                    y1={PAD.top}
-                    y2={PAD.top + PLOT_H}
-                    stroke="#94a3b8"
+                    x1={PAD.left}
+                    x2={PAD.left + PLOT_W}
+                    y1={y}
+                    y2={y}
+                    stroke="#e2e8f0"
                     strokeWidth={1}
                   />
-                  <circle
-                    cx={xFor(hover)}
-                    cy={yFor(active.value)}
-                    r={4}
-                    fill={color}
-                    stroke="#ffffff"
-                    strokeWidth={2}
-                  />
-                </>
-              ) : null}
+                  <text
+                    x={PAD.left - 10}
+                    y={y + 3.5}
+                    textAnchor="end"
+                    className="fill-slate-400 tabular-nums"
+                    fontSize={10}
+                  >
+                    {formatCompact(value)}
+                  </text>
+                </g>
+              );
+            })}
 
-              <rect
-                x={PAD.left}
-                y={PAD.top}
-                width={PLOT_W}
-                height={PLOT_H}
-                fill="transparent"
-                onPointerMove={handleMove}
-                onPointerLeave={() => setHover(null)}
+            <path d={area} fill={color} fillOpacity={0.1} />
+            <path
+              d={line}
+              fill="none"
+              stroke={color}
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+
+            {tickIndices(data.length).map((index) => (
+              <text
+                key={data[index].day}
+                x={xFor(index)}
+                y={HEIGHT - 8}
+                textAnchor="middle"
+                className="fill-slate-400 tabular-nums"
+                fontSize={10}
+              >
+                {dayLabel(data[index].day)}
+              </text>
+            ))}
+
+            {last ? (
+              <circle
+                cx={xFor(data.length - 1)}
+                cy={yFor(last.value)}
+                r={4}
+                fill={color}
+                stroke="#ffffff"
+                strokeWidth={2}
               />
-            </svg>
+            ) : null}
 
             {active && hover !== null ? (
-              <div
-                className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-[115%] rounded-lg border border-blue-100 bg-white px-2.5 py-1.5 text-xs shadow-md"
-                style={{
-                  left: `${Math.min(92, Math.max(8, (xFor(hover) / WIDTH) * 100))}%`,
-                  top: `${(yFor(active.value) / HEIGHT) * 100}%`,
-                }}
-              >
-                <div className="text-[10px] text-slate-500">{active.day}</div>
-                <div className="font-semibold tabular-nums text-slate-900">
-                  {formatValue(active.value)}
-                  {unit}
-                </div>
-              </div>
+              <>
+                <line
+                  x1={xFor(hover)}
+                  x2={xFor(hover)}
+                  y1={PAD.top}
+                  y2={PAD.top + PLOT_H}
+                  stroke="#94a3b8"
+                  strokeWidth={1}
+                />
+                <circle
+                  cx={xFor(hover)}
+                  cy={yFor(active.value)}
+                  r={4}
+                  fill={color}
+                  stroke="#ffffff"
+                  strokeWidth={2}
+                />
+              </>
             ) : null}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+
+            <rect
+              x={PAD.left}
+              y={PAD.top}
+              width={PLOT_W}
+              height={PLOT_H}
+              fill="transparent"
+              onPointerMove={handleMove}
+              onPointerLeave={() => setHover(null)}
+            />
+          </svg>
+
+          {active && hover !== null ? (
+            <div
+              className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-[115%] rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs shadow-md"
+              style={{
+                left: `${Math.min(92, Math.max(8, (xFor(hover) / WIDTH) * 100))}%`,
+                top: `${(yFor(active.value) / HEIGHT) * 100}%`,
+              }}
+            >
+              <div className="text-[10px] text-slate-500">{active.day}</div>
+              <div className="font-semibold tabular-nums text-slate-900">
+                {formatValue(active.value)}
+                {unit}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </SectionCard>
   );
 }

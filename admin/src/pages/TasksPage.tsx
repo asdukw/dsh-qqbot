@@ -9,7 +9,9 @@ import {
 
 import {
   EmptyState,
-  ErrorBanner,
+  FilterBar,
+  LoadingHint,
+  PageStack,
   PillTabs,
   SearchField,
   SectionCard,
@@ -33,7 +35,6 @@ import {
   taskModeLabel,
 } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
-import { cn } from "@/lib/utils";
 
 type StatusFilter = "all" | "enabled" | "disabled";
 
@@ -63,54 +64,53 @@ export default function TasksPage({ refreshKey }: { refreshKey: number }) {
   const runs = all.reduce((sum, task) => sum + task.runs, 0);
 
   return (
-    <div className={cn("space-y-6", loading && data && "opacity-70 transition-opacity")}>
-      {error ? <ErrorBanner message={error} /> : null}
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard icon={CalendarClock} label="任务总数" value={formatNumber(all.length)} hint="按群 / 私聊绑定" />
-        <StatCard icon={Play} label="运行中" value={formatNumber(enabled)} hint="调度器会继续触发" tone="emerald" />
+    <PageStack error={error} loading={loading} hasData={!!data}>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard icon={CalendarClock} label="任务总数" value={formatNumber(all.length)} />
+        <StatCard icon={Play} label="运行中" value={formatNumber(enabled)} hint="持续触发" tone="emerald" />
         <StatCard
           icon={PauseCircle}
           label="已暂停"
           value={formatNumber(all.length - enabled)}
-          hint="保留配置但不触发"
+          hint="不会触发"
           tone="amber"
         />
-        <StatCard icon={CheckCircle2} label="累计执行" value={formatNumber(runs)} hint="所有任务的 runs 之和" />
+        <StatCard icon={CheckCircle2} label="累计执行" value={formatNumber(runs)} />
       </div>
 
       <SectionCard
         icon={CalendarClock}
         title="任务列表"
-        description="定时任务由模型解析或 /task 命令创建"
+        description="由模型解析或 /task 命令创建"
         badge={rows.length}
       >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-50 p-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <PillTabs
-              value={status}
-              options={[
-                { value: "all", label: "全部" },
-                { value: "enabled", label: "运行中" },
-                { value: "disabled", label: "已暂停" },
-              ]}
-              onChange={setStatus}
-            />
-            <SearchField
-              value={search}
-              onChange={setSearch}
-              placeholder="搜索内容、指令或目标…"
-              className="w-64"
-            />
-          </div>
-          {loading ? <span className="text-xs text-slate-500">加载中…</span> : null}
-        </div>
+        <FilterBar>
+          <PillTabs
+            value={status}
+            options={[
+              { value: "all", label: "全部" },
+              { value: "enabled", label: "运行中" },
+              { value: "disabled", label: "已暂停" },
+            ]}
+            onChange={setStatus}
+            label="任务状态筛选"
+          />
+          <SearchField
+            value={search}
+            onChange={setSearch}
+            placeholder="搜索内容、指令或目标…"
+            className="w-64"
+          />
+        </FilterBar>
 
-        {rows.length ? (
-          <Table className="min-w-[980px]">
+        {loading && !data ? (
+          <div className="flex justify-center px-5 py-10">
+            <LoadingHint loading />
+          </div>
+        ) : rows.length ? (
+          <Table className="min-w-[900px]">
             <TableHeader>
               <TableRow>
-                <TableHead>ID</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>排期</TableHead>
                 <TableHead>目标</TableHead>
@@ -124,26 +124,28 @@ export default function TasksPage({ refreshKey }: { refreshKey: number }) {
             <TableBody>
               {rows.map((task) => (
                 <TableRow key={task.id}>
-                  <TableCell className="font-mono text-xs text-slate-500">#{task.id}</TableCell>
                   <TableCell>
-                    {task.enabled ? (
-                      <Badge variant="success">
-                        <CheckCircle2 className="mr-1 h-3 w-3" /> 运行中
-                      </Badge>
-                    ) : (
-                      <Badge variant="muted">
-                        <PauseCircle className="mr-1 h-3 w-3" /> 已暂停
-                      </Badge>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {task.enabled ? (
+                        <Badge variant="success">
+                          <CheckCircle2 className="mr-1 h-3 w-3" /> 运行中
+                        </Badge>
+                      ) : (
+                        <Badge variant="muted">
+                          <PauseCircle className="mr-1 h-3 w-3" /> 已暂停
+                        </Badge>
+                      )}
+                      <span className="font-mono text-[11px] text-slate-400">#{task.id}</span>
+                    </div>
                   </TableCell>
                   <TableCell className="whitespace-nowrap text-sm">{scheduleText(task)}</TableCell>
                   <TableCell className="whitespace-nowrap text-xs text-slate-500">
                     {targetLabel(task.chat_type, task.chat_id)}
                   </TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-slate-500">
+                  <TableCell className="whitespace-nowrap text-xs text-slate-500 tabular-nums">
                     {task.enabled ? formatTs(task.next_run) : "-"}
                   </TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-slate-500">
+                  <TableCell className="whitespace-nowrap text-xs text-slate-500 tabular-nums">
                     {formatTs(task.last_run)}
                   </TableCell>
                   <TableCell className="text-right text-xs tabular-nums">
@@ -170,10 +172,10 @@ export default function TasksPage({ refreshKey }: { refreshKey: number }) {
           <EmptyState
             icon={Clock}
             text="没有匹配的定时任务。"
-            hint="管理员在聊天里说“每天早上 8 点提醒大家喝水”即可创建。"
+            hint="在聊天里用自然语言或 /task 命令创建。"
           />
         )}
       </SectionCard>
-    </div>
+    </PageStack>
   );
 }

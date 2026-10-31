@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
-import { KeyRound, Save, ShieldAlert, Wand2 } from "lucide-react";
+import { KeyRound, Save, Wand2 } from "lucide-react";
 
-import { ErrorBanner } from "@/components/common/Bits";
-import { Field, Modal } from "@/components/models/Modal";
+import { Notice } from "@/components/common/Bits";
+import { Modal } from "@/components/models/Modal";
+import { CheckboxRow, Field } from "@/components/ui/form";
 import { ProviderIcon } from "@/components/models/ProviderIcon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -57,9 +58,9 @@ const EMPTY: ProviderFormValues = {
 };
 
 const KEY_SOURCE_LABEL = {
-  stored: "已保存到数据库",
-  env: "已注入",
-  missing: "未设置",
+  stored: "Key 已保存",
+  env: "Key 来自环境",
+  missing: "Key 未设置",
 } as const;
 
 export function ProviderForm({
@@ -182,7 +183,6 @@ export function ProviderForm({
     <Modal
       open={open}
       title={mode === "edit" ? "编辑供应商" : "添加供应商"}
-      description="供应商保存协议、端点和密钥；同一供应商下的模型共享这些连接信息。"
       onClose={onClose}
       wide
       footer={
@@ -198,14 +198,11 @@ export function ProviderForm({
       }
     >
       <form id="provider-form" className="space-y-4" onSubmit={handleSubmit}>
-        {error ? <ErrorBanner message={error} /> : null}
+        {error ? <Notice tone="danger">{error}</Notice> : null}
 
         {mode === "create" ? (
           <div className="space-y-2">
-            <div className="flex items-baseline justify-between gap-2">
-              <span className="text-xs font-medium text-slate-600">从预设开始</span>
-              <span className="text-[11px] text-slate-400">预设只填充表单，保存后仍可修改</span>
-            </div>
+            <p className="text-xs font-medium text-slate-600">从预设开始</p>
             <div className="grid gap-2 sm:grid-cols-2">
               {availablePresets.map((preset) => {
                 const selected = presetId === preset.provider;
@@ -217,8 +214,8 @@ export function ProviderForm({
                     className={cn(
                       "flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors",
                       selected
-                        ? "border-blue-400 bg-blue-50 ring-1 ring-blue-300"
-                        : "border-blue-100 bg-white hover:border-blue-300 hover:bg-blue-50/50"
+                        ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500"
+                        : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
                     )}
                   >
                     <ProviderIcon provider={preset.provider} className="h-9 w-9" />
@@ -226,7 +223,7 @@ export function ProviderForm({
                       <span className="block truncate text-sm font-medium text-slate-800">
                         {preset.display_name}
                       </span>
-                      <span className="block truncate font-mono text-[10px] text-slate-400">
+                      <span className="block truncate font-mono text-xs text-slate-500">
                         {preset.provider}
                       </span>
                     </span>
@@ -239,8 +236,8 @@ export function ProviderForm({
                 className={cn(
                   "flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors",
                   presetId === ""
-                    ? "border-blue-400 bg-blue-50 ring-1 ring-blue-300"
-                    : "border-blue-100 bg-white hover:border-blue-300 hover:bg-blue-50/50"
+                    ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500"
+                    : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
                 )}
               >
                 <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
@@ -248,21 +245,21 @@ export function ProviderForm({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium text-slate-800">手动填写</span>
-                  <span className="block text-[10px] text-slate-400">自定义 route 与端点</span>
+                  <span className="block text-xs text-slate-500">自定义端点</span>
                 </span>
               </button>
             </div>
           </div>
         ) : null}
 
-        <Field label="显示名称" hint="面板和 DSH route 上显示的名字。">
+        <Field label="显示名称" hint="面板中显示的名称。">
           <Input
             value={values.display_name}
             onChange={(event) => update("display_name", event.target.value)}
             placeholder="DeepSeek"
           />
         </Field>
-        <p className="text-[11px] text-slate-400">
+        <p className="-mt-2 text-xs text-slate-500">
           {mode === "edit"
             ? `供应商 ID：${values.provider}`
             : values.display_name.trim()
@@ -279,30 +276,23 @@ export function ProviderForm({
           />
         </Field>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="API 协议"
-            hint={
-              isBuiltin
-                ? "内置 provider 由 DSH 提供 adapter，协议不可覆盖。"
-                : "对应 llm-pi-ai 的 adapter，默认 openai-completions。"
-            }
-            className="sm:col-span-2"
-          >
-            <Input
-              value={values.api}
-              onChange={(event) => update("api", event.target.value)}
-              disabled={isBuiltin}
-              placeholder="openai-completions"
-              spellCheck={false}
-            />
-          </Field>
-        </div>
+        <Field
+          label="API 协议"
+          hint={isBuiltin ? "内置 provider 协议不可覆盖。" : "默认 openai-completions。"}
+        >
+          <Input
+            value={values.api}
+            onChange={(event) => update("api", event.target.value)}
+            disabled={isBuiltin}
+            placeholder="openai-completions"
+            spellCheck={false}
+          />
+        </Field>
 
-        <div className="space-y-2 rounded-xl border border-blue-100 bg-blue-50/40 p-3">
+        <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
-              <KeyRound className="h-3.5 w-3.5 text-blue-500" />
+              <KeyRound className="h-3.5 w-3.5 text-slate-500" />
               API Key
             </span>
             {mode === "edit" ? (
@@ -313,6 +303,7 @@ export function ProviderForm({
           </div>
           <Input
             type="password"
+            aria-label="API Key"
             value={values.api_key ?? ""}
             onChange={(event) => update("api_key", event.target.value)}
             disabled={clearKey}
@@ -326,43 +317,28 @@ export function ProviderForm({
             autoComplete="new-password"
             spellCheck={false}
           />
-          <p className="text-[11px] leading-relaxed text-slate-500">
-            直接填写会保存到 <code className="rounded bg-white px-1 py-0.5 font-mono">models.db</code>
-            （文件权限 600），面板不会回显已保存的值。创建供应商时必须填写；编辑时留空保持不变。
-          </p>
+          <p className="text-xs text-slate-500">密钥保存在服务端，面板不回显。</p>
           {mode === "edit" && keySource === "stored" ? (
-            <label className="flex items-center gap-2 text-xs text-slate-600">
-              <input
-                type="checkbox"
-                checked={clearKey}
-                onChange={(event) => setClearKey(event.target.checked)}
-                className="h-3.5 w-3.5 rounded border-blue-300 accent-blue-600"
-              />
-              清除已保存的密钥
-            </label>
+            <CheckboxRow
+              label="清除已保存的密钥"
+              checked={clearKey}
+              onChange={setClearKey}
+              className="border-slate-200 bg-white"
+            />
           ) : null}
         </div>
 
-        <label className="flex items-center gap-2.5 rounded-lg border border-blue-100 px-3 py-2.5 text-sm text-slate-700">
-          <input
-            type="checkbox"
-            checked={values.enabled}
-            onChange={(event) => update("enabled", event.target.checked)}
-            className="h-4 w-4 rounded border-blue-300 accent-blue-600"
-          />
-          启用该供应商
-          {provider?.active_model_id ? (
-            <Badge variant="muted" className="ml-auto">
-              <ShieldAlert className="mr-1 h-3 w-3" /> 当前模型在此供应商下
-            </Badge>
-          ) : null}
-        </label>
+        <CheckboxRow
+          label="启用该供应商"
+          hint={provider?.active_model_id ? "当前模型在此供应商下" : undefined}
+          checked={values.enabled}
+          onChange={(checked) => update("enabled", checked)}
+        />
 
         {isBuiltin ? (
-          <p className="text-[11px] leading-relaxed text-amber-600">
-            内置 provider 使用 DSH 自带的 adapter（OpenCode 会按会话自动加{" "}
-            <code>x-opencode-session</code>）。连接信息可以改，协议字段会被忽略。
-          </p>
+          <Notice tone="warning">
+            内置 provider 的协议字段会被忽略，连接信息仍可修改。
+          </Notice>
         ) : null}
       </form>
     </Modal>

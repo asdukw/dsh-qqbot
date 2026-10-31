@@ -4,7 +4,8 @@
 
 @layer base {
   :root {
-    --background: 214 100% 97%;
+    --background: 0 0% 100%;
+    --canvas: 210 40% 98%;
     --foreground: 222 47% 11%;
     --card: 0 0% 100%;
     --card-foreground: 222 47% 11%;
@@ -16,12 +17,24 @@
     --muted-foreground: 215 16% 47%;
     --accent: 214 95% 93%;
     --accent-foreground: 221 83% 40%;
-    --destructive: 0 84% 60%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
+    --success: 142 71% 34%;
+    --success-foreground: 0 0% 100%;
+    --warning: 32 95% 44%;
+    --warning-foreground: 0 0% 100%;
     --border: 214 32% 91%;
     --input: 214 32% 91%;
     --ring: 221 83% 53%;
-    --radius: 0.9rem;
+    --radius: 0.75rem;
+
+    /* Data-visualisation palette, shared by charts and the word cloud. */
+    --chart-1: #1d4ed8;
+    --chart-2: #2563eb;
+    --chart-3: #0284c7;
+    --chart-4: #4f46e5;
+    --chart-5: #0891b2;
+    --chart-6: #3b82f6;
   }
 
   * {
@@ -30,14 +43,41 @@
 
   html {
     color-scheme: light;
+    -webkit-tap-highlight-color: transparent;
   }
 
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply bg-canvas text-foreground antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    text-rendering: optimizeLegibility;
   }
 
   ::selection {
     @apply bg-blue-200 text-blue-950;
+  }
+
+  /* One focus treatment for every interactive element. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-white;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .select-chevron {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.625rem center;
+    background-size: 0.875rem;
   }
 }
