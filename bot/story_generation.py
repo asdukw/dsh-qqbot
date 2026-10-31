@@ -244,14 +244,14 @@ class StoryGenerator:
         if graph is None:
             try:
                 graph = await self._generate(StoryGraphDraft, {
-                    'task': '只输出章节选择图start/nodes，不重复世界概要。目标6-8节点（含2个结局），有分支汇合。'
+                    'task': '只输出章节选择图start/nodes，不重复世界概要。目标12-16节点（含3个结局），三幕结构，''分支在1-2幕后汇合，每局至少6个决策点；三个结局分别覆盖友情、恋爱、边界/告别且均可达。'
                             '每个非结局2-3选项，beat约40字，选项约20字，reason约20字；不输出默认字段。'
                             '至少一项condition省略（无条件），且不得accept_romance，保证低属性玩家可推进或退出。'
                             '所有节点/选项id英文小写且选项id全局唯一；target引用存在节点。无环，结局ending非空且choices省略。'
                             '所有flag只引用effect.flags中明确产生的值；保留romance_offered仅由offer_romance产生，不直接写flags。'
                             'accept_romance只在单独明确玩家回应选项使用，condition至少affinity65/trust60/flags[romance_offered]，'
                             '角色先前主动告白且已发生shared_experience；拒绝/友情/边界不扣分。延迟效果不得变更intent。'
-                            '友情/冒险也有完整结局，不强行写恋爱。选择效果±3以内，有共同经历、修复或承诺，延迟后果可选。',
+                            '友情/冒险也有完整结局，不强行写恋爱。选择必须改变关系、标记或路线，避免只换措辞；''最多连续2个纯推进型选项。选择效果±3以内，有共同经历、修复或承诺，延迟后果可选。',
                     'brief': brief.model_dump(), 'preferences': preferences or {},
                     'example_choice': {'id': 'help', 'text': '帮忙收拾', 'target': 'talk',
                                        'effect': {'trust': 2, 'milestone': 'shared_experience', 'reason': '可靠行动'}},

@@ -101,13 +101,13 @@ max_changes_per_day = 20
 # prepares the public story automatically; each /story start owns its own save.
 enabled = false
 timeout = 120           # one model call, not the entire preparation
-stage_timeout = 240     # includes at most one repair per stage
-prepare_timeout = 420   # brief + graph end-to-end deadline
+stage_timeout = 300     # includes at most one repair per stage
+prepare_timeout = 600   # brief + graph end-to-end deadline
 queue_timeout = 20
 brief_tokens = 1800
 scene_tokens = 1200
 output_mode = "legacy" # text | json_object | json_schema (confirmed providers only)
-max_tokens = 6000
+max_tokens = 6000       # graph output; 12-16 nodes need ~4k
 max_context_chars = 24000
 concurrency = 2
 menu_hours = 168

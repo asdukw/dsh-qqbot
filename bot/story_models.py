@@ -16,8 +16,8 @@ ID = r'^[a-z][a-z0-9_]{0,39}$'
 class StorySettings(StrictModel):
     enabled: bool = False
     timeout: int = Field(default=120, ge=5, le=180)
-    stage_timeout: int = Field(default=240, ge=10, le=360)
-    prepare_timeout: int = Field(default=420, ge=20, le=720)
+    stage_timeout: int = Field(default=300, ge=10, le=360)
+    prepare_timeout: int = Field(default=600, ge=20, le=720)
     queue_timeout: int = Field(default=20, ge=1, le=120)
     brief_tokens: int = Field(default=1800, ge=512, le=4000)
     scene_tokens: int = Field(default=1200, ge=256, le=4000)
