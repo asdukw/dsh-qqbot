@@ -119,19 +119,32 @@ def day_bounds(day: str) -> tuple[int, int]:
 
 
 def _terms(query: str) -> list[str]:
-    """Use the same CJK-friendly trigram sampling as the chat recall index."""
+    """CJK-friendly substrings; keep two-character words for LIKE fallback."""
     terms: list[str] = []
     for chunk in re.findall(r"[一-鿿]+|[A-Za-z0-9]{2,}", query or ""):
         if len(chunk) <= 2:
-            continue
-        step = 1 if len(chunk) <= 12 else 2
-        for index in range(0, len(chunk) - 2, step):
-            term = chunk[index:index + 3]
-            if term not in terms:
+            candidates = [chunk]
+        else:
+            step = 1 if len(chunk) <= 12 else 2
+            candidates = [chunk[index:index + 3] for index in range(0, len(chunk) - 2, step)]
+        for term in candidates:
+            if term and term not in terms:
                 terms.append(term)
             if len(terms) >= 8:
                 return terms
     return terms
+
+
+def _supported(value: str, text: str) -> bool:
+    """A fact must be traceable to the source messages, not invented by the model."""
+    needle = " ".join(str(value or "").split())
+    haystack = " ".join(str(text or "").split())
+    if not needle or not haystack:
+        return False
+    if needle in haystack:
+        return True
+    probe = needle[:8]
+    return len(probe) >= 4 and probe in haystack
 
 
 def _clean_summary(value: Any, limit: int = MAX_DAY_SUMMARY) -> str:
@@ -203,8 +216,8 @@ class MemoryArchive:
         *,
         limit: int = MAX_TRANSCRIPT_MESSAGES,
         max_chars: int = MAX_INPUT_CHARS,
-    ) -> tuple[str, set[str], int]:
-        """Return (transcript, known user ids, message count) for a time window."""
+    ) -> tuple[str, dict[str, str], int, int]:
+        """Return (transcript, user texts, message count, last message time)."""
         with self._lock:
             events = self._db.execute(
                 "SELECT created_at, user_id, sender_name, text FROM chat_events "
@@ -219,25 +232,29 @@ class MemoryArchive:
                 (conversation_id, start_at, end_at, limit),
             ).fetchall()
         rows: list[tuple[int, str, str]] = []
-        users: set[str] = set()
+        users: dict[str, str] = {}
+        last_ts = 0
         for row in events:
             stamp = int(row["created_at"])
             user_id = str(row["user_id"])
-            users.add(user_id)
-            name = str(row["sender_name"] or "")[:24]
+            name = " ".join(str(row["sender_name"] or "").split())[:24]
             text = " ".join(str(row["text"] or "").split())[:700]
-            if text:
-                rows.append((stamp, user_id, f"[{datetime.fromtimestamp(stamp, TZ):%Y-%m-%d %H:%M}] QQ{user_id} {name}: {text}"))
+            if not text:
+                continue
+            users[user_id] = (users.get(user_id, "") + " " + text)[-2000:]
+            last_ts = max(last_ts, stamp)
+            rows.append((stamp, user_id, f"[{datetime.fromtimestamp(stamp, TZ):%Y-%m-%d %H:%M}] QQ{user_id} {name}: {text}"))
         for row in replies:
             stamp = int(row["created_at"])
             text = " ".join(str(row["content"] or "").split())[:700]
             if text:
+                last_ts = max(last_ts, stamp)
                 rows.append((stamp, "", f"[{datetime.fromtimestamp(stamp, TZ):%Y-%m-%d %H:%M}] 机器人: {text}"))
         rows.sort(key=lambda item: item[0])
         lines = [item[2] for item in rows]
         while len(lines) > 1 and sum(len(line) + 1 for line in lines) > max(500, max_chars):
             lines.pop(0)
-        return "\n".join(lines), users, len(rows)
+        return "\n".join(lines), users, len(rows), last_ts
 
     @staticmethod
     def _prompt(conversation_id: str, transcript: str, *, is_group: bool, group_id: str) -> str:
@@ -263,19 +280,19 @@ class MemoryArchive:
         day: str,
         result: dict[str, Any],
         *,
-        known_users: set[str],
+        known_users: dict[str, str],
         message_count: int,
         session_id: str,
         generation: int,
         is_group: bool,
         group_id: str,
         now: int,
-    ) -> None:
+    ) -> bool:
         summary = _clean_summary(result.get("summary"))
         topics = _string_list(result.get("topics"))
         loops = _string_list(result.get("open_loops"))
         if not summary and not topics:
-            return
+            return False
         with self._lock, self._db:
             row = self._db.execute(
                 "SELECT * FROM memory_days WHERE conversation_id=? AND day=?",
@@ -283,7 +300,7 @@ class MemoryArchive:
             ).fetchone()
             sessions = json.loads(row["session_ids"]) if row else []
             if session_id and session_id in sessions:
-                return
+                return False
             if row is None:
                 day_id = uuid.uuid4().hex
                 self._db.execute(
@@ -336,6 +353,8 @@ class MemoryArchive:
                     not is_group and conversation_id.startswith("private:")
                 ):
                     continue
+                if not _supported(value, known_users.get(user_id, "")):
+                    continue
                 visibility = "public" if is_group else "private"
                 self._write_item(
                     scope="user",
@@ -356,7 +375,7 @@ class MemoryArchive:
                         continue
                     key = _clean_summary(item.get("key"), 60)
                     value = _clean_summary(item.get("value"), 400)
-                    if key and value:
+                    if key and value and _supported(value, " ".join(known_users.values())):
                         self._write_item(
                             scope="group",
                             conversation_id=conversation_id,
@@ -370,6 +389,7 @@ class MemoryArchive:
                             occurred_at=now,
                             source_session=session_id,
                         )
+        return True
 
     def _fts_set(self, key: str, text: str) -> None:
         self._db.execute("DELETE FROM memory_fts WHERE id=?", (key,))
@@ -410,6 +430,7 @@ class MemoryArchive:
                 "UPDATE memory_items SET invalid_at=?, updated_at=? WHERE id=?",
                 (now, now, row["id"]),
             )
+            self._fts_set(f"item:{row['id']}", "")
         item_id = uuid.uuid4().hex
         self._db.execute(
             "INSERT INTO memory_items "
@@ -455,7 +476,7 @@ class MemoryArchive:
                 ).fetchone()
             if row is not None and session_id in json.loads(row["session_ids"]):
                 return False
-        transcript, users, count = self._transcript(
+        transcript, users, count, last_ts = self._transcript(
             conversation_id, start_at, end_at,
             limit=self.settings.sample_messages,
             max_chars=self.settings.max_input_chars,
@@ -472,7 +493,7 @@ class MemoryArchive:
             log.warning("memory extraction failed for %s: %s", conversation_id, exc)
             return False
         try:
-            self._store_extraction(
+            return self._store_extraction(
                 conversation_id, day, result,
                 known_users=users,
                 message_count=count,
@@ -480,12 +501,41 @@ class MemoryArchive:
                 generation=generation,
                 is_group=is_group,
                 group_id=group_id,
-                now=int(end_at),
+                now=max(int(start_at), min(int(end_at) - 1, last_ts or int(start_at))),
             )
         except (sqlite3.Error, ValueError, TypeError) as exc:
             log.warning("memory store failed for %s: %s", conversation_id, exc)
             return False
-        return True
+
+    async def archive_range(
+        self,
+        conversation_id: str,
+        start_at: int,
+        end_at: int,
+        *,
+        session_id: str = "",
+        generation: int = 0,
+    ) -> bool:
+        """Split a rotation window at local midnight so every day gets its own row."""
+        cursor = int(start_at)
+        stop = int(end_at)
+        if cursor <= 0:
+            cursor = stop - 86400
+        stored = False
+        while cursor < stop:
+            day = day_of(cursor)
+            day_start, day_end = day_bounds(day)
+            chunk_start = max(cursor, day_start)
+            chunk_end = min(stop, day_end)
+            if chunk_end <= chunk_start:
+                break
+            chained = f"{session_id}:{day}" if session_id else ""
+            stored = await self.archive_window(
+                conversation_id, chunk_start, chunk_end,
+                session_id=chained, generation=generation, day=day,
+            ) or stored
+            cursor = chunk_end
+        return stored
 
     async def archive_day(self, conversation_id: str, day: str) -> bool:
         start, end = day_bounds(day)
@@ -525,26 +575,28 @@ class MemoryArchive:
 
     def _matching_ids(self, query: str) -> set[str]:
         terms = _terms(query)
+        long_terms = [term for term in terms if len(term) >= 3]
+        found: set[str] = set()
         with self._lock:
-            if not terms:
+            if long_terms:
+                match = " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in long_terms)
+                try:
+                    rows = self._db.execute(
+                        "SELECT id FROM memory_fts WHERE memory_fts MATCH ? LIMIT 400",
+                        (match,),
+                    ).fetchall()
+                    found.update(str(row[0]) for row in rows)
+                except sqlite3.Error:
+                    pass
+            for term in terms or [query.strip()]:
+                if not term:
+                    continue
                 rows = self._db.execute(
-                    "SELECT id FROM memory_fts WHERE text LIKE ? LIMIT 200",
-                    (f"%{query.strip()}%",),
+                    "SELECT id FROM memory_fts WHERE text LIKE ? LIMIT 400",
+                    (f"%{term}%",),
                 ).fetchall()
-                return {str(row[0]) for row in rows}
-            match = " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
-            try:
-                rows = self._db.execute(
-                    "SELECT id FROM memory_fts WHERE memory_fts MATCH ? LIMIT 200",
-                    (match,),
-                ).fetchall()
-                return {str(row[0]) for row in rows}
-            except sqlite3.Error:
-                rows = self._db.execute(
-                    "SELECT id FROM memory_fts WHERE text LIKE ? LIMIT 200",
-                    (f"%{query.strip()}%",),
-                ).fetchall()
-                return {str(row[0]) for row in rows}
+                found.update(str(row[0]) for row in rows)
+        return found
 
     def search(
         self,
@@ -571,16 +623,17 @@ class MemoryArchive:
         with self._lock:
             days = self._db.execute(
                 "SELECT * FROM memory_days WHERE conversation_id=? AND day>=? AND day<=? "
-                "ORDER BY day DESC LIMIT 60",
+                "ORDER BY day DESC LIMIT 400",
                 (conversation_id, since, until),
             ).fetchall()
             if is_group:
                 items = self._db.execute(
                     "SELECT * FROM memory_items WHERE invalid_at IS NULL AND ("
                     "(scope='group' AND group_id=?) OR "
-                    "(scope='user' AND visibility='public' AND group_id IN ('',?))) "
-                    "ORDER BY occurred_at DESC LIMIT 80",
-                    (group_id, group_id),
+                    "(scope='user' AND visibility='public' AND group_id IN ('',?) "
+                    "AND (?='' OR user_id=?))) "
+                    "ORDER BY occurred_at DESC LIMIT 1000",
+                    (group_id, group_id, user_id, user_id),
                 ).fetchall()
             else:
                 items = self._db.execute(

@@ -122,14 +122,15 @@ json_mode = false  # true only for providers supporting response_format
 
 [memory]
 # Daily/user memory consolidation. Raw chat stays in memory.db; this layer
-# writes memory_days + memory_items for cross-session recall.
-enabled = true
+# writes memory_days + memory_items for cross-session recall. Opt in explicitly:
+# enabling this sends sampled chat to the model for summarization.
+enabled = false
 # Empty -> [paths].database (memory.db).
 database = ""
 archive_on_rotation = true
 daily_hour = 4          # daily fallback after session rotation
 check_seconds = 300
-backfill_days = 30      # summarize missing recent days on startup (0 disables)
+backfill_days = 0       # opt-in: summarize missing recent days on startup
 retention_days = 365
 sample_messages = 200
 max_input_chars = 12000

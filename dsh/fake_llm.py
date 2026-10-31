@@ -67,7 +67,7 @@ class Handler(BaseHTTPRequestHandler):
             tool_calls = [{
                 "id": "call_fake_read",
                 "type": "function",
-                "function": {"name": "profile_read", "arguments": "{}"},
+                "function": {"name": "profile", "arguments": "{\"action\":\"read\",\"target\":\"user\"}"},
             }]
             finish = "tool_calls"
         else:

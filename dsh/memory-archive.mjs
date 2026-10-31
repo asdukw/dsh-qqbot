@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 const PROFILE_DB = process.env.USER_PROFILE_DB || '/var/lib/qqbot/dsh-state/profile.db'
 const MEMORY_DB = process.env.QQBOT_MEMORY_DB || '/var/lib/qqbot/memory.db'
+const ENABLED = process.env.QQBOT_MEMORY_ENABLED === '1'
 const TZ = 'Asia/Shanghai'
 const DEFAULT_LIMIT = 8
 const MAX_LIMIT = 20
@@ -153,8 +154,8 @@ function search(ctx, { query = '', since = '', until = '', limit = DEFAULT_LIMIT
     ? db.prepare(
       "SELECT id,key,value,importance,occurred_at FROM memory_items " +
       "WHERE invalid_at IS NULL AND ((scope='group' AND group_id=?) OR " +
-      "(scope='user' AND visibility='public' AND group_id IN ('',?)))"
-    ).all(ctx.groupId, ctx.groupId)
+      "(scope='user' AND visibility='public' AND group_id IN ('',?) AND user_id=?))"
+    ).all(ctx.groupId, ctx.groupId, ctx.userId)
     : db.prepare(
       "SELECT id,key,value,importance,occurred_at FROM memory_items " +
       "WHERE invalid_at IS NULL AND scope='user' AND user_id=? AND group_id=''"
@@ -189,8 +190,8 @@ function userItems(ctx, { query = '', since = '', until = '', limit = DEFAULT_LI
   const rows = ctx.scope === 'group'
     ? db.prepare(
       "SELECT id,key,value,importance,occurred_at FROM memory_items " +
-      "WHERE invalid_at IS NULL AND scope='user' AND visibility='public' AND group_id IN ('',?)"
-    ).all(ctx.groupId)
+      "WHERE invalid_at IS NULL AND scope='user' AND visibility='public' AND group_id IN ('',?) AND user_id=?"
+    ).all(ctx.groupId, ctx.userId)
     : db.prepare(
       "SELECT id,key,value,importance,occurred_at FROM memory_items " +
       "WHERE invalid_at IS NULL AND scope='user' AND user_id=? AND group_id=''"
@@ -318,6 +319,7 @@ export const name = 'memory-archive'
 export const inject = ['tools', 'systemPrompt']
 
 export function apply(ctx) {
+  if (!ENABLED) return
   for (const tool of [searchTool, timelineTool, personTool]) ctx.tools.register(tool)
   ctx.on('agent/created', ({ agent }) => {
     const sessionId = String(agent.id)

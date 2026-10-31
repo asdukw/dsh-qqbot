@@ -319,12 +319,12 @@ class VoiceSection:
 class MemorySection:
     """Long-term daily/user memory consolidation."""
 
-    enabled: bool = True
-    database: str = ""  # empty -> paths.database
+    enabled: bool = False  # explicit opt-in
+    database: str = ""  # ignored; memory.db is the evidence layer
     archive_on_rotation: bool = True
     daily_hour: int = 4
     check_seconds: int = 300
-    backfill_days: int = 30
+    backfill_days: int = 0
     retention_days: int = 365
     sample_messages: int = 200
     max_input_chars: int = 12000
@@ -570,12 +570,12 @@ def load_config(path: str | Path) -> AppConfig:
 
     memory_raw = _section(table, "memory")
     memory = MemorySection(
-        enabled=bool(memory_raw.get("enabled", True)),
+        enabled=bool(memory_raw.get("enabled", False)),
         database=str(memory_raw.get("database", "")),
         archive_on_rotation=bool(memory_raw.get("archive_on_rotation", True)),
         daily_hour=min(23, max(0, int(memory_raw.get("daily_hour", 4)))),
         check_seconds=max(60, int(memory_raw.get("check_seconds", 300))),
-        backfill_days=max(0, min(90, int(memory_raw.get("backfill_days", 30)))),
+        backfill_days=max(0, min(90, int(memory_raw.get("backfill_days", 0)))),
         retention_days=max(30, int(memory_raw.get("retention_days", 365))),
         sample_messages=max(20, min(1000, int(memory_raw.get("sample_messages", 200)))),
         max_input_chars=max(2000, min(40000, int(memory_raw.get("max_input_chars", 12000)))),
@@ -916,7 +916,7 @@ class Bot(PersonaRuntime):
         self._seed_sessions()
         self.memory_archive: MemoryArchive | None = None
         if config.memory.enabled:
-            archive_path = config.memory.database or config.paths.database
+            archive_path = config.paths.database
             self.memory_archive = MemoryArchive(
                 archive_path,
                 MemoryArchiveSettings(
@@ -1475,7 +1475,7 @@ class Bot(PersonaRuntime):
         if start_at <= 0:
             start_at = int(time.time()) - 86400
         self._spawn(
-            archive.archive_window(
+            archive.archive_range(
                 conversation_id,
                 start_at,
                 int(time.time()),
@@ -1507,22 +1507,27 @@ class Bot(PersonaRuntime):
                 if not backfilled:
                     jobs = await asyncio.to_thread(archive.missing_days, settings.backfill_days)
                     log.info("memory backfill: %d conversation/day job(s)", len(jobs))
+                    failed = False
                     for conversation_id, day in jobs:
                         if self._closed:
                             break
-                        await archive.archive_day(conversation_id, day)
+                        if not await archive.archive_day(conversation_id, day):
+                            failed = True
                         await asyncio.sleep(1.5)
-                    backfilled = True
+                    backfilled = not failed
                 now = datetime.now(TZ)
                 if now.hour >= settings.daily_hour:
                     yesterday = (now.date() - timedelta(days=1)).isoformat()
                     if last_daily != yesterday:
                         jobs = await asyncio.to_thread(archive.missing_days, 1)
+                        failed = False
                         for conversation_id, day in jobs:
                             if self._closed:
                                 break
-                            await archive.archive_day(conversation_id, day)
-                        last_daily = yesterday
+                            if not await archive.archive_day(conversation_id, day):
+                                failed = True
+                        if not failed:
+                            last_daily = yesterday
             except Exception:  # noqa: BLE001 - memory must not break the bot
                 log.exception("memory archive tick failed")
             await asyncio.sleep(max(60, settings.check_seconds))
@@ -3788,6 +3793,7 @@ def main() -> int:
         return 2
     warn_legacy_model_env()
     os.environ["QQBOT_RELATION_ENABLED"] = "1" if config.relation.enabled else "0"
+    os.environ["QQBOT_MEMORY_ENABLED"] = "1" if config.memory.enabled else "0"
 
     if args.show_card:
         registry = CardRegistry(config.cards.database)

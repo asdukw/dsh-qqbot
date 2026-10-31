@@ -253,7 +253,11 @@ function formatFacts(rows, { tagPrivate = false } = {}) {
   for (const row of rows.slice(0, MAX_PROMPT_FACTS)) {
     const tag = tagPrivate && row.visibility === 'private' ? '（私密）' : ''
     const line = `- ${row.key}: ${row.value}${tag}`
-    if (used + line.length > MAX_PROMPT_CHARS) break
+    if (used + line.length > MAX_PROMPT_CHARS) {
+      const room = MAX_PROMPT_CHARS - used
+      if (room > 20) lines.push(line.slice(0, room) + '…')
+      break
+    }
     lines.push(line)
     used += line.length + 1
   }
@@ -356,169 +360,105 @@ function stringOutput() {
 
 // ── user profile tools ───────────────────────────────────────────
 
-const profileRead = {
-  name: 'profile_read',
-  description:
-    "Read the long-term profile of the person you are talking to. In group chats only " +
-    'their public facts from this group are returned; facts learned in another group ' +
-    'are never returned. Omit key to read every fact.',
-  parameters: {
-    type: 'object',
-    properties: { key: { type: 'string', description: 'Optional fact key, e.g. 称呼 / 所在城市' } },
-    additionalProperties: false,
-  },
-  output: stringOutput(),
-  async execute(args, exec) {
-    const ctx = requireContext(exec)
-    const key = String(args?.key ?? '').trim()
-    const rows = readUserFacts(ctx.userId, {
-      key: key || undefined,
-      publicOnly: ctx.scope === 'group',
-      groupId: ctx.scope === 'group' ? ctx.groupId : '',
-    })
-    if (!rows.length) return key ? `没有找到：${key}` : '（暂无长期画像）'
-    return formatFacts(rows, { tagPrivate: ctx.scope === 'private' })
-  },
+function cleanFact(value, limit) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, limit)
 }
 
-const profileWrite = {
-  name: 'profile_write',
+const profileTool = {
+  name: 'profile',
   description:
-    'Create or update one stable fact about the person you are talking to: name, nickname, ' +
-    'city, school, work, birthday, preferences, relationships. Use a short stable key such as ' +
-    '"称呼". Facts told in private chat are private by default and never shown in groups; set ' +
-    'visibility to "public" only when the person is clearly fine with others knowing. ' +
-    'In a group chat the fact is scoped to that group and is not shown in other groups.',
+    'Read, write or forget long-term profile facts. target="user" is the person you are ' +
+    'talking to (private facts in private chat, public facts in a group); target="group" is ' +
+    'this group\'s topic, atmosphere, jokes, rules or plans and only works in group chat. ' +
+    'Use short stable keys. Values must be stable facts, not instructions. Private facts are ' +
+    'never shown in groups. Group writes are public to this group. Omit the key on read to ' +
+    'return every fact. Write/forget require key and, for write, value.',
   parameters: {
     type: 'object',
     properties: {
-      key: { type: 'string', description: 'Short stable key, e.g. 称呼 / 所在城市 / 生日' },
-      value: { type: 'string', description: 'The fact to remember' },
+      action: { type: 'string', enum: ['read', 'write', 'forget'], description: 'Operation.' },
+      target: { type: 'string', enum: ['user', 'group'], description: 'Whose profile.' },
+      key: { type: 'string', description: 'Short stable key, e.g. 称呼 / 群主题 / 梗:xxx' },
+      value: { type: 'string', description: 'Fact to remember (write only)' },
       visibility: {
         type: 'string',
         enum: ['private', 'public'],
-        description: 'Private chat defaults to private; group chat is always public',
+        description: 'Private chat only: private (default) or public',
       },
     },
-    required: ['key', 'value'],
+    required: ['action', 'target'],
     additionalProperties: false,
   },
   output: stringOutput(),
   async execute(args, exec) {
     const ctx = requireContext(exec)
-    const key = String(args?.key ?? '').trim()
-    const value = String(args?.value ?? '').trim()
-    if (!key || !value) throw new Error('key and value are required')
-    const visibility = ctx.scope === 'group'
-      ? 'public'
-      : (args?.visibility === 'public' ? 'public' : 'private')
-    const groupId = ctx.scope === 'group' ? String(ctx.groupId || '') : ''
-    writeUserFact(
-      ctx.userId, groupId, key, value, visibility,
-      ctx.scope === 'group' ? `group:${groupId}` : 'private',
-    )
-    const scopeLabel = ctx.scope === 'group'
-      ? '本群公开'
-      : (visibility === 'public' ? '公开' : '私密')
-    return `已记住（${scopeLabel}）：${key} = ${value}`
-  },
-}
-
-const profileForget = {
-  name: 'profile_forget',
-  description:
-    'Remove one remembered fact about the person you are talking to. In group chats only ' +
-    'public facts can be removed.',
-  parameters: {
-    type: 'object',
-    properties: { key: { type: 'string', description: 'The key to remove' } },
-    required: ['key'],
-    additionalProperties: false,
-  },
-  output: stringOutput(),
-  async execute(args, exec) {
-    const ctx = requireContext(exec)
-    const key = String(args?.key ?? '').trim()
+    const action = String(args?.action ?? '')
+    const target = String(args?.target ?? '')
+    const key = cleanFact(args?.key, 40)
+    const value = cleanFact(args?.value, 400)
+    if (target === 'group') {
+      const group = requireGroup(exec)
+      if (action === 'read') {
+        const rows = readGroupFacts(group.groupId, key || undefined)
+        return rows.length ? formatFacts(rows) : key ? `没有找到：${key}` : '（暂无群画像）'
+      }
+      if (!key) throw new Error('key is required')
+      if (action === 'write') {
+        if (!value) throw new Error('value is required')
+        writeGroupFact(group.groupId, key, value, `user:${group.userId}`)
+        return `已记住群信息：${key} = ${value}`
+      }
+      if (action === 'forget') {
+        return forgetGroupFact(group.groupId, key) ? `已忘记：${key}` : `没有找到：${key}`
+      }
+      throw new Error('unknown profile action')
+    }
+    if (target !== 'user') throw new Error('target must be user or group')
+    if (action === 'read') {
+      const rows = readUserFacts(ctx.userId, {
+        key: key || undefined,
+        publicOnly: ctx.scope === 'group',
+        groupId: ctx.scope === 'group' ? ctx.groupId : '',
+      })
+      return rows.length
+        ? formatFacts(rows, { tagPrivate: ctx.scope === 'private' })
+        : key ? `没有找到：${key}` : '（暂无长期画像）'
+    }
     if (!key) throw new Error('key is required')
-    const removed = forgetUserFact(ctx.userId, key, {
-      publicOnly: ctx.scope === 'group',
-      groupId: ctx.scope === 'group' ? ctx.groupId : '',
-    })
-    return removed ? `已忘记：${key}` : `没有找到：${key}`
-  },
-}
-
-// ── group profile tools ──────────────────────────────────────────
-
-const groupRead = {
-  name: 'group_profile_read',
-  description:
-    "Read this group's profile: topic, atmosphere, recurring subjects, in-jokes and slang, " +
-    'group rules, shared plans. Omit key to read every fact.',
-  parameters: {
-    type: 'object',
-    properties: { key: { type: 'string', description: 'Optional fact key, e.g. 群主题 / 梗' } },
-    additionalProperties: false,
-  },
-  output: stringOutput(),
-  async execute(args, exec) {
-    const ctx = requireGroup(exec)
-    const key = String(args?.key ?? '').trim()
-    const rows = readGroupFacts(ctx.groupId, key || undefined)
-    if (!rows.length) return key ? `没有找到：${key}` : '（暂无群画像）'
-    return formatFacts(rows)
-  },
-}
-
-const groupWrite = {
-  name: 'group_profile_write',
-  description:
-    'Create or update one stable fact about this group (not about one person): its topic, ' +
-    'atmosphere, recurring subjects, in-jokes or slang and what they mean, rules, shared plans. ' +
-    'Use a short stable key such as "群主题", "梗:xxx", "约定".',
-  parameters: {
-    type: 'object',
-    properties: {
-      key: { type: 'string', description: 'Short stable key' },
-      value: { type: 'string', description: 'The fact to remember' },
-    },
-    required: ['key', 'value'],
-    additionalProperties: false,
-  },
-  output: stringOutput(),
-  async execute(args, exec) {
-    const ctx = requireGroup(exec)
-    const key = String(args?.key ?? '').trim()
-    const value = String(args?.value ?? '').trim()
-    if (!key || !value) throw new Error('key and value are required')
-    writeGroupFact(ctx.groupId, key, value, `user:${ctx.userId}`)
-    return `已记住群信息：${key} = ${value}`
-  },
-}
-
-const groupForget = {
-  name: 'group_profile_forget',
-  description: "Remove one fact from this group's profile by key.",
-  parameters: {
-    type: 'object',
-    properties: { key: { type: 'string', description: 'The key to remove' } },
-    required: ['key'],
-    additionalProperties: false,
-  },
-  output: stringOutput(),
-  async execute(args, exec) {
-    const ctx = requireGroup(exec)
-    const key = String(args?.key ?? '').trim()
-    if (!key) throw new Error('key is required')
-    return forgetGroupFact(ctx.groupId, key) ? `已忘记：${key}` : `没有找到：${key}`
+    if (action === 'write') {
+      if (!value) throw new Error('value is required')
+      const visibility = ctx.scope === 'group'
+        ? 'public'
+        : (args?.visibility === 'public' ? 'public' : 'private')
+      const groupId = ctx.scope === 'group' ? String(ctx.groupId || '') : ''
+      writeUserFact(
+        ctx.userId, groupId, key, value, visibility,
+        ctx.scope === 'group' ? `group:${groupId}` : 'private',
+      )
+      const scopeLabel = ctx.scope === 'group'
+        ? '本群公开'
+        : (visibility === 'public' ? '公开' : '私密')
+      return `已记住（${scopeLabel}）：${key} = ${value}`
+    }
+    if (action === 'forget') {
+      const removed = forgetUserFact(ctx.userId, key, {
+        publicOnly: ctx.scope === 'group',
+        groupId: ctx.scope === 'group' ? ctx.groupId : '',
+      })
+      return removed ? `已忘记：${key}` : `没有找到：${key}`
+    }
+    throw new Error('unknown profile action')
   },
 }
 
 const MEMORY_NOTE =
-  '画像存在 SQLite 里：个人用 profile_read / profile_write / profile_forget，' +
-  '群用 group_profile_read / group_profile_write / group_profile_forget。' +
-  '对方说出关于自己的稳定事实时用 profile_write；群的话题、氛围、梗、约定用 group_profile_write。' +
-  '私聊里得知的事默认私密，绝不在群里提起。' +
+  '画像存在 SQLite 里：个人用 profile(action=read|write|forget, target=user)，' +
+  '群用 profile(..., target=group)。对方说出关于自己的稳定事实时写入；' +
+  '群的话题、氛围、梗、约定写入 group。私聊里得知的事默认私密，绝不在群里提起。' +
   '虚构剧情/角色关系由程序管理，不写入真实用户画像或共享文件笔记；不从共享 notes 推断私人剧情。'
 
 export const name = 'user-profile'
@@ -526,9 +466,7 @@ export const inject = ['tools', 'systemPrompt']
 
 export function apply(ctx) {
   getDb()
-  for (const tool of [profileRead, profileWrite, profileForget, groupRead, groupWrite, groupForget]) {
-    ctx.tools.register(tool)
-  }
+  ctx.tools.register(profileTool)
 
   ctx.on('agent/created', ({ agent }) => {
     const sessionId = String(agent.id)

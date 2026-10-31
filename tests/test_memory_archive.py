@@ -35,7 +35,7 @@ def extraction() -> str:
                 }
             ],
             'group_facts': [
-                {'key': '群主题', 'value': '咖啡和日常', 'importance': 2}
+                {'key': '群主题', 'value': '咖啡店', 'importance': 2}
             ],
         },
         ensure_ascii=False,
@@ -143,6 +143,60 @@ class MemoryArchiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.archive.archive_day('group:2', yesterday))
         self.assertNotIn(('group:2', yesterday), self.archive.missing_days(3))
         self.assertFalse(await self.archive.archive_day('group:2', yesterday))
+
+    async def test_group_person_scope_excludes_other_members(self) -> None:
+        now = int(time.time())
+        await self.memory.add_event('group:1', 'group', 1, 8, '小红', '我喜欢美式', now - 10)
+        result = {
+            'summary': '两个人聊了咖啡。',
+            'topics': ['咖啡'],
+            'open_loops': [],
+            'user_facts': [
+                {'user_id': '7', 'key': '喜好', 'value': '喜欢手冲咖啡'},
+                {'user_id': '8', 'key': '喜好', 'value': '喜欢美式'},
+            ],
+            'group_facts': [{'key': '群主题', 'value': '咖啡店'}],
+        }
+
+        async def both(_conversation: str, _prompt: str) -> str:
+            return json.dumps(result, ensure_ascii=False)
+
+        self.archive._generate = both
+        await self.archive.archive_window('group:1', now - 3600, now, session_id='s2')
+        seven = self.archive.user_items('7', group_id='1', is_group=True)
+        eight = self.archive.user_items('8', group_id='1', is_group=True)
+        self.assertEqual([row['value'] for row in seven], ['喜欢手冲咖啡'])
+        self.assertEqual([row['value'] for row in eight], ['喜欢美式'])
+
+    async def test_rotation_splits_at_midnight_and_occurred_at_stays_in_day(self) -> None:
+        yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
+        today = datetime.now().date().isoformat()
+        start, _ = day_bounds(yesterday)
+        await self.memory.add_event('group:3', 'group', 3, 9, '阿蓝', '午夜前的记录', start + 3600)
+        await self.memory.add_event('group:3', 'group', 3, 9, '阿蓝', '午夜后的记录', start + 86400 + 60)
+        async def night(_conversation: str, _prompt: str) -> str:
+            return json.dumps({
+                'summary': '跨午夜的一段记录。',
+                'topics': [],
+                'user_facts': [
+                    {'user_id': '9', 'key': '记录', 'value': '午夜前的记录'},
+                ],
+            }, ensure_ascii=False)
+
+        self.archive._generate = night
+        await self.archive.archive_range(
+            'group:3', start + 3600, start + 86400 + 120, session_id='multi'
+        )
+        with closing(sqlite3.connect(self.path)) as db:
+            days = db.execute(
+                'SELECT day FROM memory_days WHERE conversation_id=? ORDER BY day', ('group:3',)
+            ).fetchall()
+            occurred = db.execute(
+                "SELECT occurred_at FROM memory_items WHERE user_id='9' ORDER BY occurred_at"
+            ).fetchall()
+        self.assertEqual([row[0] for row in days], [yesterday, today])
+        self.assertTrue(occurred)
+        self.assertLess(int(occurred[0][0]), start + 86400)
 
     async def test_recent_context_is_bounded(self) -> None:
         now = int(time.time())

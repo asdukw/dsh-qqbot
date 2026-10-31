@@ -60,6 +60,7 @@ install -m 644 "$SRC/dsh/card-tools.mjs" /opt/qqbot/dsh/plugins/card-tools.mjs
 install -m 644 "$SRC/dsh/user-profile.mjs" /opt/qqbot/dsh/plugins/user-profile.mjs
 install -m 644 "$SRC/dsh/session-history.mjs" /opt/qqbot/dsh/plugins/session-history.mjs
 install -m 644 "$SRC/dsh/memory-archive.mjs" /opt/qqbot/dsh/plugins/memory-archive.mjs
+install -m 644 "$SRC/dsh/tool-router.mjs" /opt/qqbot/dsh/plugins/tool-router.mjs
 install -m 644 "$SRC/dsh/web-search-keyless.mjs" /opt/qqbot/dsh/plugins/web-search-keyless.mjs
 chown -R qqbot:qqbot "$DSH_HOME" /opt/qqbot/dsh/plugins /var/lib/qqbot/dsh-workspace /var/lib/qqbot/dsh-state
 install -m 755 "$SRC/deploy/napcat/napcat-qr.sh" /usr/local/bin/napcat-qr
