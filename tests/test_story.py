@@ -57,6 +57,26 @@ def definition() -> StoryDefinition:
     })
 
 
+def long_definition() -> StoryDefinition:
+    nodes: list[dict] = []
+    for index in range(9):
+        nodes.append({
+            'id': f'n{index}', 'chapter': f'第{index + 1}幕', 'beat': f'节点 {index}',
+            'choices': [
+                {'id': f'go{index}', 'text': '继续',
+                 'target': f'n{index + 1}' if index < 8 else 'final'},
+                {'id': f'final{index}', 'text': '直接结束', 'target': 'final'},
+            ],
+        })
+    nodes.append({'id': 'final', 'chapter': '终章', 'beat': '故事结束', 'ending': '终章'})
+    return StoryDefinition.model_validate({
+        'title': '长链故事', 'background': '一条用于测试的长链。',
+        'synopsis': '验证剧情树不走分页。', 'motivation': '测试。',
+        'character': 'Alice。', 'public_character': 'Alice。', 'start': 'n0',
+        'behavior': {}, 'nodes': nodes,
+    })
+
+
 def card(name: str) -> dict:
     return normalise({'name': name, 'description': name + ' world', 'first_mes': name + ' first meeting'})
 
@@ -125,6 +145,21 @@ class StoryGraphDetailTests(unittest.TestCase):
                 page = store.detail(world['id'], kind='world')
                 self.assertEqual(len(page['nodes']), 4)
                 self.assertEqual(page['total'], 4)
+            finally:
+                store.close()
+
+    def test_graph_detail_is_not_limited_to_the_admin_page_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StoryStore(Path(tmp) / 'profile.db')
+            try:
+                store.save_world('group:1', 'character', 'fingerprint', long_definition())
+                world = store.admin()['worlds'][0]
+                graph = store.detail(world['id'], kind='graph')
+                self.assertEqual(graph['total'], 10)
+                self.assertEqual(len(graph['nodes']), 10)
+                page = store.detail(world['id'], kind='world')
+                self.assertEqual(page['total'], 10)
+                self.assertEqual(len(page['nodes']), 8)
             finally:
                 store.close()
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Maximize2, Minus, Plus } from "lucide-react";
+import { Maximize2, Minus, Network, Plus } from "lucide-react";
 
-import { Notice } from "@/components/common/Bits";
+import { EmptyState, Notice } from "@/components/common/Bits";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -59,6 +59,10 @@ const NODE_H = 98;
 const GAP_X = 88;
 const GAP_Y = 26;
 const PAD = 24;
+const MIN_ZOOM = 0.75;
+const MAX_ZOOM = 1.6;
+const EDGE_COLOR = "hsl(var(--muted-foreground))";
+const EDGE_ACTIVE = "hsl(var(--primary))";
 
 const MILESTONE_LABELS: Record<string, string> = {
   shared_experience: "共同经历",
@@ -110,7 +114,7 @@ function layoutGraph(start: string, nodes: StoryNode[]) {
     else columns.set(level, [node]);
   }
   const order = [...columns.keys()].sort((a, b) => a - b);
-  const maxCount = Math.max(...order.map((level) => columns.get(level)!.length));
+  const maxCount = order.length ? Math.max(...order.map((level) => columns.get(level)!.length)) : 0;
   const height = PAD * 2 + maxCount * NODE_H + Math.max(0, maxCount - 1) * GAP_Y;
   const width =
     PAD * 2 + order.length * NODE_W + Math.max(0, order.length - 1) * GAP_X;
@@ -171,10 +175,11 @@ export function StoryGraph({
 }: {
   data: StoryGraphData;
   selectedId: string | null;
-  onSelect: (node: StoryNode) => void;
+  onSelect: (node: StoryNode | null) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
+  const [fitClipped, setFitClipped] = useState(false);
   const { positions, width, height, reachableMax } = useMemo(
     () => layoutGraph(data.definition.start, data.nodes),
     [data]
@@ -195,6 +200,14 @@ export function StoryGraph({
     [data.nodes, byId]
   );
 
+  const orderedNodes = useMemo(() => {
+    return [...data.nodes].sort((left, right) => {
+      const a = positions.get(left.id);
+      const b = positions.get(right.id);
+      return (a?.level ?? 0) - (b?.level ?? 0) || (a?.y ?? 0) - (b?.y ?? 0);
+    });
+  }, [data.nodes, positions]);
+
   const related = useMemo(() => {
     const set = new Set<string>();
     if (!selectedId) return set;
@@ -210,10 +223,12 @@ export function StoryGraph({
     const container = scrollRef.current;
     if (!container || container.clientWidth < 80) return;
     const next = Math.min(1, (container.clientWidth - 24) / width);
-    setZoom(Math.max(0.4, Number(next.toFixed(2))));
+    setFitClipped(next < MIN_ZOOM);
+    setZoom(Math.min(1, Math.max(MIN_ZOOM, Number(next.toFixed(2)))));
   }
 
   useEffect(() => {
+    setFitClipped(false);
     fit();
     // Fit once per graph; the container width is stable enough for this panel.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -240,30 +255,55 @@ export function StoryGraph({
     });
   }, [selectedId, positions, zoom]);
 
+  if (!data.nodes.length) {
+    return <EmptyState icon={Network} text="这个剧情世界还没有节点。" />;
+  }
+
   return (
     <div className="min-w-0">
       <div
         ref={scrollRef}
-        className="relative h-[52vh] min-h-[320px] overflow-auto rounded-xl border border-slate-200 bg-slate-50"
+        role="region"
+        aria-label="剧情树画布"
+        tabIndex={0}
+        className="relative h-[40vh] min-h-[300px] overflow-auto rounded-xl border border-slate-200 bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-[52vh]"
       >
-        <div className="sticky left-0 top-0 z-20 flex justify-end p-1.5">
-          <div className="flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white/95 p-0.5 shadow-sm">
+        <div className="pointer-events-none sticky left-0 top-0 z-20 flex justify-end p-1.5">
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white/95 p-0.5 shadow-sm">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!selectedId}
+              onClick={() => onSelect(null)}
+            >
+              显示全部
+            </Button>
             <Button
               variant="ghost"
               size="icon"
-              aria-label="缩小"
-              onClick={() => setZoom((value) => Math.max(0.4, Number((value - 0.1).toFixed(2))))}
+              aria-label={`缩小（当前 ${Math.round(zoom * 100)}%）`}
+              disabled={zoom <= MIN_ZOOM}
+              onClick={() =>
+                setZoom((value) => Math.max(MIN_ZOOM, Number((value - 0.1).toFixed(2))))
+              }
             >
               <Minus className="h-3.5 w-3.5" />
             </Button>
-            <span className="w-10 text-center text-[11px] tabular-nums text-slate-500">
+            <span
+              role="status"
+              aria-live="polite"
+              className="w-10 text-center text-[11px] tabular-nums text-slate-600"
+            >
               {Math.round(zoom * 100)}%
             </span>
             <Button
               variant="ghost"
               size="icon"
-              aria-label="放大"
-              onClick={() => setZoom((value) => Math.min(1.6, Number((value + 0.1).toFixed(2))))}
+              aria-label={`放大（当前 ${Math.round(zoom * 100)}%）`}
+              disabled={zoom >= MAX_ZOOM}
+              onClick={() =>
+                setZoom((value) => Math.min(MAX_ZOOM, Number((value + 0.1).toFixed(2))))
+              }
             >
               <Plus className="h-3.5 w-3.5" />
             </Button>
@@ -295,7 +335,7 @@ export function StoryGraph({
                   markerHeight="6"
                   orient="auto-start-reverse"
                 >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill={EDGE_COLOR} />
                 </marker>
               </defs>
               {edges.map((edge) => {
@@ -308,7 +348,7 @@ export function StoryGraph({
                     key={edge.key}
                     d={edgePath(from, to)}
                     fill="none"
-                    stroke={edge.from === selectedId ? "#2563eb" : "#94a3b8"}
+                    stroke={edge.from === selectedId ? EDGE_ACTIVE : EDGE_COLOR}
                     strokeWidth={edge.from === selectedId ? 2 : 1.4}
                     strokeDasharray={to.level <= from.level ? "5 4" : undefined}
                     markerEnd="url(#story-arrow)"
@@ -335,7 +375,7 @@ export function StoryGraph({
                           y={y}
                           textAnchor="middle"
                           fontSize={10}
-                          fill="#475569"
+                          fill={EDGE_COLOR}
                           stroke="#ffffff"
                           strokeWidth={3}
                           paintOrder="stroke"
@@ -347,7 +387,7 @@ export function StoryGraph({
                 : null}
             </svg>
 
-            {data.nodes.map((node) => {
+            {orderedNodes.map((node) => {
               const position = positions.get(node.id);
               if (!position) return null;
               const isStart = node.id === data.definition.start;
@@ -358,7 +398,7 @@ export function StoryGraph({
                 <button
                   key={node.id}
                   type="button"
-                  onClick={() => onSelect(node)}
+                  onClick={() => onSelect(selected ? null : node)}
                   aria-pressed={selected}
                   title={node.beat}
                   style={{
@@ -377,11 +417,11 @@ export function StoryGraph({
                           ? "border-amber-300"
                           : "border-slate-200",
                     unreachable && "border-dashed opacity-60",
-                    dim && !selected && "opacity-30"
+                    dim && !selected && "opacity-40"
                   )}
                 >
                   <span className="flex items-center gap-1 overflow-hidden">
-                    <span className="truncate font-mono text-[10px] text-slate-400">{node.id}</span>
+                    <span className="truncate font-mono text-[11px] text-slate-500">{node.id}</span>
                     {isStart ? <Badge variant="success">起点</Badge> : null}
                     {node.ending ? <Badge variant="warning">结局</Badge> : null}
                     {unreachable ? <Badge variant="muted">不可达</Badge> : null}
@@ -392,7 +432,7 @@ export function StoryGraph({
                   <span className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-slate-500">
                     {node.beat}
                   </span>
-                  <span className="mt-auto truncate text-[10px] text-slate-400">
+                  <span className="mt-auto truncate text-[11px] text-slate-500">
                     {node.ending ? `结局：${node.ending}` : `${node.choices.length} 个选项`}
                   </span>
                 </button>
@@ -410,21 +450,32 @@ export function StoryGraph({
           <span className="h-2 w-2 rounded-full bg-amber-400" /> 结局
         </span>
         <span className="inline-flex items-center gap-1">
-          <span className="h-2 w-2 rounded-full bg-slate-300" /> 分支
+          <span className="h-2 w-2 rounded-sm border border-slate-300 bg-white" /> 分支
         </span>
-        <span>点击节点查看详情；选中后高亮相邻节点，蓝色曲线标注选项。</span>
+        <span>→ 选项去向</span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-4 border-t border-dashed border-slate-400" /> 回到更早/同层
+        </span>
+        <span>点击或 Tab 聚焦节点，Enter 查看详情；选中后高亮相邻节点。</span>
       </div>
+      {fitClipped ? (
+        <p className="mt-1 text-[11px] leading-relaxed text-amber-700">
+          图较宽，已保留可读缩放；可横向滚动，或使用下方列表查看全部节点。
+        </p>
+      ) : null}
 
       <details className="mt-2 rounded-xl border border-slate-200">
         <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-slate-600">
           以列表查看全部节点
         </summary>
         <div className="grid gap-1 border-t border-slate-100 p-2 sm:grid-cols-2">
-          {data.nodes.map((node) => (
+          {orderedNodes.map((node) => (
             <button
               key={node.id}
               type="button"
               onClick={() => onSelect(node)}
+              aria-pressed={node.id === selectedId}
+              aria-label={`${node.chapter}（${node.id}）${node.ending ? "，结局" : `，${node.choices.length} 个选项`}`}
               className={cn(
                 "rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors",
                 node.id === selectedId
@@ -432,7 +483,7 @@ export function StoryGraph({
                   : "text-slate-600 hover:bg-slate-50"
               )}
             >
-              <span className="font-mono text-[10px] text-slate-400">{node.id}</span>
+              <span className="font-mono text-[11px] text-slate-500">{node.id}</span>
               <span className="ml-2 font-medium">{node.chapter}</span>
               <span className="ml-1 text-slate-400">
                 {node.ending ? "结局" : `${node.choices.length} 选项`}
@@ -465,10 +516,15 @@ export function StoryNodeDetails({
     );
   }
   return (
-    <div className="flex h-full min-h-[18rem] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
+    <div
+      role="region"
+      aria-live="polite"
+      aria-label={`节点详情：${node.chapter}`}
+      className="flex h-full min-h-[18rem] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white"
+    >
       <div className="border-b border-slate-100 p-4">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="font-mono text-[11px] text-slate-400">#{node.id}</span>
+          <span className="font-mono text-[11px] text-slate-500">#{node.id}</span>
           {node.id === start ? <Badge variant="success">起点</Badge> : null}
           {node.ending ? <Badge variant="warning">结局</Badge> : null}
         </div>
@@ -491,10 +547,11 @@ export function StoryNodeDetails({
                 <button
                   type="button"
                   onClick={() => onSelect(choice.target)}
-                  className="mt-1 inline-flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-700 hover:underline"
+                  aria-label={`跳转到节点 ${choice.target}`}
+                  className="mt-1 inline-flex min-h-6 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 hover:text-blue-700"
                 >
                   → {target ? target.chapter : choice.target}
-                  <span className="font-mono text-slate-400">#{choice.target}</span>
+                  <span className="font-mono text-slate-500">#{choice.target}</span>
                 </button>
                 <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
                   条件：{condition || "无条件"}

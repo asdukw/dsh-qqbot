@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BookOpen,
   FileJson,
@@ -64,6 +64,7 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
   const [graphLoading, setGraphLoading] = useState(false);
   const [graphError, setGraphError] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const graphSeq = useRef(0);
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
@@ -92,6 +93,7 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
     finally { setBusy(false); }
   }
   async function openGraph(world: World) {
+    const seq = ++graphSeq.current;
     setGraphWorld(world);
     setGraph(null);
     setGraphError("");
@@ -99,18 +101,23 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
     setGraphLoading(true);
     try {
       const payload = await requestJson<StoryGraphData>(`/api/story/${world.id}?kind=graph`);
+      if (seq !== graphSeq.current) return;
       setGraph(payload);
-      setSelectedNodeId(payload.definition.start);
+      setGraphError("");
+      setSelectedNodeId(null);
     } catch (error) {
+      if (seq !== graphSeq.current) return;
       setGraphError(error instanceof Error ? error.message : String(error));
     } finally {
-      setGraphLoading(false);
+      if (seq === graphSeq.current) setGraphLoading(false);
     }
   }
   function closeGraph() {
+    graphSeq.current += 1;
     setGraphWorld(null);
     setGraph(null);
     setGraphError("");
+    setGraphLoading(false);
     setSelectedNodeId(null);
   }
   async function inspect(id: string, kind: string, detailOffset = 0) {
@@ -444,7 +451,11 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
         title={graph?.definition.title || "剧情树"}
         description={
           graphWorld
-            ? `${conversationLabel(graphWorld.conversation)} · ${graph?.total ?? 0} 个节点`
+            ? graph
+              ? `${conversationLabel(graphWorld.conversation)} · ${graph.total} 个节点`
+              : graphLoading
+                ? "正在加载剧情树…"
+                : undefined
             : undefined
         }
         onClose={closeGraph}
@@ -461,13 +472,22 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
             <LoadingHint loading label="正在加载剧情树…" />
           </div>
         ) : graphError ? (
-          <Notice tone="danger">{graphError}</Notice>
+          <div className="space-y-3">
+            <Notice tone="danger">{graphError}</Notice>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => graphWorld && void openGraph(graphWorld)}
+            >
+              重试
+            </Button>
+          </div>
         ) : graph ? (
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
             <StoryGraph
               data={graph}
               selectedId={selectedNodeId}
-              onSelect={node => setSelectedNodeId(node.id)}
+              onSelect={node => setSelectedNodeId(node ? node.id : null)}
             />
             <StoryNodeDetails
               node={selectedNode}
