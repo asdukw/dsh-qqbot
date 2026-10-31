@@ -513,12 +513,16 @@ class StoryStore:
             return [row[0] for row in self._db.execute("SELECT DISTINCT run_id FROM story_outbox WHERE status='pending' LIMIT 10")]
 
     def detail(self, key: str, *, kind: str = 'run', offset: int = 0) -> dict:
-        if kind == 'world':
+        if kind in ('world', 'graph'):
             world = self._one('SELECT * FROM story_worlds WHERE id=?', (key,))
             if world is None:
                 raise ValueError('world not found')
             definition = json.loads(world.pop('definition'))
             nodes = definition.pop('nodes')
+            if kind == 'graph':
+                # Read-only graph view: definitions are capped at 24 nodes, so
+                # returning the whole graph is bounded and avoids paging loops.
+                return {**world, 'definition': definition, 'nodes': nodes, 'total': len(nodes)}
             return {**world, 'definition': definition, 'nodes': nodes[max(0, offset):max(0, offset) + 8], 'total': len(nodes)}
         snapshot = self.snapshot(key)
         with self.transaction() as db:

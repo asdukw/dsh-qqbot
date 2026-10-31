@@ -12,12 +12,16 @@ import {
   FilterBar,
   InfoList,
   InfoRow,
+  LoadingHint,
   Notice,
   PageStack,
   SectionCard,
   SectionHeading,
   Toolbar,
 } from "@/components/common/Bits";
+import { Modal } from "@/components/models/Modal";
+import { StoryGraph, StoryNodeDetails } from "@/components/story/StoryGraph";
+import type { StoryGraphData } from "@/components/story/StoryGraph";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Field } from "@/components/ui/form";
@@ -55,6 +59,11 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
   const [original, setOriginal] = useState("");
   const [conversation, setConversation] = useState("");
   const [detailQuery, setDetailQuery] = useState<{ id: string; kind: string; offset: number } | null>(null);
+  const [graphWorld, setGraphWorld] = useState<World | null>(null);
+  const [graph, setGraph] = useState<StoryGraphData | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphError, setGraphError] = useState("");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
@@ -82,6 +91,28 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
     } catch (error) { setNotice({ text: String(error), tone: "danger" }); }
     finally { setBusy(false); }
   }
+  async function openGraph(world: World) {
+    setGraphWorld(world);
+    setGraph(null);
+    setGraphError("");
+    setSelectedNodeId(null);
+    setGraphLoading(true);
+    try {
+      const payload = await requestJson<StoryGraphData>(`/api/story/${world.id}?kind=graph`);
+      setGraph(payload);
+      setSelectedNodeId(payload.definition.start);
+    } catch (error) {
+      setGraphError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGraphLoading(false);
+    }
+  }
+  function closeGraph() {
+    setGraphWorld(null);
+    setGraph(null);
+    setGraphError("");
+    setSelectedNodeId(null);
+  }
   async function inspect(id: string, kind: string, detailOffset = 0) {
     setDetailQuery({ id, kind, offset: detailOffset });
     try { setDetail(await requestJson(`/api/story/${id}?kind=${kind}&offset=${detailOffset}`)); }
@@ -90,6 +121,7 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
 
   const runs = data?.runs ?? [];
   const worlds = data?.worlds ?? [];
+  const selectedNode = graph?.nodes.find(node => node.id === selectedNodeId) ?? null;
   const hasDiagnostics = Boolean(
     data?.deliveries.length || data?.operations.length || data?.drafts.length ||
     data?.attempts.length || data?.generations.length || data?.audit.length
@@ -235,9 +267,14 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
                     {world.fingerprint.slice(0, 10)}…
                   </span>
                 </span>
-                <Button variant="outline" size="sm" onClick={() => inspect(world.id, "world")}>
-                  查看定义
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={() => void openGraph(world)}>
+                    剧情树
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => inspect(world.id, "world")}>
+                    查看定义
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
@@ -402,6 +439,45 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
           </div>
         </SectionCard>
       ) : null}
+      <Modal
+        open={graphWorld !== null}
+        title={graph?.definition.title || "剧情树"}
+        description={
+          graphWorld
+            ? `${conversationLabel(graphWorld.conversation)} · ${graph?.total ?? 0} 个节点`
+            : undefined
+        }
+        onClose={closeGraph}
+        wide
+        panelClassName="max-w-6xl"
+        footer={
+          <Button variant="outline" size="sm" onClick={closeGraph}>
+            关闭
+          </Button>
+        }
+      >
+        {graphLoading ? (
+          <div className="flex h-64 items-center justify-center">
+            <LoadingHint loading label="正在加载剧情树…" />
+          </div>
+        ) : graphError ? (
+          <Notice tone="danger">{graphError}</Notice>
+        ) : graph ? (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+            <StoryGraph
+              data={graph}
+              selectedId={selectedNodeId}
+              onSelect={node => setSelectedNodeId(node.id)}
+            />
+            <StoryNodeDetails
+              node={selectedNode}
+              nodes={graph.nodes}
+              start={graph.definition.start}
+              onSelect={setSelectedNodeId}
+            />
+          </div>
+        ) : null}
+      </Modal>
     </PageStack>
   );
 }

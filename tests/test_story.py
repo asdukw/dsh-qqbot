@@ -110,6 +110,25 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(require_safe('grape'), 'grape')
 
 
+class StoryGraphDetailTests(unittest.TestCase):
+    def test_graph_detail_returns_all_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StoryStore(Path(tmp) / 'profile.db')
+            try:
+                store.save_world('group:1', 'character', 'fingerprint', definition())
+                world = store.admin()['worlds'][0]
+                graph = store.detail(world['id'], kind='graph')
+                self.assertEqual(graph['total'], 4)
+                self.assertEqual([node['id'] for node in graph['nodes']],
+                                 ['opening', 'promise', 'friend', 'farewell'])
+                self.assertEqual(graph['definition']['start'], 'opening')
+                page = store.detail(world['id'], kind='world')
+                self.assertEqual(len(page['nodes']), 4)
+                self.assertEqual(page['total'], 4)
+            finally:
+                store.close()
+
+
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
