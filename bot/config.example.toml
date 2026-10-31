@@ -120,6 +120,21 @@ json_mode = false  # true only for providers supporting response_format
 # tone = "嘴硬心软，尊重自主选择"
 # pace = "日常铺垫、共同经历、冲突修复；不要跳到恋人"
 
+[memory]
+# Daily/user memory consolidation. Raw chat stays in memory.db; this layer
+# writes memory_days + memory_items for cross-session recall.
+enabled = true
+# Empty -> [paths].database (memory.db).
+database = ""
+archive_on_rotation = true
+daily_hour = 4          # daily fallback after session rotation
+check_seconds = 300
+backfill_days = 30      # summarize missing recent days on startup (0 disables)
+retention_days = 365
+sample_messages = 200
+max_input_chars = 12000
+max_output_tokens = 1600
+
 [usage]
 # Token ledger and per-message analytics for the admin UI.
 database = "/var/lib/qqbot/usage.db"

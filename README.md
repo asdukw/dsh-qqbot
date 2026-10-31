@@ -298,12 +298,13 @@ $M --remove-card-alias 肥鱼
 
 ## 记忆
 
-四层：
+五层：
 
 1. **会话记忆**：DSH session JSONL，位于 `/var/lib/qqbot/dsh-home/sessions`，私聊按人、群聊每群共用一份，自动压缩；个人剧情不使用群 DSH session。
-2. **用户画像**：SQLite `/var/lib/qqbot/dsh-state/profile.db` 的 `user_facts`，按 `(user_id, group_id, key)` 存；私聊使用空 group_id，群事实按群隔离。每条事实带可见范围：私聊里得知的默认 `private`，只在私聊注入，群里看不到也改不了；群里得知的是 `public`。工具：`profile_read` / `profile_write` / `profile_forget`。
-3. **群画像**：同库的 `group_facts`，按群号存，记群主题、氛围、常聊话题、梗和黑话、群规、约定。只在该群里注入。工具：`group_profile_read` / `group_profile_write` / `group_profile_forget`（私聊里不可用）。
-4. **文件记忆**：`/var/lib/qqbot/dsh-workspace/memory/`；不再写共享 `lore.md`，人设按 session 注入；共享 `notes/` 不作个人剧情或私密关系后端。
+2. **长期记忆归档**：`memory.db` 的 `memory_days`（每会话每天一份摘要）和 `memory_items`（用户/群事实，带重要性、来源、可见范围和失效时间）。session rotation 前、每日兜底和启动回填（默认最近 30 天）会异步整理；工具为 `memory_search`、`memory_timeline`、`memory_person`，只读且沿用当前群/私聊的隐私边界。配置见 `[memory]`。
+3. **用户画像**：SQLite `/var/lib/qqbot/dsh-state/profile.db` 的 `user_facts`，按 `(user_id, group_id, key)` 存；私聊使用空 group_id，群事实按群隔离。每条事实带可见范围：私聊里得知的默认 `private`，只在私聊注入，群里看不到也改不了；群里得知的是 `public`。工具：`profile_read` / `profile_write` / `profile_forget`。
+4. **群画像**：同库的 `group_facts`，按群号存，记群主题、氛围、常聊话题、梗和黑话、群规、约定。只在该群里注入。工具：`group_profile_read` / `group_profile_write` / `group_profile_forget`（私聊里不可用）。
+5. **文件记忆**：`/var/lib/qqbot/dsh-workspace/memory/`；不再写共享 `lore.md`，人设按 session 注入；共享 `notes/` 不作个人剧情或私密关系后端。
 
 会话 JSONL 不在文件工具的工作区内，所以另有一个只读的 `session-history` 插件，只在模型主动调用时读取，不会每轮注入：
 

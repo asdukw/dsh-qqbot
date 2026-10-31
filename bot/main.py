@@ -72,6 +72,7 @@ from meme import (
     available as meme_available,
 )
 from memory import Memory, format_recall
+from memory_archive import MEMORY_SYSTEM, MemoryArchive, MemoryArchiveSettings
 from models import EDITABLE, ModelRecord, ModelRegistry, dsh_effort, parse_key
 from onebot import (
     EMPTY_REPLY,
@@ -315,6 +316,22 @@ class VoiceSection:
 
 
 @dataclass
+class MemorySection:
+    """Long-term daily/user memory consolidation."""
+
+    enabled: bool = True
+    database: str = ""  # empty -> paths.database
+    archive_on_rotation: bool = True
+    daily_hour: int = 4
+    check_seconds: int = 300
+    backfill_days: int = 30
+    retention_days: int = 365
+    sample_messages: int = 200
+    max_input_chars: int = 12000
+    max_output_tokens: int = 1600
+
+
+@dataclass
 class RelationSection:
     # Per-user affinity/impression, updated by main-model hidden markers.
     enabled: bool = True
@@ -375,6 +392,7 @@ class AppConfig:
     meme: MemeSection = field(default_factory=MemeSection)
     feeds: FeedsSection = field(default_factory=FeedsSection)
     relation: RelationSection = field(default_factory=RelationSection)
+    memory: MemorySection = field(default_factory=MemorySection)
     story: StorySettings = field(default_factory=StorySettings)
     video: VideoSettings = field(default_factory=VideoSettings)
     bot: BotSection = field(default_factory=BotSection)
@@ -550,6 +568,20 @@ def load_config(path: str | Path) -> AppConfig:
         ),
     )
 
+    memory_raw = _section(table, "memory")
+    memory = MemorySection(
+        enabled=bool(memory_raw.get("enabled", True)),
+        database=str(memory_raw.get("database", "")),
+        archive_on_rotation=bool(memory_raw.get("archive_on_rotation", True)),
+        daily_hour=min(23, max(0, int(memory_raw.get("daily_hour", 4)))),
+        check_seconds=max(60, int(memory_raw.get("check_seconds", 300))),
+        backfill_days=max(0, min(90, int(memory_raw.get("backfill_days", 30)))),
+        retention_days=max(30, int(memory_raw.get("retention_days", 365))),
+        sample_messages=max(20, min(1000, int(memory_raw.get("sample_messages", 200)))),
+        max_input_chars=max(2000, min(40000, int(memory_raw.get("max_input_chars", 12000)))),
+        max_output_tokens=max(256, min(4000, int(memory_raw.get("max_output_tokens", 1600)))),
+    )
+
     tasks_raw = _section(table, "tasks")
     tasks = TasksSection(
         database=(
@@ -668,6 +700,7 @@ def load_config(path: str | Path) -> AppConfig:
         meme=meme,
         feeds=feeds,
         relation=relation,
+        memory=memory,
         story=StorySettings.model_validate(_section(table, "story")),
         video=video,
         bot=BotSection(
@@ -881,6 +914,27 @@ class Bot(PersonaRuntime):
             daily_hour=config.dsh.session_rotate_daily_hour,
         )
         self._seed_sessions()
+        self.memory_archive: MemoryArchive | None = None
+        if config.memory.enabled:
+            archive_path = config.memory.database or config.paths.database
+            self.memory_archive = MemoryArchive(
+                archive_path,
+                MemoryArchiveSettings(
+                    enabled=True,
+                    database=archive_path,
+                    archive_on_rotation=config.memory.archive_on_rotation,
+                    daily_hour=config.memory.daily_hour,
+                    check_seconds=config.memory.check_seconds,
+                    backfill_days=config.memory.backfill_days,
+                    retention_days=config.memory.retention_days,
+                    sample_messages=config.memory.sample_messages,
+                    max_input_chars=config.memory.max_input_chars,
+                    max_output_tokens=config.memory.max_output_tokens,
+                ),
+                generate=self._memory_generate,
+            )
+            if config.memory.archive_on_rotation:
+                self.sessions.on_rotate = self._archive_session_rotation
         if (
             config.dsh.image_mode == "placeholder"
             and os.path.abspath(config.dsh.workspace) != os.path.abspath("/var/lib/qqbot/dsh-workspace")
@@ -901,6 +955,7 @@ class Bot(PersonaRuntime):
         self._approval_worker: ApprovalWorker | None = None
         self.daily_store = daily
         self._daily: DailyReporter | None = None
+        self._memory_task: asyncio.Task[None] | None = None
         if daily is not None:
             self._daily = DailyReporter(
                 daily,
@@ -989,6 +1044,13 @@ class Bot(PersonaRuntime):
             await self._scheduler.stop()
         if self._feed_poller is not None:
             await self._feed_poller.stop()
+        if self._memory_task is not None:
+            self._memory_task.cancel()
+            try:
+                await self._memory_task
+            except asyncio.CancelledError:
+                pass
+            self._memory_task = None
         if self._daily is not None:
             await self._daily.stop()
         if self._approval_worker is not None:
@@ -1002,6 +1064,9 @@ class Bot(PersonaRuntime):
         if self._usage is not None:
             self._usage.close()
         self.memory.close()
+        archive = getattr(self, 'memory_archive', None)
+        if archive is not None:
+            archive.close()
         self.sessions.close()
         self.personas.close()
         self.cards.close()
@@ -1371,6 +1436,96 @@ class Bot(PersonaRuntime):
             self.proactive.note_speaking(chat_id, time.time())
         else:
             await self.onebot.send_private(chat_id, text)
+
+    async def _memory_generate(self, conversation_id: str, prompt: str) -> str:
+        messages = [
+            {"role": "system", "content": MEMORY_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            result = await self.client.complete(
+                messages,
+                purpose="memory_extract",
+                conversation_id=conversation_id,
+                json_mode=True,
+                max_tokens=self.config.memory.max_output_tokens,
+                attempts=1,
+            )
+        except LLMError:
+            # Some OpenAI-compatible proxies reject response_format; the prompt
+            # already demands a bare JSON object, so retry in plain text mode.
+            result = await self.client.complete(
+                messages,
+                purpose="memory_extract",
+                conversation_id=conversation_id,
+                max_tokens=self.config.memory.max_output_tokens,
+                attempts=1,
+            )
+        return result.content
+
+    def _archive_session_rotation(self, conversation_id: str, previous: Any) -> None:
+        archive = getattr(self, "memory_archive", None)
+        if archive is None or not self.config.memory.enabled:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        start_at = int(getattr(previous, "started_at", 0) or 0)
+        if start_at <= 0:
+            start_at = int(time.time()) - 86400
+        self._spawn(
+            archive.archive_window(
+                conversation_id,
+                start_at,
+                int(time.time()),
+                session_id=str(getattr(previous, "session_id", "")),
+                generation=int(getattr(previous, "generation", 0)),
+            )
+        )
+
+    def start_memory(self) -> None:
+        archive = getattr(self, "memory_archive", None)
+        if archive is None or not self.config.memory.enabled:
+            return
+        self._memory_task = asyncio.create_task(self._memory_loop(), name="qqbot-memory")
+        log.info(
+            "memory archive started (daily=%02d:00, backfill=%d day(s))",
+            self.config.memory.daily_hour,
+            self.config.memory.backfill_days,
+        )
+
+    async def _memory_loop(self) -> None:
+        archive = self.memory_archive
+        settings = self.config.memory
+        assert archive is not None
+        await asyncio.sleep(30)
+        backfilled = False
+        last_daily = ""
+        while not self._closed:
+            try:
+                if not backfilled:
+                    jobs = await asyncio.to_thread(archive.missing_days, settings.backfill_days)
+                    log.info("memory backfill: %d conversation/day job(s)", len(jobs))
+                    for conversation_id, day in jobs:
+                        if self._closed:
+                            break
+                        await archive.archive_day(conversation_id, day)
+                        await asyncio.sleep(1.5)
+                    backfilled = True
+                now = datetime.now(TZ)
+                if now.hour >= settings.daily_hour:
+                    yesterday = (now.date() - timedelta(days=1)).isoformat()
+                    if last_daily != yesterday:
+                        jobs = await asyncio.to_thread(archive.missing_days, 1)
+                        for conversation_id, day in jobs:
+                            if self._closed:
+                                break
+                            await archive.archive_day(conversation_id, day)
+                        last_daily = yesterday
+            except Exception:  # noqa: BLE001 - memory must not break the bot
+                log.exception("memory archive tick failed")
+            await asyncio.sleep(max(60, settings.check_seconds))
 
     def start_daily(self) -> None:
         if self._daily is None or not self.config.daily.enabled:
@@ -3457,6 +3612,7 @@ async def run_ws(config: AppConfig) -> int:
     bot.start_scheduler()
     bot.start_feeds()
     bot.start_daily()
+    bot.start_memory()
     bot.start_approvals()
     bot.start_personas()
     log.info("bot started (%s via WebSocket)", record.key)

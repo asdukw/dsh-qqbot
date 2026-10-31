@@ -7,15 +7,18 @@ history in ``memory.db`` and FTS recall stay keyed by the conversation.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Shanghai")
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_state (
@@ -66,6 +69,7 @@ class SessionStore:
         # session was started on an earlier day. -1 disables daily rotation.
         self.daily_hour = int(daily_hour) if 0 <= int(daily_hour) <= 23 else -1
         self._lock = threading.Lock()
+        self.on_rotate: Callable[[str, SessionState], None] | None = None
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -121,6 +125,15 @@ class SessionStore:
         assert row is not None
         return row
 
+    def _notify_rotate(self, state: SessionState) -> None:
+        callback = self.on_rotate
+        if callback is None:
+            return
+        try:
+            callback(state.conversation_id, state)
+        except Exception:  # noqa: BLE001 - archiving must not break rotation
+            log.exception("session rotate callback failed for %s", state.conversation_id)
+
     def _rotate_locked(self, state: SessionState, now: int) -> SessionState:
         generation = state.generation + 1
         self._db.execute(
@@ -129,7 +142,7 @@ class SessionStore:
             (generation, now, now, state.conversation_id),
         )
         self._db.commit()
-        return SessionState(
+        rotated = SessionState(
             conversation_id=state.conversation_id,
             generation=generation,
             session_id=self.session_id_for(state.conversation_id, generation),
@@ -137,6 +150,8 @@ class SessionStore:
             last_active=now,
             messages=0,
         )
+        self._notify_rotate(state)
+        return rotated
 
     def seed_existing(
         self,
@@ -239,7 +254,8 @@ class SessionStore:
             ).fetchone()
             previous = str(row[0])
             if previous != token:
-                if previous or explicit:
+                rotated = bool(previous or explicit)
+                if rotated:
                     # Keep the generation and persona token in one commit.
                     self._db.execute(
                         'UPDATE session_state SET generation=generation+1, started_at=?, '
@@ -251,6 +267,8 @@ class SessionStore:
                     (token, cutoff, conversation_id),
                 )
                 self._db.commit()
+                if rotated:
+                    self._notify_rotate(state)
                 row = self._row(conversation_id)
                 assert row is not None
                 state = self._state(row)
