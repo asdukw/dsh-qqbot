@@ -182,11 +182,18 @@ class StepFunSynthTests(unittest.TestCase):
 
 class VoiceProbabilityTests(unittest.TestCase):
     def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self.bot = object.__new__(Bot)
         self.bot.config = AppConfig()
         self.bot.config.voice.enabled = True
         self.bot.config.voice.probability = 0.5
         self.bot.config.voice.max_chars = 80
+        self.bot.config.voice.probability_file = str(
+            Path(self._tmp.name) / "voice-probability.json"
+        )
 
     def test_roll_follows_the_configured_probability(self) -> None:
         from unittest.mock import patch

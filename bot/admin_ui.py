@@ -25,7 +25,8 @@ compatibility. ``POST /api/models/provider-models`` asks a saved provider
 for its model list so the panel does not need a hand-typed model id.
 The voice page switches the active TTS voice online through
 ``POST /api/voice/active`` (written to the shared voice state file the bot
-re-reads before every voice reply) and previews it through
+re-reads before every voice reply), sets the voice probability through
+``POST /api/voice/probability``, and previews voices through
 ``POST /api/voice/preview``.
 """
 
@@ -60,7 +61,7 @@ from admin_insights import clean_conversation, fun_data, usage_data
 from admin_story import queue_story, story_data, story_detail
 from admin_video import handle_post as video_credentials_post
 from admin_video import status_payload as video_credentials_payload
-from admin_voice import apply_voice_action, preview_audio, voice_data
+from admin_voice import apply_probability_action, apply_voice_action, preview_audio, voice_data
 from approvals import ApprovalRecord, ApprovalStore
 from models import (
     BUILTIN_PROVIDERS,
@@ -1822,7 +1823,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             video_credentials_post(self, path)
             return
 
-        if path in ("/api/voice/active", "/api/voice/preview"):
+        if path in ("/api/voice/active", "/api/voice/probability", "/api/voice/preview"):
             if not self._api_guard() or not self._mutation_guard():
                 return
             payload = self._read_payload()
@@ -1830,6 +1831,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if path == "/api/voice/active":
                     self._send_json(
                         HTTPStatus.OK, apply_voice_action(self.config, payload)
+                    )
+                elif path == "/api/voice/probability":
+                    self._send_json(
+                        HTTPStatus.OK, apply_probability_action(self.config, payload)
                     )
                 else:
                     body = preview_audio(self.config, payload)

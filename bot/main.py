@@ -131,7 +131,7 @@ from voice import (
     synthesize_fish,
     synthesize_stepfun,
 )
-from voice_settings import VoiceSettingsError, VoiceStore
+from voice_settings import ProbabilityStore, VoiceSettingsError, VoiceStore
 
 from cards import CardError, CardRecord, CardRegistry, CharacterCard
 
@@ -304,12 +304,14 @@ class VoiceSection:
     instruction: str = ""
     speed: float = 1.0
     # Chance to voice a short proactive reply the model did not mark [语音].
-    probability: float = 0.4
+    probability: float = 0.25
     # 0 = no extra cap (provider limit is 1000); >0 limits the spoken text.
     max_chars: int = 0
     cooldown_seconds: int = 30
     # 面板在线切换的音色覆盖值；每次语音回复前重读，无需重启。
     state_file: str = "/var/lib/qqbot/voice-state.json"
+    # 面板可配置的发送概率覆盖值；缺省沿用上面的 probability。
+    probability_file: str = "/var/lib/qqbot/voice-probability.json"
 
 
 @dataclass
@@ -539,10 +541,13 @@ def load_config(path: str | Path) -> AppConfig:
         base_url=str(voice_raw.get("base_url", "https://api.stepfun.com")),
         instruction=str(voice_raw.get("instruction", "")),
         speed=float(voice_raw.get("speed", 1.0)),
-        probability=max(0.0, min(1.0, float(voice_raw.get("probability", 0.4)))),
+        probability=max(0.0, min(1.0, float(voice_raw.get("probability", 0.25)))),
         max_chars=max(0, int(voice_raw.get("max_chars", 0))),
         cooldown_seconds=max(0, int(voice_raw.get("cooldown_seconds", 30))),
         state_file=str(voice_raw.get("state_file", "/var/lib/qqbot/voice-state.json")),
+        probability_file=str(
+            voice_raw.get("probability_file", "/var/lib/qqbot/voice-probability.json")
+        ),
     )
 
     tasks_raw = _section(table, "tasks")
@@ -1805,6 +1810,13 @@ class Bot(PersonaRuntime):
         """config.toml 的 [voice] 叠加面板选择；文件缺失或无效时退回配置。"""
         base = self.config.voice
         try:
+            override = ProbabilityStore(base.probability_file).get()
+        except VoiceSettingsError as exc:
+            log.warning("ignoring voice probability: %s", exc)
+        else:
+            if override is not None:
+                base = replace(base, probability=override.probability)
+        try:
             selection = VoiceStore(base.state_file).active()
         except VoiceSettingsError as exc:
             log.warning("ignoring voice settings: %s", exc)
@@ -1950,7 +1962,7 @@ class Bot(PersonaRuntime):
 
     def _voice_roll(self, text: str) -> bool:
         """Random gate for voicing an unmarked proactive reply."""
-        config = self.config.voice
+        config = self._voice_section()
         if not config.enabled or config.probability <= 0:
             return False
         cleaned = " ".join((text or "").split())

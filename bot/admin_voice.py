@@ -30,7 +30,13 @@ from voice_catalog import (
     validate_provider,
     validate_voice_id,
 )
-from voice_settings import VoiceSelection, VoiceStore, state_path
+from voice_settings import (
+    ProbabilityStore,
+    VoiceSelection,
+    VoiceStore,
+    probability_path,
+    state_path,
+)
 
 SAMPLE_TEXT = "你好呀，听听这个音色的感觉怎么样？"
 PREVIEW_TIMEOUT = 25.0
@@ -115,12 +121,33 @@ def _providers() -> list[dict[str, Any]]:
     return rows
 
 
+def _config_probability(raw: dict[str, Any]) -> float:
+    try:
+        value = float(raw.get("probability", 0.25))
+    except (TypeError, ValueError):
+        return 0.25
+    return min(1.0, max(0.0, value))
+
+
+def probability_data(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("voice") or {}
+    default = _config_probability(raw)
+    override = ProbabilityStore(probability_path(raw)).get()
+    return {
+        "probability": override.probability if override else default,
+        "probability_source": "panel" if override else "config",
+        "probability_default": default,
+        "probability_updated_at": override.updated_at if override else None,
+    }
+
+
 def voice_data(config: dict[str, Any]) -> dict[str, Any]:
     active, source, updated_at = _resolved(config)
     base = _config_voice(config)
     if source == "config":
         base["name"] = active["name"]
     return {
+        **probability_data(config),
         "generated_at": int(time.time()),
         "enabled": bool((config.get("voice") or {}).get("enabled", True)),
         "source": source,
@@ -165,6 +192,27 @@ def _selection(config: dict[str, Any], provider: str, voice: str, name: str) -> 
         api_key_env=connection["api_key_env"],
         base_url=connection["base_url"],
     )
+
+
+def apply_probability_action(config: dict[str, Any], payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求格式无效")
+    store = ProbabilityStore(probability_path(config.get("voice")))
+    if payload.get("clear") is True:
+        if set(payload) != {"clear"}:
+            raise ValueError("请求包含未知字段")
+        store.clear()
+        return voice_data(config)
+    if set(payload) != {"probability"}:
+        raise ValueError("请求包含未知字段")
+    value = payload["probability"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("概率必须是 0 到 1 之间的数字")
+    probability = float(value)
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("概率必须在 0 到 1 之间")
+    store.save(probability)
+    return voice_data(config)
 
 
 def apply_voice_action(config: dict[str, Any], payload: Any) -> dict[str, Any]:

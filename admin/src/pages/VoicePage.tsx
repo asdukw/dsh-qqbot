@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AudioLines, Check, Play, RefreshCw } from "lucide-react";
+import { AudioLines, Check, Percent, Play, RefreshCw } from "lucide-react";
 
 import {
   ErrorBanner,
@@ -10,6 +10,8 @@ import {
 } from "@/components/common/Bits";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Field } from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
 import type { VoiceData, VoiceEntry, VoiceProviderId } from "@/lib/analytics";
 import { requestBlob, requestJson } from "@/lib/api";
 import { formatTs } from "@/lib/format";
@@ -32,7 +34,14 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
   const [previewing, setPreviewing] = useState("");
   const [notice, setNotice] = useState("");
   const [actionError, setActionError] = useState("");
+  const [probabilityInput, setProbabilityInput] = useState("");
+  const [probabilityDirty, setProbabilityDirty] = useState(false);
+  const [probabilityBusy, setProbabilityBusy] = useState(false);
   const audio = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (data && !probabilityDirty) setProbabilityInput(String(data.probability));
+  }, [data, probabilityDirty]);
 
   useEffect(
     () => () => {
@@ -83,6 +92,33 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
       setActionError(err instanceof Error ? err.message : "恢复失败");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function saveProbability(clear = false) {
+    const value = Number(probabilityInput);
+    if (!clear && (!Number.isFinite(value) || value < 0 || value > 1)) {
+      setActionError("概率必须在 0 到 1 之间");
+      return;
+    }
+    setProbabilityBusy(true);
+    setActionError("");
+    setNotice("");
+    try {
+      await requestJson<VoiceData>("/api/voice/probability", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(clear ? { clear: true } : { probability: value }),
+      });
+      setProbabilityDirty(false);
+      setNotice(
+        clear ? "已恢复配置文件默认概率。" : `语音触发概率已设为 ${Math.round(value * 100)}%。`
+      );
+      reload();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "概率保存失败");
+    } finally {
+      setProbabilityBusy(false);
     }
   }
 
@@ -194,6 +230,68 @@ export default function VoicePage({ refreshKey }: { refreshKey: number }) {
                 data.config_default.name || data.config_default.voice
               }`}
             />
+          </div>
+        </SectionCard>
+      ) : null}
+
+      {data ? (
+        <SectionCard
+          icon={Percent}
+          title="语音触发概率"
+          description="未标记 [语音] 的主动回复按此概率转成语音。"
+          actions={
+            <Badge variant={data.probability_source === "panel" ? "secondary" : "outline"}>
+              {data.probability_source === "panel" ? "面板覆盖" : "配置默认"}
+            </Badge>
+          }
+          contentClassName="p-5"
+        >
+          <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <Field
+              label="概率（0–1）"
+              htmlFor="voice-probability"
+              hint={`当前生效 ${Math.round(data.probability * 100)}% · 配置文件默认 ${Math.round(
+                data.probability_default * 100
+              )}%`}
+            >
+              <Input
+                id="voice-probability"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={probabilityInput}
+                onChange={(event) => {
+                  setProbabilityInput(event.target.value);
+                  setProbabilityDirty(true);
+                }}
+              />
+            </Field>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                disabled={
+                  probabilityBusy ||
+                  busy !== "" ||
+                  probabilityInput.trim() === "" ||
+                  !Number.isFinite(Number(probabilityInput)) ||
+                  Number(probabilityInput) < 0 ||
+                  Number(probabilityInput) > 1
+                }
+                onClick={() => void saveProbability()}
+              >
+                {probabilityBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
+                保存
+              </Button>
+              {data.probability_source === "panel" ? (
+                <Button
+                  variant="outline"
+                  disabled={probabilityBusy}
+                  onClick={() => void saveProbability(true)}
+                >
+                  恢复默认
+                </Button>
+              ) : null}
+            </div>
           </div>
         </SectionCard>
       ) : null}

@@ -10,7 +10,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 
-from admin_voice import apply_voice_action, preview_audio, voice_data  # noqa: E402
+from admin_voice import (
+    apply_probability_action,
+    apply_voice_action,
+    preview_audio,
+    voice_data,
+)  # noqa: E402
 from voice_settings import VoiceSettingsError  # noqa: E402
 
 FISH_VOICE = "8e80c3dcdf894213a10b48e9b08ad8c6"
@@ -20,6 +25,7 @@ class AdminVoiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.state = str(Path(self.tmp.name) / "voice-state.json")
+        self.probability = str(Path(self.tmp.name) / "voice-probability.json")
         self.config: dict[str, Any] = {
             "voice": {
                 "enabled": True,
@@ -32,6 +38,7 @@ class AdminVoiceTests(unittest.TestCase):
                 "instruction": "",
                 "speed": 1.0,
                 "state_file": self.state,
+                "probability_file": self.probability,
             }
         }
 
@@ -95,6 +102,36 @@ class AdminVoiceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 apply_voice_action(self.config, payload)
         self.assertFalse(Path(self.state).exists())
+
+    def test_probability_defaults_to_config(self) -> None:
+        data = voice_data(self.config)
+        self.assertAlmostEqual(data["probability"], 0.25)
+        self.assertEqual(data["probability_source"], "config")
+        self.assertAlmostEqual(data["probability_default"], 0.25)
+        self.assertIsNone(data["probability_updated_at"])
+
+    def test_probability_override_round_trip(self) -> None:
+        data = apply_probability_action(self.config, {"probability": 0.25})
+        self.assertAlmostEqual(data["probability"], 0.25)
+        self.assertEqual(data["probability_source"], "panel")
+        self.assertTrue(Path(self.probability).is_file())
+        data = apply_probability_action(self.config, {"clear": True})
+        self.assertEqual(data["probability_source"], "config")
+        self.assertFalse(Path(self.probability).exists())
+
+    def test_invalid_probability_actions_are_rejected(self) -> None:
+        for payload in (
+            {"probability": -0.1},
+            {"probability": 1.1},
+            {"probability": True},
+            {"probability": "0.5"},
+            {"probability": 0.5, "extra": 1},
+            {},
+            {"clear": "yes"},
+        ):
+            with self.assertRaises(ValueError):
+                apply_probability_action(self.config, payload)
+        self.assertFalse(Path(self.probability).exists())
 
     def test_invalid_state_file_is_reported(self) -> None:
         Path(self.state).write_text("{oops", encoding="utf-8")

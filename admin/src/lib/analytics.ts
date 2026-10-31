@@ -441,6 +441,10 @@ export type VoiceData = {
   source: "panel" | "config";
   updated_at: number | null;
   state_file: string;
+  probability: number;
+  probability_source: "panel" | "config";
+  probability_default: number;
+  probability_updated_at: number | null;
   active: VoiceActive;
   config_default: VoiceActive;
   providers: VoiceProvider[];

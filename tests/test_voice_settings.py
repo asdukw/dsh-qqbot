@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 from main import AppConfig, Bot  # noqa: E402
 from voice_catalog import catalog, provider_defaults, validate_voice_id  # noqa: E402
 from voice_settings import (  # noqa: E402
+    ProbabilityStore,
     VoiceSelection,
     VoiceSettingsError,
     VoiceStore,
@@ -114,6 +116,9 @@ class BotVoiceSectionTests(unittest.TestCase):
         self.bot = object.__new__(Bot)
         self.bot.config = AppConfig()
         self.bot.config.voice.state_file = str(Path(self.tmp.name) / "voice.json")
+        self.bot.config.voice.probability_file = str(
+            Path(self.tmp.name) / "voice-probability.json"
+        )
         self.assertEqual(self.bot.config.voice.instruction, "")
 
     def tearDown(self) -> None:
@@ -148,6 +153,45 @@ class BotVoiceSectionTests(unittest.TestCase):
         Path(self.bot.config.voice.state_file).write_text("{oops", encoding="utf-8")
         section = self.bot._voice_section()
         self.assertEqual(section.voice, self.bot.config.voice.voice)
+
+
+class ProbabilityStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "voice-probability.json"
+        self.store = ProbabilityStore(self.path)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_missing_file_means_no_override(self) -> None:
+        self.assertIsNone(self.store.get())
+
+    def test_save_and_clear_round_trip(self) -> None:
+        saved = self.store.save(0.25)
+        self.assertAlmostEqual(saved.probability, 0.25)
+        record = self.store.get()
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertAlmostEqual(record.probability, 0.25)
+        self.store.clear()
+        self.assertIsNone(self.store.get())
+
+    def test_rejects_invalid_probabilities(self) -> None:
+        for value in (-0.1, 1.1, True, "0.5", None):
+            with self.assertRaises(ValueError):
+                self.store.save(value)  # type: ignore[arg-type]
+
+    def test_invalid_state_is_reported(self) -> None:
+        self.path.write_text("{oops", encoding="utf-8")
+        with self.assertRaises(VoiceSettingsError):
+            self.store.get()
+        self.path.write_text(
+            json.dumps({"schema": 1, "updated_at": 1, "probability": 2}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(VoiceSettingsError):
+            self.store.get()
 
 
 if __name__ == "__main__":
