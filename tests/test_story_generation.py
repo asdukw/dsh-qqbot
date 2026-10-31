@@ -15,7 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bot'))
 from llm import ChatResult  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 from relationship_rules import Relationship  # noqa: E402
-from story_generation import GenerationError, StoryGenerator, strict_schema, validation_issues  # noqa: E402
+from story_generation import (  # noqa: E402
+    GenerationError,
+    StoryGenerator,
+    strict_schema,
+    validation_issues,
+)
 from story_models import (  # noqa: E402
     RunState,
     StoryDefinition,
