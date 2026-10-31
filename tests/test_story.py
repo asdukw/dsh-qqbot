@@ -192,7 +192,10 @@ class StoryAdminDataTests(unittest.TestCase):
             store = StoryStore(profile)
             try:
                 store.save_world('group:1', 'stable-character-id', 'fingerprint', definition())
-                store.save_world('group:2', 'stable-character-id', 'fingerprint', definition())
+                store.save_world(
+                    'group:2', 'stable-character-id', 'fingerprint',
+                    definition().model_copy(update={'title': '另一个标题'}),
+                )
             finally:
                 store.close()
             data = story_data(str(profile), {})

@@ -41,13 +41,12 @@ def story_data(path: str, defaults: dict, *, offset: int = 0, card_db: str = '')
     finally:
         store.close()
     names = _card_names(card_db)
-    grouped: dict[tuple[str, str, str], dict] = {}
+    grouped: dict[tuple[str, str], dict] = {}
     for world in data['worlds']:
         world['character_name'] = names.get(str(world.get('character') or ''), '')
         key = (
             str(world.get('character') or ''),
             str(world.get('fingerprint') or ''),
-            str(world.get('title') or ''),
         )
         entry = grouped.get(key)
         if entry is None:
