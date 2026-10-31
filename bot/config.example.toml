@@ -122,9 +122,9 @@ json_mode = false  # true only for providers supporting response_format
 
 [memory]
 # Daily/user memory consolidation. Raw chat stays in memory.db; this layer
-# writes memory_days + memory_items for cross-session recall. Opt in explicitly:
-# enabling this sends sampled chat to the model for summarization.
-enabled = false
+# writes memory_days + memory_items for cross-session recall.
+# Sampled chat is sent to the configured model for summarization.
+enabled = true
 # Empty -> [paths].database (memory.db).
 database = ""
 archive_on_rotation = true

@@ -319,7 +319,7 @@ class VoiceSection:
 class MemorySection:
     """Long-term daily/user memory consolidation."""
 
-    enabled: bool = False  # explicit opt-in
+    enabled: bool = True  # consolidate memory by default
     database: str = ""  # ignored; memory.db is the evidence layer
     archive_on_rotation: bool = True
     daily_hour: int = 4
@@ -570,7 +570,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     memory_raw = _section(table, "memory")
     memory = MemorySection(
-        enabled=bool(memory_raw.get("enabled", False)),
+        enabled=bool(memory_raw.get("enabled", True)),
         database=str(memory_raw.get("database", "")),
         archive_on_rotation=bool(memory_raw.get("archive_on_rotation", True)),
         daily_hour=min(23, max(0, int(memory_raw.get("daily_hour", 4)))),
