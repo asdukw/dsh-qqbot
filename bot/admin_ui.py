@@ -1621,7 +1621,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             try:
                 offset = max(0, int((query.get('offset') or ['0'])[0]))
                 if path == '/api/story':
-                    result = story_data(db_paths(self.config)['profile'], self.config.get('story') or {}, offset=offset)
+                    result = story_data(
+                        db_paths(self.config)['profile'],
+                        self.config.get('story') or {},
+                        offset=offset,
+                        card_db=db_paths(self.config)['cards'],
+                    )
                 else:
                     key = path.removeprefix('/api/story/')
                     kind = (query.get('kind') or ['run'])[0]

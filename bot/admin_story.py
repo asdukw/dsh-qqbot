@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -10,15 +12,38 @@ from story_models import StorySettings
 from story_store import StoryStore
 
 
-def story_data(path: str, defaults: dict, *, offset: int = 0) -> dict:
+def _card_names(path: str) -> dict[str, str]:
+    """Stable character id -> nickname/name, for display in story listings."""
+    if not path or not Path(path).is_file():
+        return {}
+    try:
+        with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as db:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(cards)')}
+            if 'character_id' not in columns:
+                return {}
+            return {
+                str(character_id): str(nickname or name or '')
+                for character_id, name, nickname in db.execute(
+                    "SELECT character_id, name, nickname FROM cards WHERE character_id != ''"
+                )
+            }
+    except sqlite3.Error:
+        return {}
+
+
+def story_data(path: str, defaults: dict, *, offset: int = 0, card_db: str = '') -> dict:
     if not Path(path).is_file():
         return {'settings': StorySettings.model_validate(defaults).model_dump(),
                 'runs': [], 'worlds': [], 'operations': [], 'deliveries': [], 'offset': 0}
     store = StoryStore(path)
     try:
-        return {**store.admin(offset=offset), 'settings': store.settings(StorySettings.model_validate(defaults)).model_dump()}
+        data = {**store.admin(offset=offset), 'settings': store.settings(StorySettings.model_validate(defaults)).model_dump()}
     finally:
         store.close()
+    names = _card_names(card_db)
+    for world in data['worlds']:
+        world['character_name'] = names.get(str(world.get('character') or ''), '')
+    return data
 
 
 def story_detail(path: str, key: str, *, kind: str = 'run', offset: int = 0) -> dict:

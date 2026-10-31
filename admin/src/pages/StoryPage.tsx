@@ -38,7 +38,7 @@ import { requestJson } from "@/lib/api";
 import { conversationLabel } from "@/lib/format";
 
 type Run = { id: string; revision: number; conversation: string; character: string; user: string; stage: string; status: string };
-type World = { id: string; conversation: string; character: string; fingerprint: string };
+type World = { id: string; conversation: string; character: string; character_name?: string; fingerprint: string };
 type Operation = { id: string; kind: string; status: string; result: string };
 type Delivery = { id: string; run_id: string; status: string; error: string };
 type Audit = { actor: string; kind: string; target: string };
@@ -267,11 +267,15 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
           <div className="divide-y divide-slate-100">
             {worlds.map(world => (
               <div key={world.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-sm">
-                <span className="min-w-0 break-all text-slate-700">
-                  {conversationLabel(world.conversation)} ·{" "}
-                  <span title={world.character}>{world.character.slice(0, 12)}…</span> ·{" "}
-                  <span className="font-mono text-xs text-slate-500" title={world.fingerprint}>
-                    {world.fingerprint.slice(0, 10)}…
+                <span className="min-w-0">
+                  <span
+                    className="block truncate text-sm font-medium text-slate-800"
+                    title={world.character}
+                  >
+                    {world.character_name || `角色 #${world.character.slice(0, 12)}`}
+                  </span>
+                  <span className="block truncate text-xs text-slate-500">
+                    {conversationLabel(world.conversation)}
                   </span>
                 </span>
                 <div className="flex flex-wrap items-center gap-2">

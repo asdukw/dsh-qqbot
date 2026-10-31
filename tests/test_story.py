@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bot'))
 
+from admin_story import story_data  # noqa: E402
 from commands import CommandRouter  # noqa: E402
 from content_policy import ContentPermission, adult_allowed, require_safe  # noqa: E402
 from llm import ChatResult  # noqa: E402
@@ -162,6 +163,27 @@ class StoryGraphDetailTests(unittest.TestCase):
                 self.assertEqual(len(page['nodes']), 8)
             finally:
                 store.close()
+
+
+class StoryAdminDataTests(unittest.TestCase):
+    def test_worlds_include_the_card_nickname(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / 'profile.db'
+            cards = root / 'cards.db'
+            store = StoryStore(profile)
+            try:
+                store.save_world('group:1', 'stable-character-id', 'fingerprint', definition())
+            finally:
+                store.close()
+            with closing(sqlite3.connect(cards)) as db:
+                db.execute('CREATE TABLE cards (character_id TEXT, name TEXT, nickname TEXT)')
+                db.execute("INSERT INTO cards VALUES ('stable-character-id', 'Alice', '爱丽丝')")
+                db.commit()
+            data = story_data(str(profile), {}, card_db=str(cards))
+            self.assertEqual(data['worlds'][0]['character_name'], '爱丽丝')
+            missing = story_data(str(profile), {}, card_db=str(root / 'missing.db'))
+            self.assertEqual(missing['worlds'][0]['character_name'], '')
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
