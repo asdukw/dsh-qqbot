@@ -9,7 +9,7 @@ export const name = 'tool-router'
 export const inject = ['tools', 'systemPrompt']
 
 const DOMAINS = {
-  media: ['video_resolve', 'video_send', 'card_library', 'card_online_search'],
+  video: ['video_resolve', 'video_send'],
   cards: ['card_library', 'card_online_search', 'card_install'],
   history: ['history_sessions', 'history_read', 'chat_search'],
   memory: ['memory_search', 'memory_timeline', 'memory_person'],
@@ -52,19 +52,19 @@ const routeTool = {
   name: 'tool_route',
   description:
     'Load optional tool groups for the current conversation. The default surface is small: ' +
-    'profile reads, web search/fetch, file tools and QQ reply/mention/reaction tools. ' +
-    'Call this before using media, card, history or long-term memory tools. ' +
-    'Groups: media (video resolve/send + card library/search), cards (card library/search/install), ' +
-    'history (old session files + chat search), memory (long-term daily/user memory), ' +
-    'all. Profile read/write/forget is a core tool. Loading a group replaces the previous ' +
-    'optional set for this agent; core tools always stay available.',
+    'profile read/write/forget, web search/fetch, file tools and QQ reply/mention/reaction tools. ' +
+    'Call this before using video, cards, history or long-term memory tools. ' +
+    'Groups: video (video resolve/send), cards (card library/online search/install), ' +
+    'history (raw session/chat logs), memory (consolidated dated summaries/user facts), ' +
+    'all. Profile read/write/forget is always core and needs no routing. ' +
+    'Loading a group replaces the previous optional set for this agent; core tools always stay available.',
   parameters: {
     type: 'object',
     properties: {
       domains: {
         type: 'array',
         items: { type: 'string', enum: Object.keys(DOMAINS) },
-        description: 'One or more groups to load, e.g. ["memory"] or ["media","history"].',
+        description: 'One or more groups to load, e.g. ["memory"] or ["video","history"].',
       },
       reason: { type: 'string', description: 'Short reason for the route.' },
     },
@@ -99,9 +99,9 @@ export function apply(ctx) {
       name: 'tool-routing',
       order: 9000,
       text:
-        '默认只加载常用工具。需要媒体/卡片/历史/长期记忆/画像写入时，先调用 ' +
+        '默认只加载常用工具。需要视频/卡片/原始历史日志/长期记忆时，先调用 ' +
         'tool_route({domains:["memory"]}) 加载对应工具组，然后再调用具体工具；' +
-        '一组加载后当前会话保持可用，切换组会替换上一组可选工具。',
+        '画像读取、写入、遗忘始终是核心工具，无需路由；一组加载后当前会话保持可用，切换组会替换上一组可选工具。',
     })
   })
 }
