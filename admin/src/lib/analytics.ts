@@ -408,3 +408,47 @@ export type VideoCredentialRow = {
   updated_at: number | null; enabled: boolean;
 };
 export type VideoCredentialsData = { platforms: VideoCredentialRow[]; can_write: boolean; notice: string };
+
+export type VoiceProviderId = "edge" | "fish" | "stepfun";
+
+export type VoiceEntry = {
+  provider: VoiceProviderId;
+  id: string;
+  name: string;
+  gender: string;
+  tags: string;
+  likes: number;
+};
+
+export type VoiceActive = {
+  provider: VoiceProviderId;
+  voice: string;
+  name: string;
+  model: string;
+  api_key_env: string;
+  base_url: string;
+  key_required: boolean;
+  key_ready: boolean;
+};
+
+export type VoiceProvider = {
+  id: VoiceProviderId;
+  label: string;
+  model: string;
+  api_key_env: string;
+  base_url: string;
+  key_required: boolean;
+  key_ready: boolean;
+};
+
+export type VoiceData = {
+  generated_at: number;
+  enabled: boolean;
+  source: "panel" | "config";
+  updated_at: number | null;
+  state_file: string;
+  active: VoiceActive;
+  config_default: VoiceActive;
+  providers: VoiceProvider[];
+  catalog: VoiceEntry[];
+};

@@ -44,6 +44,7 @@ systemctl restart qqbot qqbot-admin
 | `/var/lib/qqbot/feeds.db` | RSS / B 站订阅 | 否 |
 | `/var/lib/qqbot/approvals.db` | 好友 / 群请求审批 | 否 |
 | `/var/lib/qqbot/daily.db` | 日报发送状态 | 否 |
+| `/var/lib/qqbot/voice-state.json` | 面板「音色」在线切换的覆盖值（删除即恢复 `config.toml`） | 否 |
 | `/var/lib/qqbot/dsh-home/sessions/` | DSH 会话 JSONL | 否 |
 | `/var/lib/qqbot/dsh-workspace/` | 模型可读写工作区（`notes/`、`spill/`；世界书通过会话 prompt 注入） | 否 |
 | `/var/lib/qqbot/backups/` | 每日备份归档 | — |
@@ -158,7 +159,7 @@ systemctl start qqbot qqbot-admin
 
 **`/sub add` 返回 `feed HTTP 503`。** 这通常是 RSSHub 镜像的临时错误：上游 B 站风控（`-412`）或镜像的 browser helper 不可用。添加时遇到 `408/425/429/500/502/503/504` 或网络异常，最多额外重试两次，间隔 1 秒、3 秒；轮询最多额外重试一次。抓取或 XML 解析失败、添加成功、重复添加都会写入日志：`journalctl -u qqbot | grep subscription`（HTTP 失败行带 `status=` 和错误页的诊断摘要，超时会包含 `ReadTimeout` 等异常类型）。日志中的 URL 用户名、密码、查询参数和片段会脱敏，不记录可能回退为 URL 的订阅标题。仍然失败就换镜像或错峰重试；也可从服务器请求同一 URL 验证。如果进程设置了出站代理，可将 RSSHub 域名追加到 `bot.env` 的 `NO_PROXY`，保留原有条目并重启服务；这只改变该域名的代理选择，不会修复镜像自身的 503。
 
-**语音或梗图不生效。** 两者都有每会话 30 秒冷却，先确认不是冷却。再看 `[voice]` / `[meme]` 的 provider 和文件目录；合成或绘制失败时 adapter 会退回文字，日志里有对应错误。
+**语音或梗图不生效。** 两者都有每会话 30 秒冷却，先确认不是冷却。语音再确认面板「音色」页的当前音色：面板切换写入 `/var/lib/qqbot/voice-state.json`，下一段语音自动读取，不需要重启；点「恢复配置默认」删除该文件后回到 `[voice]`。试听失败看 `journalctl -u qqbot-admin`，回复合成失败看 `journalctl -u qqbot` 里的 `voice synthesis failed`；密钥未配置时面板会标出 `*_API_KEY`。梗图再看 `[meme]` 的目录。合成或绘制失败时 adapter 会退回文字。
 
 ## 升级与回滚
 

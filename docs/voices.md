@@ -3,6 +3,8 @@
 > 生成日期：2026-10-23 · 数据来源：`GET https://api.fish.audio/model`
 > 共 **84** 个中文（`zh`）音色。全部可用 `s2.1-pro-free` 免费合成，不按音色收费。
 > 完整字段见 [`fish-voices-zh.csv`](fish-voices-zh.csv)；当前线上音色：**高松灯（企鹅）** `b4f70fdef5f943c2bf43db00e80ad680`。
+>
+> 管理面板「音色」页目前只上架 **菲比** `8e80c3dcdf894213a10b48e9b08ad8c6` 和 **流萤** `79b9954c15f24deeab2319ec5f44f3b0`，可以试听并在线切换；切换写入 `/var/lib/qqbot/voice-state.json`，bot 下一条语音回复即生效，不需要重启。本清单里的其他音色仍可手工写进 `config.toml` 的 `[voice]`；重新导出脚本只更新 CSV 和本文件。
 
 ## 女声（27）
 

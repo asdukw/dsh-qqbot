@@ -8,7 +8,7 @@
 
 - **QQ 私聊聊天**，群聊默认只回复 @ 消息（`reply_group_at = false` 可关闭）
 - **赛程**：赛程类回答由模型输出 ```schedule JSON，adapter 用 Pydantic 校验后渲染成固定格式（阶段/北京时间/对阵/BO），校验失败不会把半成品发出去；
-- **语音回复**：模型在短回复末尾写 `[语音]`，按 provider（edge / StepFun / Fish Audio）合成并发送 QQ 语音；主动接话按 `[voice] probability` 概率转语音。中文音色清单见 [`docs/voices.md`](docs/voices.md)（`scripts/export_fish_voices.py` 可重新导出）；
+- **语音回复**：模型在短回复末尾写 `[语音]`，按 provider（edge / StepFun / Fish Audio）合成并发送 QQ 语音；主动接话按 `[voice] probability` 概率转语音。中文音色清单见 [`docs/voices.md`](docs/voices.md)（`scripts/export_fish_voices.py` 可重新导出）；管理面板「音色」页目前上架 菲比 / 流萤，可以试听并在线切换，bot 下一条语音回复即生效，不需要重启；
 - **梗图**：模型写 `[梗图: 文字]`，从表情库里挑一张当底图、加字幕后发出去；
 - **表情库**：群里别人发的 QQ 表情会自动收藏（按内容去重，重编码副本用 dHash 合并），模型写 `[表情: 语气词]` 按描述挑一张发出；`/sticker` 管理，面板里可以删除，也可以同时屏蔽相似图片；
 - **长期记忆**：`memory.db` 的 FTS5 trigram 索引会在回复前检索当前会话的相关历史，作为 `[相关历史]` 注入；
@@ -151,16 +151,16 @@ sudo journalctl -u qqbot -f
 - **仪表盘**：今日消息 / Token、7 / 30 天趋势、订阅异常、最近消息、当前模型与角色卡；
 - **对话**：聊天分析（今日发言排行、词云、会话分布）；词云用前端 SVG 螺旋布局，字号 = 覆盖消息数，不依赖额外图表库；
 - **自动化**：审批、定时任务、订阅推送；
-- **内容**：模型（供应商 → 模型两级管理，可新增、编辑、启停、切换当前模型）、角色卡、表情库（可删除并屏蔽相似图片）；
+- **内容**：模型（供应商 → 模型两级管理，可新增、编辑、启停、切换当前模型）、角色卡、音色（菲比 / 流萤，试听与在线切换）、表情库（可删除并屏蔽相似图片）；
 - **用量**：Token 用量，支持 7 / 30 / 90 天与按会话筛选；
 - **系统**：数据库路径与大小、DSH 路径、面板配置。
 
 Python 端只提供 JSON API 和静态文件：
 
 - 本地构建：`cd admin && npm install && npm run build`；产物在 `admin/dist/`（已随仓库提交，便于纯 Python 部署）。
-- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。读取接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/models`、`/api/cards`（点开单张卡时用 `/api/cards/<id>` 取完整 V3 payload）、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/requests`、`/api/system`、`/api/usage`、`/api/fun`；`/api/dashboard` 保留为旧版聚合接口。模型页的写入接口（需登录、JSON、同源）：`POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`；审批页的写入接口是 `POST /api/requests/action`，表情库的删除接口是 `POST /api/stickers/delete`（同样需要登录、JSON 和同源）。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
+- 服务端：`bot/admin_ui.py` 默认从 `/opt/qqbot/admin/dist` 提供页面。读取接口：`/api/session`、`/api/login`、`/api/logout`、`/api/overview`、`/api/models`、`/api/cards`（点开单张卡时用 `/api/cards/<id>` 取完整 V3 payload）、`/api/tasks`、`/api/feeds`、`/api/stickers`、`/api/requests`、`/api/system`、`/api/usage`、`/api/fun`、`/api/voice`；`/api/dashboard` 保留为旧版聚合接口。模型页的写入接口（需登录、JSON、同源）：`POST /api/models/providers`、`/api/models/providers/delete`、`/api/models/items`、`/api/models/items/delete`、`/api/models/active`；审批页的写入接口是 `POST /api/requests/action`，表情库的删除接口是 `POST /api/stickers/delete`，音色页用 `POST /api/voice/active` 切换、`POST /api/voice/preview` 试听（同样需要登录、JSON 和同源）。登录仍用 `ADMIN_UI_PASSWORD` + HMAC cookie。
 - 配置：`[admin] static_dir`；部署后 `systemctl restart qqbot-admin`。
-- 模型页可写，其余页面只读；每 60 秒自动刷新，右上角「刷新」会立即重拉当前页。API Key 直接在供应商表单里填写，保存在 `models.db`（权限 600）且不会回显。
+- 模型、审批、表情库、视频凭据和音色页可写，其余页面只读；每 60 秒自动刷新，右上角「刷新」会立即重拉当前页。API Key 直接在供应商表单里填写，保存在 `models.db`（权限 600）且不会回显。
 
 ## Token 审计与今日趣味数据
 

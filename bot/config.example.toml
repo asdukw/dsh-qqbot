@@ -179,6 +179,8 @@ probability = 0.4
 # 0 = no extra cap (provider limit is 1000); set e.g. 300 to keep voice replies short.
 max_chars = 0
 cooldown_seconds = 30
+# Admin UI「音色」页的在线切换结果；bot 每次语音回复前重读，删除即恢复本文件。
+state_file = "/var/lib/qqbot/voice-state.json"
 
 [tasks]
 # Admin-only scheduled messages. Creation is semantic: one thin-client call

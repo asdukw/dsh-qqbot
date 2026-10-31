@@ -16,7 +16,7 @@ import sys
 import time
 import tomllib
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -131,6 +131,7 @@ from voice import (
     synthesize_fish,
     synthesize_stepfun,
 )
+from voice_settings import VoiceSettingsError, VoiceStore
 
 from cards import CardError, CardRecord, CardRegistry, CharacterCard
 
@@ -307,6 +308,8 @@ class VoiceSection:
     # 0 = no extra cap (provider limit is 1000); >0 limits the spoken text.
     max_chars: int = 0
     cooldown_seconds: int = 30
+    # 面板在线切换的音色覆盖值；每次语音回复前重读，无需重启。
+    state_file: str = "/var/lib/qqbot/voice-state.json"
 
 
 @dataclass
@@ -539,6 +542,7 @@ def load_config(path: str | Path) -> AppConfig:
         probability=max(0.0, min(1.0, float(voice_raw.get("probability", 0.4)))),
         max_chars=max(0, int(voice_raw.get("max_chars", 0))),
         cooldown_seconds=max(0, int(voice_raw.get("cooldown_seconds", 30))),
+        state_file=str(voice_raw.get("state_file", "/var/lib/qqbot/voice-state.json")),
     )
 
     tasks_raw = _section(table, "tasks")
@@ -1797,9 +1801,28 @@ class Bot(PersonaRuntime):
         store.mark_used(record.id)
         log.info("sent sticker #%s to %s", record.id, key)
 
+    def _voice_section(self) -> VoiceSection:
+        """config.toml 的 [voice] 叠加面板选择；文件缺失或无效时退回配置。"""
+        base = self.config.voice
+        try:
+            selection = VoiceStore(base.state_file).active()
+        except VoiceSettingsError as exc:
+            log.warning("ignoring voice settings: %s", exc)
+            return base
+        if selection is None:
+            return base
+        return replace(
+            base,
+            provider=selection.provider,
+            voice=selection.voice,
+            model=selection.model,
+            api_key_env=selection.api_key_env,
+            base_url=selection.base_url,
+        )
+
     async def _send_voice(self, event: MessageEvent, text: str) -> bool:
         require_safe(text)
-        config = self.config.voice
+        config = self._voice_section()
         if not config.enabled:
             log.info("voice skipped: disabled")
             return False

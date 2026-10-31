@@ -583,6 +583,12 @@ class HttpTests(unittest.TestCase):
             },
             "usage": {"database": str(root / "usage.db"), "retention_days": 90},
             "approvals": {"database": self.dbs["approvals"]},
+            "voice": {
+                "enabled": True,
+                "provider": "edge",
+                "voice": "zh-CN-XiaoxiaoNeural",
+                "state_file": str(root / "voice-state.json"),
+            },
             "dsh": {
                 "home": str(root / "dsh-home"),
                 "workspace": str(root / "dsh-workspace"),
@@ -1464,6 +1470,52 @@ class HttpTests(unittest.TestCase):
         payload = json.loads(response.read().decode())
         self.assertEqual(payload["start"], today.isoformat())
         self.assertEqual(payload["end"], today.isoformat())
+
+    def test_voice_endpoints_switch_and_preview(self) -> None:
+        self.assertEqual(self.get("/api/voice").status, 401)
+        cookie, _ = self.login()
+        data = json.loads(self.get("/api/voice", cookie).read())
+        self.assertEqual(data["source"], "config")
+        self.assertEqual(data["active"]["provider"], "edge")
+        self.assertEqual([row["name"] for row in data["catalog"]], ["菲比", "流萤"])
+
+        bad = self.post("/api/voice/active", {"provider": "fish", "voice": "bad id"}, cookie)
+        self.assertEqual(bad.status, 400)
+        self.assertEqual(
+            self.post(
+                "/api/voice/active", {"provider": "fish", "voice": "x"}, cookie, "text/plain"
+            ).status,
+            415,
+        )
+
+        fish_voice = "8e80c3dcdf894213a10b48e9b08ad8c6"
+        switched = self.post(
+            "/api/voice/active",
+            {"provider": "fish", "voice": fish_voice, "name": "菲比"},
+            cookie,
+        )
+        self.assertEqual(switched.status, 200)
+        body = json.loads(switched.read())
+        self.assertEqual(body["source"], "panel")
+        self.assertEqual(body["active"]["provider"], "fish")
+        self.assertEqual(body["active"]["name"], "菲比")
+        self.assertTrue((Path(self.tmp.name) / "voice-state.json").is_file())
+
+        async def fake_fish(text, **kwargs):
+            return b"ID3fake"
+
+        with patch("admin_voice.synthesize_fish", new=fake_fish), patch.dict(
+            os.environ, {"FISH_API_KEY": "secret"}
+        ):
+            response = self.post("/api/voice/preview", {"provider": "fish", "voice": fish_voice}, cookie)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Content-Type"], "audio/mpeg")
+            self.assertEqual(response.read(), b"ID3fake")
+
+        cleared = self.post("/api/voice/active", {"clear": True}, cookie)
+        self.assertEqual(cleared.status, 200)
+        self.assertEqual(json.loads(cleared.read())["source"], "config")
+        self.assertFalse((Path(self.tmp.name) / "voice-state.json").exists())
 
     def test_wrong_password_is_rejected(self) -> None:
         with self.assertLogs("qqbot.admin", level="WARNING") as logs:

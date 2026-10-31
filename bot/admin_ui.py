@@ -23,6 +23,10 @@ bounded JPEG thumbnail) so the panel can show the images themselves.
 ``/api/dashboard`` is kept as the original single-page aggregate for
 compatibility. ``POST /api/models/provider-models`` asks a saved provider
 for its model list so the panel does not need a hand-typed model id.
+The voice page switches the active TTS voice online through
+``POST /api/voice/active`` (written to the shared voice state file the bot
+re-reads before every voice reply) and previews it through
+``POST /api/voice/preview``.
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ from admin_insights import clean_conversation, fun_data, usage_data
 from admin_story import queue_story, story_data, story_detail
 from admin_video import handle_post as video_credentials_post
 from admin_video import status_payload as video_credentials_payload
+from admin_voice import apply_voice_action, preview_audio, voice_data
 from approvals import ApprovalRecord, ApprovalStore
 from models import (
     BUILTIN_PROVIDERS,
@@ -1624,6 +1629,16 @@ class AdminHandler(BaseHTTPRequestHandler):
             except (ValueError, OSError, sqlite3.Error):
                 self._send_json(HTTPStatus.BAD_REQUEST, {'error': '剧情数据不可用或参数无效'})
             return
+        if path == "/api/voice":
+            if not self._api_guard():
+                return
+            try:
+                self._send_json(HTTPStatus.OK, voice_data(self.config))
+            except (ValueError, OSError):
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE, {"error": "音色配置不可用"}
+                )
+            return
         resources = {
             "/api/models": models_data,
             "/api/cards": cards_data,
@@ -1805,6 +1820,27 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         if path in ('/api/video/credentials', '/api/video/credentials/delete'):
             video_credentials_post(self, path)
+            return
+
+        if path in ("/api/voice/active", "/api/voice/preview"):
+            if not self._api_guard() or not self._mutation_guard():
+                return
+            payload = self._read_payload()
+            try:
+                if path == "/api/voice/active":
+                    self._send_json(
+                        HTTPStatus.OK, apply_voice_action(self.config, payload)
+                    )
+                else:
+                    body = preview_audio(self.config, payload)
+                    self._send_raw(HTTPStatus.OK, body, "audio/mpeg", cache="no-store")
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except OSError:
+                log.exception("voice settings write failed")
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "音色设置写入失败"}
+                )
             return
 
         if path == '/api/story/action':

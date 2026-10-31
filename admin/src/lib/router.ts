@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import {
   Activity,
+  AudioLines,
   CalendarClock,
   CreditCard,
   LayoutDashboard,
@@ -23,6 +24,7 @@ export type RouteId =
   | "story"
   | "cards"
   | "stickers"
+  | "voice"
   | "usage"
   | "system"
   | "video-credentials";
@@ -90,6 +92,12 @@ export const ROUTES: RouteMeta[] = [
     icon: Sticker,
   },
   {
+    id: "voice",
+    label: "音色",
+    description: "TTS 音色目录、试听与在线切换",
+    icon: AudioLines,
+  },
+  {
     id: "usage",
     label: "Token 用量",
     description: "主会话与辅助调用的 token 账本",
@@ -110,7 +118,7 @@ export const NAV_GROUPS: NavGroup[] = [
   { label: "概览", items: [ROUTE_MAP.get("overview")!] },
   { label: "对话", items: [ROUTE_MAP.get("insights")!] },
   { label: "自动化", items: [ROUTE_MAP.get("requests")!, ROUTE_MAP.get("tasks")!, ROUTE_MAP.get("feeds")!] },
-  { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("story")!, ROUTE_MAP.get("stickers")!] },
+  { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("story")!, ROUTE_MAP.get("stickers")!, ROUTE_MAP.get("voice")!] },
   { label: "用量", items: [ROUTE_MAP.get("usage")!] },
   { label: "系统", items: [ROUTE_MAP.get("system")!, ROUTE_MAP.get("video-credentials")!] },
 ];
