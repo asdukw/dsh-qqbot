@@ -4,8 +4,6 @@ import {
   FileJson,
   FileSearch,
   Globe2,
-  Settings2,
-  SlidersHorizontal,
   Users,
 } from "lucide-react";
 
@@ -22,7 +20,7 @@ import {
 } from "@/components/common/Bits";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { CheckboxRow, Field, FormSelect } from "@/components/ui/form";
+import { Field } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
   Table,
@@ -35,13 +33,6 @@ import {
 import { requestJson } from "@/lib/api";
 import { conversationLabel } from "@/lib/format";
 
-type Settings = {
-  stage_timeout: number; prepare_timeout: number; queue_timeout: number; brief_tokens: number; scene_tokens: number;
-  output_mode: "legacy" | "text" | "json_object" | "json_schema";
-  enabled: boolean; timeout: number; max_tokens: number; max_context_chars: number;
-  concurrency: number; menu_hours: number; daily_chat_gain: number; chat_cooldown: number; json_mode: boolean;
-  character_preferences: Record<string, { enabled?: boolean; tone?: string; pace?: string; boundaries?: string }>;
-};
 type Run = { id: string; revision: number; conversation: string; character: string; user: string; stage: string; status: string };
 type World = { id: string; conversation: string; character: string; fingerprint: string };
 type Operation = { id: string; kind: string; status: string; result: string };
@@ -50,18 +41,11 @@ type Audit = { actor: string; kind: string; target: string };
 type Generation = { conversation: string; purpose: string; status: string; elapsed: number };
 type Attempt = { conversation: string; purpose: string; elapsed: number; details: { status: string; attempt: number; finish_reason: string; chars: number; issues: Array<{ path: string; code: string; message: string }> } };
 type Draft = { conversation: string; character: string; status: string; error: string; warnings: Array<{ code: string; path: string }> };
-type Data = { attempts: Attempt[]; drafts: Draft[]; audit: Audit[]; generations: Generation[]; settings: Settings; runs: Run[]; worlds: World[]; operations: Operation[]; deliveries: Delivery[] };
+type Data = { attempts: Attempt[]; drafts: Draft[]; audit: Audit[]; generations: Generation[]; runs: Run[]; worlds: World[]; operations: Operation[]; deliveries: Delivery[] };
 type NoticeState = { text: string; tone: "success" | "danger" };
-
-const labels: Record<keyof Omit<Settings, "enabled" | "json_mode" | "character_preferences" | "output_mode">, string> = {
-  stage_timeout: "每阶段总预算（秒）", prepare_timeout: "准备总预算（秒）", queue_timeout: "排队上限（秒）", brief_tokens: "概要输出 token", scene_tokens: "场景输出 token",
-  timeout: "单次调用上限（秒）", max_tokens: "最大输出 token", max_context_chars: "上下文字数上限",
-  concurrency: "生成并发", menu_hours: "菜单有效期（小时）", daily_chat_gain: "聊天每日正向预算", chat_cooldown: "聊天正向冷却（秒）",
-};
 
 export default function StoryPage({ refreshKey }: { refreshKey: number }) {
   const [data, setData] = useState<Data | null>(null);
-  const [settings, setSettings] = useState<Settings | null>(null);
   const [offset, setOffset] = useState(0);
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [detail, setDetail] = useState<unknown>(null);
@@ -70,9 +54,6 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
   const [card, setCard] = useState("");
   const [original, setOriginal] = useState("");
   const [conversation, setConversation] = useState("");
-  const [preferenceId, setPreferenceId] = useState("");
-  const [tone, setTone] = useState("");
-  const [pace, setPace] = useState("");
   const [detailQuery, setDetailQuery] = useState<{ id: string; kind: string; offset: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -83,7 +64,7 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
     let live = true;
     setLoading(true);
     requestJson<Data>(`/api/story?offset=${offset}`).then(value => {
-      if (live) { setData(value); setSettings(value.settings); setError(""); }
+      if (live) { setData(value); setError(""); }
     }).catch(error => { if (live) setError(String(error)); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
@@ -118,104 +99,6 @@ export default function StoryPage({ refreshKey }: { refreshKey: number }) {
     <PageStack error={error} loading={loading} hasData={!!data}>
       {notice ? <Notice tone={notice.tone}>{notice.text}</Notice> : null}
 
-      {settings ? (
-        <SectionCard icon={Settings2} title="运行设置">
-          <div className="space-y-4 p-5">
-            <CheckboxRow
-              label="启用剧情与新版关系"
-              hint="不自动重开既有存档。"
-              checked={settings.enabled}
-              onChange={enabled => setSettings({ ...settings, enabled })}
-            />
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {Object.entries(labels).map(([key, label]) => (
-                <Field key={key} label={label} htmlFor={`setting-${key}`}>
-                  <Input
-                    id={`setting-${key}`}
-                    type="number"
-                    value={settings[key as keyof typeof labels]}
-                    onChange={e => setSettings({ ...settings, [key]: Number(e.target.value) })}
-                  />
-                </Field>
-              ))}
-            </div>
-            <CheckboxRow
-              label="启用供应商 JSON 模式"
-              hint="仅当供应商支持时开启；默认严格解析兼容输出。"
-              checked={settings.json_mode}
-              onChange={json_mode => setSettings({ ...settings, json_mode })}
-            />
-            <div className="max-w-md">
-              <Field
-                label="结构化输出能力"
-                htmlFor="output-mode"
-                hint="strict 仅供应商确认支持时选择；普通聊天不受影响。"
-              >
-                <FormSelect
-                  id="output-mode"
-                  value={settings.output_mode}
-                  onChange={value => setSettings({ ...settings, output_mode: value as Settings["output_mode"] })}
-                >
-                  <option value="legacy">兼容旧 JSON 开关</option>
-                  <option value="text">提示约束 + 本地验证</option>
-                  <option value="json_object">JSON mode + 本地验证</option>
-                  <option value="json_schema">原生 strict schema + 本地验证</option>
-                </FormSelect>
-              </Field>
-            </div>
-            <Toolbar>
-              <Button disabled={busy} onClick={() => queue("settings", settings)}>保存并入队</Button>
-            </Toolbar>
-          </div>
-        </SectionCard>
-      ) : null}
-
-      {settings ? (
-        <SectionCard
-          icon={SlidersHorizontal}
-          title="角色差异与节奏"
-          description="仅影响之后生成的世界包，不改写已接受的定义。"
-        >
-          <div className="space-y-4 p-5">
-            <div className="grid gap-4 sm:grid-cols-3">
-              <Field label="角色 ID" htmlFor="preference-id" hint="32 位 character ID">
-                <Input
-                  id="preference-id"
-                  placeholder="32 位 ID"
-                  value={preferenceId}
-                  onChange={e => setPreferenceId(e.target.value)}
-                />
-              </Field>
-              <Field label="语气偏好" htmlFor="preference-tone">
-                <Input
-                  id="preference-tone"
-                  placeholder="语气 / 价值观偏好（不超过 300 字）"
-                  value={tone}
-                  maxLength={300}
-                  onChange={e => setTone(e.target.value)}
-                />
-              </Field>
-              <Field label="剧情节奏" htmlFor="preference-pace">
-                <Input
-                  id="preference-pace"
-                  placeholder="章节节奏 / 题材偏好（不超过 300 字）"
-                  value={pace}
-                  maxLength={300}
-                  onChange={e => setPace(e.target.value)}
-                />
-              </Field>
-            </div>
-            <Toolbar>
-              <Button
-                disabled={busy || !/^[a-f0-9]{32}$/.test(preferenceId)}
-                onClick={() => queue("settings", { character_preferences: { ...settings.character_preferences, [preferenceId]: { enabled: true, tone, pace } } })}
-              >
-                保存该角色的生成偏好
-              </Button>
-            </Toolbar>
-          </div>
-        </SectionCard>
-      ) : null}
 
       <SectionCard icon={Users} title="玩家存档" badge={runs.length}>
         <FilterBar actions={<Button variant="outline" size="sm" onClick={() => setRevision(v => v + 1)}>刷新</Button>}>
