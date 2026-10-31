@@ -27,8 +27,7 @@ export type RouteId =
   | "stickers"
   | "voice"
   | "usage"
-  | "system"
-  | "video-credentials";
+  | "system";
 
 export type RouteMeta = {
   id: RouteId;
@@ -104,7 +103,6 @@ export const ROUTES: RouteMeta[] = [
     description: "主会话与辅助调用的 token 账本",
     icon: Activity,
   },
-  { id: "video-credentials", label: "视频凭据", description: "B 站与抖音 Cookie 管理", icon: Settings2 },
   {
     id: "system",
     label: "系统状态",
@@ -120,7 +118,7 @@ export const NAV_GROUPS: NavGroup[] = [
   { label: "自动化", items: [ROUTE_MAP.get("requests")!, ROUTE_MAP.get("tasks")!, ROUTE_MAP.get("feeds")!] },
   { label: "内容", items: [ROUTE_MAP.get("models")!, ROUTE_MAP.get("cards")!, ROUTE_MAP.get("story")!, ROUTE_MAP.get("stickers")!, ROUTE_MAP.get("voice")!] },
   { label: "用量", items: [ROUTE_MAP.get("usage")!] },
-  { label: "系统", items: [ROUTE_MAP.get("system")!, ROUTE_MAP.get("video-credentials")!] },
+  { label: "系统", items: [ROUTE_MAP.get("system")!] },
 ];
 
 export function routeMeta(id: RouteId): RouteMeta {
