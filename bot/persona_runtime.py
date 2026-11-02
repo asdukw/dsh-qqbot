@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from content_policy import SAFE_PROMPT, require_safe, safe_text
+from content_policy import require_safe, safe_text
 from dsh_client import DSHError
 from log_context import get_logger
 from onebot import MessageEvent, OneBotError, OneBotRejected
@@ -64,7 +64,8 @@ class PersonaRuntime:
         lore = persona.card.lorebook.select(text, max_chars=self.config.bot.lore_max_chars)
         prompt = build_system_prompt(persona.card.data, persona.card.name, user_name,
                                      datetime.now(TZ), lore)
-        prompt += '\n\n' + SAFE_PROMPT
+        # 内容范围由全局 DSH system prompt 提供（build_dsh_system_prompt），
+        # 这里不再重复，避免同一段约束在同一份 prompt 里出现两次。
         story = getattr(self, 'story', None)
         relation_prompt = story.context(conversation_id, persona, str(user_id)) if story is not None and story.enabled and user_id else ''
         self.conversations.prepare_persona(session_id, conversation_id, persona.token, prompt, relation_prompt)

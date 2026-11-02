@@ -13,10 +13,11 @@ from unittest.mock import AsyncMock, Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bot'))
 
 from commands import CommandRouter  # noqa: E402
+from content_policy import SAFE_PROMPT  # noqa: E402
 from conversations import ConversationStore  # noqa: E402
 from dsh_client import DSHError  # noqa: E402
 from group_context import GroupContextBuffer  # noqa: E402
-from main import AppConfig, Bot  # noqa: E402
+from main import AppConfig, Bot, build_dsh_system_prompt  # noqa: E402
 from memory import Memory  # noqa: E402
 from onebot import MessageEvent, OneBotError, OneBotRejected  # noqa: E402
 from personas import PersonaStore, target_of  # noqa: E402
@@ -185,9 +186,18 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Default world secret', prompts['group-42-g1'])
         self.assertIn('Default world secret', prompts['group-43'])
         self.assertNotIn('Alice world secret', prompts['group-43'])
+        # 内容范围只由全局 system prompt 提供，persona 段不再重复一次。
+        self.assertNotIn('[内容范围]', prompts['group-42-g1'])
+        self.assertNotIn('[内容范围]', prompts['group-43'])
         self.bot.conversations = None
         with self.assertRaises(DSHError):
             self.bot._prepare_persona('group:42', 'group-42-g1', self.event(), 'secret')
+
+    def test_content_policy_appears_once_in_the_global_prompt(self) -> None:
+        prompt = build_dsh_system_prompt()
+        self.assertEqual(prompt.count('[内容范围]'), 1)
+        self.assertIn(SAFE_PROMPT, prompt)
+        self.assertIn('[会话隔离]', prompt)
 
     async def test_unknown_announcement_never_binds_or_auto_replays(self) -> None:
         self.bot.onebot.send_group = AsyncMock(side_effect=OneBotError('timeout'))
