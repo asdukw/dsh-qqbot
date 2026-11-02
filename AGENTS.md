@@ -22,6 +22,8 @@ pyright
 ## 约定
 - 角色卡只接受中文卡：安装或切换前确认 `description` / `first_mes` 为中文；英文卡（含英文原卡）不安装。
 - 代码注释、docstring、文档用中文；提交信息用英文，沿用仓库既有 imperative 风格（如 `Add ...`、`Improve ...`）。
+- 测试写 `unittest`：普通用例继承 `unittest.TestCase`，异步用例继承 `IsolatedAsyncioTestCase`（范例 `tests/test_approvals.py`）。`pytest` 不在 `requirements-dev.txt`，本地未必装得上。
+- 写测试、改 asyncio 逻辑、清 pyright 报错时，先查 `.agents/skills/` 的 `python-testing-patterns` / `async-python-patterns` / `python-type-safety`；换机器用 `npx skills add wshobson/agents -s python-testing-patterns -s async-python-patterns -s python-type-safety -y` 装回。skill 里的 pytest 示例不改变上一条测试约定。
 - 密钥和 token 从环境变量或配置读取，不写死、不入库；`.env` 已被忽略。
 - 改 DSH profile / 插件前先读 [docs/architecture.md](docs/architecture.md)；部署与排障先读 [docs/ops.md](docs/ops.md)。
 - 本地调 DSH 可用 `dsh/fake_llm.py`，不需要真实模型。
