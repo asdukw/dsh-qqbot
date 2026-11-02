@@ -443,7 +443,10 @@ const chatSearch = {
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Optional keyword substring filter' },
+      query: {
+        type: 'string',
+        description: 'Optional keywords; space-separated words must all appear',
+      },
       since: {
         type: 'string',
         description: 'Optional start time in Beijing time: YYYY-MM-DD or YYYY-MM-DD HH:mm',
@@ -480,8 +483,12 @@ const chatSearch = {
       params.push(Math.floor(until / 1000))
     }
     if (query) {
-      clauses.push("text LIKE ? ESCAPE '\\'")
-      params.push(`%${escapeLike(query)}%`)
+      // 空格分隔的多个词按 AND 处理：模型习惯像搜索引擎那样给几个关键词，
+      // 整串当子串匹配会让 "Magpie 作者" 这类查询必然落空。
+      for (const term of query.split(' ').filter(Boolean).slice(0, 8)) {
+        clauses.push("text LIKE ? ESCAPE '\\'")
+        params.push(`%${escapeLike(term)}%`)
+      }
     }
     params.push(limit)
 
