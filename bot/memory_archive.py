@@ -344,6 +344,7 @@ class MemoryArchive:
         result: dict[str, Any],
         *,
         transcript: str = "",
+        save_day: bool = True,
         known_users: dict[str, str],
         message_count: int,
         session_id: str,
@@ -355,54 +356,55 @@ class MemoryArchive:
         summary = _clean_summary(result.get("summary"))
         topics = _string_list(result.get("topics"))
         loops = _string_list(result.get("open_loops"))
-        if not summary and not topics:
+        if save_day and not summary and not topics:
             return False
         with self._lock, self._db:
             row = self._db.execute(
                 "SELECT * FROM memory_days WHERE conversation_id=? AND day=?",
                 (conversation_id, day),
             ).fetchone()
-            sessions = json.loads(row["session_ids"]) if row else []
-            if session_id and session_id in sessions:
-                return False
-            if row is None:
-                day_id = uuid.uuid4().hex
-                self._db.execute(
-                    "INSERT INTO memory_days "
-                    "(id,conversation_id,day,summary,topics,open_loops,message_count,"
-                    "session_ids,generation,model,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,'',?,?)",
-                    (
-                        day_id, conversation_id, day, summary,
-                        json.dumps(topics, ensure_ascii=False),
-                        json.dumps(loops, ensure_ascii=False),
-                        message_count,
-                        json.dumps([session_id] if session_id else [], ensure_ascii=False),
-                        generation, now, now,
-                    ),
-                )
-                day_text = " ".join([summary, *topics, *loops])
-            else:
-                merged = row["summary"]
-                if summary and summary not in merged:
-                    merged = (merged + "\n\n" + summary)[-MAX_DAY_SUMMARY:]
-                merged_topics = _string_list(json.loads(row["topics"]) + topics, limit=20)
-                merged_loops = _string_list(json.loads(row["open_loops"]) + loops, limit=20)
-                sessions.append(session_id)
-                self._db.execute(
-                    "UPDATE memory_days SET summary=?, topics=?, open_loops=?, "
-                    "message_count=message_count+?, session_ids=?, generation=?, updated_at=? "
-                    "WHERE id=?",
-                    (
-                        merged, json.dumps(merged_topics, ensure_ascii=False),
-                        json.dumps(merged_loops, ensure_ascii=False),
-                        message_count, json.dumps(sessions, ensure_ascii=False),
-                        generation, now, row["id"],
-                    ),
-                )
-                day_id = row["id"]
-                day_text = " ".join([merged, *merged_topics, *merged_loops])
-            self._fts_set(f"day:{day_id}", day_text)
+            if save_day:
+                sessions = json.loads(row["session_ids"]) if row else []
+                if session_id and session_id in sessions:
+                    return False
+                if row is None:
+                    day_id = uuid.uuid4().hex
+                    self._db.execute(
+                        "INSERT INTO memory_days "
+                        "(id,conversation_id,day,summary,topics,open_loops,message_count,"
+                        "session_ids,generation,model,created_at,updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,'',?,?)",
+                        (
+                            day_id, conversation_id, day, summary,
+                            json.dumps(topics, ensure_ascii=False),
+                            json.dumps(loops, ensure_ascii=False),
+                            message_count,
+                            json.dumps([session_id] if session_id else [], ensure_ascii=False),
+                            generation, now, now,
+                        ),
+                    )
+                    day_text = " ".join([summary, *topics, *loops])
+                else:
+                    merged = row["summary"]
+                    if summary and summary not in merged:
+                        merged = (merged + "\n\n" + summary)[-MAX_DAY_SUMMARY:]
+                    merged_topics = _string_list(json.loads(row["topics"]) + topics, limit=20)
+                    merged_loops = _string_list(json.loads(row["open_loops"]) + loops, limit=20)
+                    sessions.append(session_id)
+                    self._db.execute(
+                        "UPDATE memory_days SET summary=?, topics=?, open_loops=?, "
+                        "message_count=message_count+?, session_ids=?, generation=?, updated_at=? "
+                        "WHERE id=?",
+                        (
+                            merged, json.dumps(merged_topics, ensure_ascii=False),
+                            json.dumps(merged_loops, ensure_ascii=False),
+                            message_count, json.dumps(sessions, ensure_ascii=False),
+                            generation, now, row["id"],
+                        ),
+                    )
+                    day_id = row["id"]
+                    day_text = " ".join([merged, *merged_topics, *merged_loops])
+                self._fts_set(f"day:{day_id}", day_text)
             for item in (result.get("user_facts") or [])[:20]:
                 if not isinstance(item, dict):
                     continue
@@ -524,12 +526,13 @@ class MemoryArchive:
         session_id: str = "",
         generation: int = 0,
         skip_existing_day: bool = False,
+        save_day: bool = True,
         day: str | None = None,
     ) -> bool:
         if not self.settings.enabled or self._generate is None:
             return False
         day = day or day_of(end_at)
-        if skip_existing_day:
+        if skip_existing_day and save_day:
             with self._lock:
                 exists = self._db.execute(
                     "SELECT 1 FROM memory_days WHERE conversation_id=? AND day=?",
@@ -565,6 +568,7 @@ class MemoryArchive:
             return self._store_extraction(
                 conversation_id, day, result, transcript=transcript,
                 known_users=users,
+                save_day=save_day,
                 message_count=count,
                 session_id=session_id,
                 generation=generation,
@@ -622,6 +626,13 @@ class MemoryArchive:
                 (start, end),
             ).fetchall()
         return [str(row[0]) for row in rows]
+
+    async def refresh_items(self, conversation_id: str, day: str, *, session_id: str = "") -> bool:
+        """重新提取某天的事实而不改写已有摘要（回填用）。"""
+        start, end = day_bounds(day)
+        return await self.archive_window(
+            conversation_id, start, end, session_id=session_id, day=day, save_day=False,
+        )
 
     def missing_days(self, days: int) -> list[tuple[str, str]]:
         """(conversation_id, day) pairs without a daily summary."""

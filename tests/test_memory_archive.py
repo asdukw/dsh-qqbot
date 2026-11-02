@@ -210,6 +210,33 @@ class MemoryArchiveTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(private, [])
 
+    async def test_refresh_items_leaves_the_day_summary_alone(self) -> None:
+        """回填只补事实，不能把摘要再拼一遍。"""
+        now = int(time.time())
+        await self.archive.archive_window('group:1', now - 3600, now, session_id='s1')
+        with closing(sqlite3.connect(self.path)) as db:
+            before = db.execute('SELECT summary FROM memory_days').fetchone()[0]
+
+        extra = json.loads(extraction())
+        extra['summary'] = '第二次提取会写出完全不同的摘要。'
+        extra['user_facts'].append({
+            'user_id': '7', 'key': '周末安排', 'value': '想约咖啡店',
+            'evidence': '我最近喜欢手冲咖啡',
+        })
+
+        async def again(_conversation: str, _prompt: str) -> str:
+            return json.dumps(extra, ensure_ascii=False)
+
+        self.archive._generate = again
+        self.assertTrue(await self.archive.refresh_items('group:1', self.day()))
+
+        with closing(sqlite3.connect(self.path)) as db:
+            after = db.execute('SELECT summary FROM memory_days').fetchone()[0]
+            keys = [row[0] for row in db.execute(
+                "SELECT key FROM memory_items WHERE scope='user' ORDER BY key")]
+        self.assertEqual(after, before)
+        self.assertEqual(set(keys), {'喜好', '周末安排'})
+
     async def test_same_session_is_not_duplicated(self) -> None:
         now = int(time.time())
         await self.archive.archive_window('group:1', now - 3600, now, session_id='s1')
