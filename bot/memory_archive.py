@@ -314,20 +314,28 @@ class MemoryArchive:
     @staticmethod
     def _prompt(conversation_id: str, transcript: str, *, is_group: bool, group_id: str) -> str:
         scope = f"群聊 group:{group_id}" if is_group else "私聊"
-        return (
-            f"{MEMORY_SYSTEM}\n\n会话：{conversation_id}（{scope}）\n"
-            "任务：整理这段时间的聊天，输出 JSON，字段如下：\n"
+        spec = (
             '{"summary":"150-300字，按时间顺序概括发生了什么、重要决定、情绪和未完成的事",'
             '"topics":["主题"],"open_loops":["未完成/约定的事"],'
-            '"user_facts":[{"user_id":"聊天记录里的QQ号","name":"昵称","key":"简短稳定键",'
-            '"value":"事实","kind":"fact|preference|event|relationship|plan","importance":1-5,'
+            '"user_facts":[{"user_id":"纯数字QQ号，不要带 QQ 前缀","name":"昵称",'
+            '"key":"简短稳定键","value":"用你自己的话概括的事实",'
+            '"evidence":"聊天记录里支撑它的一句原话，逐字复制，不要改写",'
+            '"kind":"fact|preference|event|relationship|plan","importance":1-5,'
             '"visibility":"private|public"}],'
-            '"group_facts":[{"key":"简短稳定键","value":"群信息","importance":1-5}]}\n'
-            "规则：只写记录中明确出现的事实；user_id 必须来自记录；私聊事实一律 private；"
-            "群聊用户事实一律 public 且只属于本群；group_facts 只用于群聊；不要复述整段聊天；"
-            "没有内容就给空数组。\n\n聊天记录：\n"
-            f"{transcript}"
+            '"group_facts":[{"key":"简短稳定键","value":"群信息",'
+            '"evidence":"聊天记录里的原话，逐字复制","importance":1-5}]}'
         )
+        rules = (
+            "规则：只写记录中明确出现的事实；user_id 只写数字，来自记录里的 QQ 号；"
+            "每条事实都必须给出 evidence，从聊天记录逐字复制一句，不要改写；没有证据就不要输出；"
+            "value 可以改写；私聊事实一律 private；群聊用户事实一律 public 且只属于本群；"
+            "group_facts 只用于群聊；不要复述整段聊天；没有内容就给空数组。"
+        )
+        return chr(10).join([
+            MEMORY_SYSTEM, "", f"会话：{conversation_id}（{scope}）",
+            "任务：整理这段时间的聊天，输出 JSON，字段如下：", spec, rules, "",
+            "聊天记录：", transcript,
+        ])
 
     def _store_extraction(
         self,

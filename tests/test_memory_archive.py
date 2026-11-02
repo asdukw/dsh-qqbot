@@ -100,6 +100,14 @@ class MemoryArchiveTests(unittest.IsolatedAsyncioTestCase):
                 'SELECT user_id,key,value,evidence FROM memory_items ORDER BY key'
             ).fetchall()
 
+    async def test_prompt_asks_for_digits_and_verbatim_evidence(self) -> None:
+        now = int(time.time())
+        await self.archive.archive_window('group:1', now - 3600, now, session_id='prompt')
+        prompt = self.calls[0][1]
+        self.assertIn('evidence', prompt)
+        self.assertIn('逐字复制', prompt)
+        self.assertIn('纯数字QQ号', prompt)
+
     async def test_qq_prefixed_user_id_is_normalised(self) -> None:
         """模型常把记录里的 ``QQ`` 前缀一起抄回来，落库前必须剥掉。"""
         await self._store({
