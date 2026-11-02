@@ -95,6 +95,8 @@
     # The model asks for history explicitly; it is not injected every turn.
     - id: session-history
       name: '/opt/qqbot/dsh/plugins/session-history.mjs'
+    # Read-only daily summaries and consolidated facts. Like session-history,
+    # nothing is injected every turn: the model asks for it explicitly.
     - id: memory-archive
       name: '/opt/qqbot/dsh/plugins/memory-archive.mjs'
     # Keep the default tool surface small; optional groups load per agent.

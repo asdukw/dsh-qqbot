@@ -55,7 +55,8 @@ const routeTool = {
     'profile read/write/forget, web search/fetch, file tools and QQ reply/mention/reaction tools. ' +
     'Call this before using video, cards, history or long-term memory tools. ' +
     'Groups: video (video resolve/send), cards (card library/online search/install), ' +
-    'history (raw session/chat logs), memory (consolidated dated summaries/user facts), ' +
+    'history (raw session/chat logs), memory (a dated daily summary per chat plus user and ' +
+    'group facts, searchable by date or keyword), ' +
     'all. Profile read/write/forget is always core and needs no routing. ' +
     'Loading a group replaces the previous optional set for this agent; core tools always stay available.',
   parameters: {

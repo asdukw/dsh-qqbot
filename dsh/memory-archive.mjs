@@ -7,6 +7,10 @@ import { DatabaseSync } from 'node:sqlite'
 // (user/group facts with provenance) are written by bot/memory_archive.py.
 // The model can search them on demand; writes are handled by the extraction
 // pipeline and the existing profile tools, never from here.
+//
+// Nothing here is injected into the system prompt. Daily summaries are only
+// read when the model asks for them, so the prompt never carries a digest of
+// old chats and the tools stay the single entry point.
 
 const PROFILE_DB = process.env.USER_PROFILE_DB || '/var/lib/qqbot/dsh-state/profile.db'
 const MEMORY_DB = process.env.QQBOT_MEMORY_DB || '/var/lib/qqbot/memory.db'
@@ -226,19 +230,6 @@ function timeline(ctx, { since = '', until = '', limit = DEFAULT_LIMIT } = {}) {
   }))
 }
 
-function recentMemory(sessionId) {
-  try {
-    const ctx = contextOf(sessionId)
-    if (!ctx) return ''
-    const since = new Date(Date.now() - 7 * 86400000).toLocaleDateString('sv-SE', { timeZone: TZ })
-    const rows = search(ctx, { since, limit: 8 })
-    if (!rows.length) return ''
-    return formatRows(rows)
-  } catch {
-    return ''
-  }
-}
-
 function text(value) {
   return [{ type: 'text', text: String(value) }]
 }
@@ -316,20 +307,9 @@ const personTool = {
 }
 
 export const name = 'memory-archive'
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools']
 
 export function apply(ctx) {
   if (!ENABLED) return
   for (const tool of [searchTool, timelineTool, personTool]) ctx.tools.register(tool)
-  ctx.on('agent/created', ({ agent }) => {
-    const sessionId = String(agent.id)
-    agent.ctx.systemPrompt.variable('memory_recent', () => recentMemory(sessionId))
-    agent.ctx.systemPrompt.section({
-      name: 'memory-archive',
-      order: 8002,
-      text:
-        '长期记忆（按需使用，不要生硬复述；需要更早的细节时调用 memory_search / ' +
-        'memory_timeline / memory_person）：\n{{memory_recent}}',
-    })
-  })
 }
