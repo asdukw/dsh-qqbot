@@ -42,6 +42,22 @@ PY
 "${COMPOSE[@]}" exec -T admin python < "$ROOT/tests/container_smoke.py"
 "${COMPOSE[@]}" exec -T bot python bot/main.py --check-onebot
 "${COMPOSE[@]}" exec -T bot python bot/main.py --check-dsh
+"${COMPOSE[@]}" exec -T bot python - <<'PY'
+from importlib.metadata import distribution
+from pathlib import Path
+assert 'MIT License' in Path('/opt/qqbot/LICENSE').read_text()
+for name in ('deepseek-harness-sdk', 'deepseek-harness-runtime-bin'):
+    package = distribution(name)
+    assert package.version == '0.2.1rc2'
+    assert package.metadata['License-Expression'] == 'MIT'
+    notices = [path for path in package.files or [] if '.dist-info/licenses/' in str(path)]
+    assert any(path.name == 'LICENSE' for path in notices)
+    for path in notices:
+        assert Path(package.locate_file(path)).read_text()
+    if name == 'deepseek-harness-runtime-bin':
+        assert any(path.name == 'THIRD_PARTY_NOTICES.md' for path in notices)
+print('LICENSE_NOTICES_OK')
+PY
 "${COMPOSE[@]}" exec -T bot sh -c 'id; node -e '\''require("node:sqlite")'\''; test -w /etc/qqbot/config.toml; printf persisted > /var/lib/qqbot/video-media/outbox/smoke-marker'
 "${COMPOSE[@]}" restart bot admin
 "${COMPOSE[@]}" exec -T bot sh -c 'test "$(cat /var/lib/qqbot/video-media/outbox/smoke-marker)" = persisted; python bot/main.py --list-models'
