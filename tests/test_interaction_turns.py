@@ -231,12 +231,11 @@ class InteractionTurnTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_only_hidden_final_after_reaction_does_not_send_ellipsis(self):
         bot = self.make_bot()
-        bot.relations = None
         bot._send_reply = Bot._send_reply.__get__(bot, Bot)
         bot._send_voice = AsyncMock(return_value=False)
         bot._send_meme = AsyncMock(return_value=False)
         bot._send_sticker = AsyncMock(return_value=False)
-        self.model(bot, [('react', {'message_id': '123', 'emoji_id': '76'})], reply='[好感+1]')
+        self.model(bot, [('react', {'message_id': '123', 'emoji_id': '76'})], reply='[语音]')
         await bot._reply_dsh('group:42', self.event, self.event.text)
         bot._send.assert_not_awaited()
         self.assertEqual([c.args[1] for c in bot.memory.add.await_args_list], ['user'])

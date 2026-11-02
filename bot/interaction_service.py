@@ -17,7 +17,6 @@ from content_policy import require_safe
 from group_context import GroupLine
 from meme import extract_meme_marker
 from onebot import OneBotRejected
-from relationship_rules import parse_chat_proposal
 from schedule import extract_schedule, render_schedule
 from stickers import extract_sticker_marker
 from tasks import extract_task_management, extract_task_marker
@@ -53,13 +52,11 @@ def _model_id(value: Any, *, positive: bool = False) -> int:
 
 
 def _reject_markers(text: str) -> None:
-    # Existing pure parsers remove even malformed relation fences. Ignore their
-    # whitespace normalization, but reject removed controls rather than run them.
-    if re.search(r'\[(?:好感(?:度)?|印象|关系)', text):
-        raise ValueError('hidden control markers are not allowed; use ordinary final output')
+    # Existing pure parsers normalize whitespace when they strip markers.
+    # Ignore that, but reject removed controls rather than run them.
     compact = ''.join(text.split())
     for parser in (
-        parse_chat_proposal, extract_task_marker,
+        extract_task_marker,
         extract_task_management, extract_voice_marker, extract_sticker_marker,
         extract_meme_marker,
     ):

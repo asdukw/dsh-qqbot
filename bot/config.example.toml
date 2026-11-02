@@ -87,15 +87,6 @@ max_sends_per_hour = 10    # per chat
 database = "/var/lib/qqbot/stickers.db"
 directory = "/var/lib/qqbot/stickers"
 
-[relation]
-# Legacy per-user affinity used only while [story] is disabled.
-# Story mode keeps this table read-only and uses scoped, event-based relations.
-enabled = true
-start_affinity = 20
-max_delta = 3
-cooldown_seconds = 60
-max_changes_per_day = 20
-
 [story]
 # Opt in via this flag or the private admin Story page. A card switch then
 # prepares the public story automatically; each /story start owns its own save.

@@ -121,7 +121,6 @@ class ReplyCorrelationTests(unittest.IsolatedAsyncioTestCase):
         bot._global = asyncio.Semaphore(3)
         bot._own_messages = {}
         bot._log_chat_event = Mock()
-        bot.relations = None
         bot.conversations = None
         bot.commands = SimpleNamespace(is_command=Mock(return_value=False))
         bot.ensure_card = AsyncMock(return_value=True)

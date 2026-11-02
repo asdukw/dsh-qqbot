@@ -458,7 +458,6 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
         event.text = '切换角色'
         self.bot.commands = CommandRouter(self.bot)
         self.bot._names = {}
-        self.bot.relations = None
         self.bot._log_chat_event = Mock()
         self.bot._maybe_reload_model = AsyncMock()
         service = self.bot.card_service = CardService(self.bot)
@@ -488,7 +487,6 @@ class PersonaTests(unittest.IsolatedAsyncioTestCase):
             await service.close()
 
     async def test_strict_tool_reply_requires_every_text_receipt_and_never_uses_voice(self) -> None:
-        self.bot.relations = None
         self.bot.config.bot.max_reply_chars = 8
         self.bot._send_voice = AsyncMock(return_value=True)
         for failure in (OneBotError('timeout'), {}):

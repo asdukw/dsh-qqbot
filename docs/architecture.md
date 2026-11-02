@@ -280,13 +280,15 @@ CardService 在随机 `127.0.0.1` 端口提供有凭证、有限请求体/并发
 - `/reset`（管理员，`/new` 同义）强制新 generation；`memory.db` 的 FTS recall 按 `conversation_id` 保留，轮换不影响长期记忆。
 - 压缩仍保持 80% 兜底；先靠轮换降低历史重放，等 token 账本上线后再决定是否把阈值降到约 20%。
 
-## 关系 / 好感度（`bot/relations.py`）
+## 关系（聊天演化已下线）
 
-- 每个 QQ 一行，存在 `profile.db` 的 `user_relations` 表（与 DSH 用户画像同库）：好感度 `0~100`（默认 20）、关系标签、私下印象、公开印象、最近活动/更新时间、每日变更计数。
-- 主模型在回复末尾输出隐藏标记 `[好感+2]` / `[印象: …]` / `[关系: …]`；`Bot._send_reply` 在发送前剥离并写入 `RelationStore`。群聊里的 `[印象]` 写 `public_impression`，私聊里写 `impression`；增量夹在 `±max_delta`，有冷却和每日变更上限；衰减暂不启用。
-- `user_facts` 带 `group_id` 作用域：群里学到的 fact 只在该群注入/查询，私聊只能看到全局 facts；旧数据迁移时按 `source=group:<gid>` 回填。`/relation` 的画像同样按当前群过滤。
-- `/relation`（别名 `/关系`、`/好感度`、`/印象`）对所有人开放：默认查自己，`/relation <QQ>` 查他人；群聊只展示公开印象，私聊展示私下印象；其他人不展示印象，只看分数/等级和公开 facts。管理员可用 `/relation set|reset`。
-- `dsh/user-profile.mjs` 通过 `{{user_relation}}` 把压缩后的关系块注入 DSH 系统提示（群聊用公开印象，私聊用私下印象）；thin 路径在 `_reply_llm` 的 system message 里追加同一块和标记说明。
+聊天里的关系累积已经移除：模型不再被要求输出 `[好感+2]` / `[印象: …]` / `[关系: …]` 或 ````relation```` JSON 块，adapter 也不再写 `user_relations`，DSH 侧不再注入 `{{user_relation}}`。实测一周只有 3 次成功写入，131/137 档停在初始的 20/10，而每轮都要为它付一段 `初识 / 礼貌克制` 的固定提示，因此整条聊天路径下线。
+
+保留的东西：
+
+- 剧情仍用 `story_relations`（同一 profile.db）里的 `affinity` / `trust` / `stage` 做选项门控与恋爱确认，由剧情选项的 `effect` 推进；`/story status` 显示进度。
+- `user_relations` 旧表和 `/relation` 命令的数据不再读写，也不 DROP，历史留在库里。
+- `user_facts` 的 `group_id` 作用域与画像工具（`profile`）不受影响。
 
 ## Token 审计与群聊统计
 
@@ -360,7 +362,7 @@ auto: true
 
 切卡跨 characters.db/profile.db 沿现有 saga：准备并保存世界引用和原始投递内容→绑定→公共序幕。未完成切换阻止普通新回复。A→B→A 读取旧档，继续时新签菜单 token，旧菜单失效但选项含义不变。restart 确认后归档本人目标关系/周目，forget 清除该目标活动与归档内容；真实 facts 不改。
 
-普通聊天由 Python 准备 scoped relation_prompt，JS 插件只动态读取，不对新版关系另行分档/定价；旧 marker 仅兼容剥离。日常提案与剧情效果通过同一关系档，正向日预算不吞负向/印象。后台 mutation 认证/同源检查后入队，bot 重新核对完整目标和 revision；超过4096字节拒绝，不截断保存。
+普通聊天不再准备或注入 relation_prompt；剧情效果直接写剧情关系档，正向日预算不吞负向/印象。后台 mutation 认证/同源检查后入队，bot 重新核对完整目标和 revision；超过4096字节拒绝，不截断保存。
 
 ### 生成协议 v2：检查点与分层校验
 

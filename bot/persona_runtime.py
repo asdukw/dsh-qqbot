@@ -67,8 +67,10 @@ class PersonaRuntime:
         # 内容范围由全局 DSH system prompt 提供（build_dsh_system_prompt），
         # 这里不再重复，避免同一段约束在同一份 prompt 里出现两次。
         story = getattr(self, 'story', None)
-        relation_prompt = story.context(conversation_id, persona, str(user_id)) if story is not None and story.enabled and user_id else ''
-        self.conversations.prepare_persona(session_id, conversation_id, persona.token, prompt, relation_prompt)
+        if story is not None and story.enabled and user_id:
+            # 只用于标记该卡已进入剧情模式；关系文本不再注入聊天 prompt。
+            story.context(conversation_id, persona, str(user_id))
+        self.conversations.prepare_persona(session_id, conversation_id, persona.token, prompt)
         return persona
 
     def _opening_context(self, conversation_id: str) -> str:

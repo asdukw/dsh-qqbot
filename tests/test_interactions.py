@@ -183,8 +183,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             await second.close()
 
     async def test_text_safety_and_every_hidden_control_parser(self):
-        for marker in ('[好感+1]', '[印象: 新印象]', '[关系: 朋友]',
-                       '```relation\nnot json\n```', '[定时: 喝水]', '[定时列表]',
+        for marker in ('[定时: 喝水]', '[定时列表]',
                        '[定时删除: 喝水]', '[语音]', '[表情: ]', '[梗图: 文字]'):
             with self.subTest(marker=marker), self.assertRaisesRegex(ValueError, 'control markers'):
                 await self.call({'message_id': '101', 'text': 'hello' + marker})
@@ -196,13 +195,8 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_oversize_text_is_rejected_before_control_parsers(self):
         with patch('interaction_service._reject_markers') as parse:
             with self.assertRaisesRegex(ValueError, 'shorten'):
-                await self.call({'message_id': '101', 'text': '[好感' + ' ' * 8000 + 'x'})
+                await self.call({'message_id': '101', 'text': '[定时' + ' ' * 8000 + 'x'})
         parse.assert_not_called()
-        self.sender.assert_not_awaited()
-
-    async def test_malformed_relation_prefix_does_not_enter_backtracking_parser(self):
-        with self.assertRaisesRegex(ValueError, 'control markers'):
-            await self.call({'message_id': '101', 'text': '[好感' + ' ' * 1000 + 'x'})
         self.sender.assert_not_awaited()
 
     async def test_unknown_notifies_other_authorities_once(self):

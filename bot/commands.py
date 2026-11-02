@@ -17,7 +17,6 @@ from feeds import FeedError
 from llm import LLMError
 from models import ModelRecord, ModelRegistry
 from onebot import OneBotError
-from relations import render_relation
 from stickers import StickerError, download_image
 from tasks import TZ as TASK_TZ
 from tasks import describe_record, describe_target, render_task_list
@@ -70,7 +69,6 @@ HELP = """可用命令:
 /sub            RSS / B 站订阅（仅管理员）
 /story          开始/继续个人剧情（所有人可用）
 /choose <菜单码> <编号>  选择自己的剧情选项
-/relation       查看当前角色关系（所有人可用）
 /help           显示帮助"""
 
 CARD_HELP = """/card                     列出角色卡
@@ -108,12 +106,6 @@ SUB_HELP = """/sub add <uid|空间链接|RSS>  订阅；B 站 UID 走 RSSHub
 /sub list                    当前会话的订阅
 /sub del <id>                删除订阅
 /sub check                   立即检查一次所有订阅"""
-
-
-RELATION_HELP = """/relation                查看 bot 对你的印象
-/relation <QQ号>         查看 bot 对这个人的公开印象
-/relation set <QQ> <0-100>  管理员设置好感度
-/relation reset <QQ>        管理员清空记录"""
 
 
 STICKER_HELP = """/sticker                     列出最近收藏的表情包
@@ -155,9 +147,6 @@ class CommandRouter:
                 log.exception('story command failed')
                 await self.bot.send_text(event, '剧情操作未完成，进度不会重复生效。请 /story continue 重试。')
             return
-        if name in ("/relation", "/关系", "/好感度", "/印象"):
-            await self._relation(event, parts[1:])
-            return
         if name in ("/card", "/cards"):
             await self._card(event, parts[1:])
             return
@@ -182,87 +171,6 @@ class CommandRouter:
             await self._daily(event, parts[1:])
         else:
             await self.bot.send_text(event, f"未知命令: {name}\n{HELP}")
-
-    async def _relation(self, event: Any, args: list[str]) -> None:
-        """Public read command; admins can also set/reset records."""
-        story = getattr(self.bot, 'story', None)
-        if story is not None and story.enabled:
-            if args and args[0] not in ('help', '?'):
-                await self.bot.send_text(event, '新版关系仅查看自己在当前角色/会话的进度；管理操作请使用后台。')
-                return
-            response = await story.command(event, ['status'])
-            await self.bot.send_text(event, response)
-            return
-        store = getattr(self.bot, "relations", None)
-        if store is None:
-            await self.bot.send_text(event, "关系系统未启用。")
-            return
-        action = args[0].lower() if args else ""
-        is_admin = self.bot.is_admin(event.user_id)
-        if action in ("help", "?", "-h", "--help"):
-            await self.bot.send_text(event, RELATION_HELP)
-            return
-        if action in ("set", "reset"):
-            if not is_admin:
-                await self.bot.send_text(event, "只有管理员可以修改好感度。")
-                return
-            if len(args) < 2 or not args[1].isdigit():
-                await self.bot.send_text(event, f"用法: /relation {action} <QQ号>")
-                return
-            target = args[1]
-            if action == "reset":
-                removed = store.reset(target)
-                await self.bot.send_text(
-                    event, "已清空这条关系记录。" if removed else "没有这个人的记录。"
-                )
-                return
-            if len(args) < 3 or not args[2].isdigit():
-                await self.bot.send_text(event, "用法: /relation set <QQ号> <0-100>")
-                return
-            record = store.set_affinity(target, args[2])
-            await self.bot.send_text(
-                event,
-                f"已设置 {target} 的好感度为 {record.affinity}/100（{record.tier}）。",
-            )
-            return
-
-        if action and not action.isdigit():
-            await self.bot.send_text(event, RELATION_HELP)
-            return
-        target = int(action) if action else event.user_id
-        is_self = target == event.user_id
-        record = store.get(target)
-        if is_self:
-            label = (
-                (record.display_name if record and record.display_name else "")
-                or event.sender_name
-                or str(target)
-            )
-        else:
-            label = (
-                (record.display_name if record and record.display_name else "")
-                or f"QQ {target}"
-            )
-        full = is_self or is_admin
-        include_private = event.message_type == "private" and (is_self or is_admin)
-        group_id = (
-            str(event.group_id)
-            if event.message_type == "group"
-            and getattr(event, "group_id", None) is not None
-            else ""
-        )
-        facts = store.facts(
-            target,
-            include_private=include_private and full,
-            group_id=group_id,
-        )
-        scope = "group" if event.message_type == "group" else "private"
-        await self.bot.send_text(
-            event,
-            render_relation(
-                record, label, facts, full=full, scope=scope, start=store.start
-            ),
-        )
 
     async def _reset(self, event: Any) -> None:
         if event.message_type == "group" and event.group_id is not None:
@@ -310,7 +218,6 @@ class CommandRouter:
         group_id = getattr(event, 'group_id', None)
         conversation_id = f"group:{group_id}" if scope == 'group' and group_id else f"private:{event.user_id}"
         return self.bot.personas.effective(conversation_id).record
-
     async def _card(self, event: Any, args: list[str]) -> None:
         action = args[0].lower() if args else "list"
         is_admin = self.bot.is_admin(event.user_id)

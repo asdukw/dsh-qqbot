@@ -38,7 +38,6 @@ def make_bot():
     bot._global = asyncio.Semaphore(3)
     bot._own_messages = {}
     bot._log_chat_event = Mock()
-    bot.relations = None
     bot.story = None
     bot.commands = SimpleNamespace(is_command=Mock(return_value=False), handle=AsyncMock())
     bot._reply = AsyncMock(return_value=None)

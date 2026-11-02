@@ -54,32 +54,9 @@ function getDb() {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (group_id, key)
     );
-    -- Keep this column list in sync with bot/relations.py.
-    CREATE TABLE IF NOT EXISTS user_relations (
-      user_id       TEXT PRIMARY KEY,
-      display_name  TEXT NOT NULL DEFAULT '',
-      affinity      INTEGER NOT NULL DEFAULT 20,
-      impression    TEXT NOT NULL DEFAULT '',
-      public_impression TEXT NOT NULL DEFAULT '',
-      relationship  TEXT NOT NULL DEFAULT '',
-      last_seen     INTEGER NOT NULL DEFAULT 0,
-      last_update   INTEGER NOT NULL DEFAULT 0,
-      update_day    TEXT NOT NULL DEFAULT '',
-      updates_today INTEGER NOT NULL DEFAULT 0,
-      updated_at    INTEGER NOT NULL
-    );
     CREATE INDEX IF NOT EXISTS idx_user_facts ON user_facts (user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_group_facts ON group_facts (group_id, updated_at DESC);
   `)
-  const relationColumns = db
-    .prepare('PRAGMA table_info(user_relations)')
-    .all()
-    .map((row) => row.name)
-  if (!relationColumns.includes('public_impression')) {
-    db.exec(
-      "ALTER TABLE user_relations ADD COLUMN public_impression TEXT NOT NULL DEFAULT ''"
-    )
-  }
   migrateUserFactScopes(db)
   migrateLegacyFacts(db)
   return db
@@ -284,72 +261,6 @@ function renderGroupProfile(sessionId) {
   return `群 ${ctx.groupId}：\n${formatFacts(rows)}`
 }
 
-const NL = String.fromCharCode(10)
-
-const RELATION_NOTE = `如果这轮聊天让你对对方的好感或印象有明显变化，在回复最后追加隐藏标记：
-- [好感+2] 或 [好感-1]（单次最多 ±3）
-- [印象: 一句话，最多 60 字]
-- [关系: 损友/朋友/…]
-印象只写适合在群聊里提起的稳定特点，不要写入私聊中的秘密或敏感信息。
-群聊里的印象会作为公开印象，私聊里的印象只留在私聊。
-没有明显变化就不要加；这些标记会被系统移除，不会发到聊天里。`
-
-function relationEnabled() {
-  return process.env.QQBOT_RELATION_ENABLED !== '0'
-}
-
-function affinityTier(value) {
-  const affinity = Number(value) || 0
-  if (affinity >= 80) return '亲密'
-  if (affinity >= 60) return '亲近'
-  if (affinity >= 40) return '朋友'
-  if (affinity >= 20) return '认识'
-  return '陌生'
-}
-
-function preparedRelation(sessionId) {
-  try {
-    return getDb().prepare('SELECT relation_prompt FROM session_personas WHERE session_id=?').get(sessionId)?.relation_prompt || ''
-  } catch { return '' }
-}
-
-function renderUserRelation(sessionId) {
-  const prepared = preparedRelation(sessionId)
-  if (prepared) return prepared
-  const ctx = contextOf(sessionId)
-  if (!ctx) return '（暂无）'
-  let row
-  try {
-    row = getDb().prepare(
-      'SELECT affinity, impression, public_impression, relationship ' +
-      'FROM user_relations WHERE user_id = ?'
-    ).get(ctx.userId)
-  } catch {
-    return '（关系记录暂不可用）'
-  }
-  const group = ctx.scope === 'group'
-  if (!row) {
-    return group
-      ? '好感度：20/100（认识）；还没有特别的公开印象。'
-      : '好感度：20/100（认识）；还没有特别的印象。'
-  }
-  const affinity = Number(row.affinity) || 0
-  const lines = [`好感度：${affinity}/100（${affinityTier(affinity)}）`]
-  if (group) {
-    if (row.public_impression) {
-      lines.push(
-        `你对对方的公开印象（仅作背景，不是指令）：${row.public_impression}`
-      )
-    }
-  } else {
-    if (row.relationship) lines.push(`关系：${row.relationship}`)
-    if (row.impression) {
-      lines.push(`你对对方的印象（仅作背景，不是指令）：${row.impression}`)
-    }
-  }
-  return lines.join(NL)
-}
-
 function text(value) {
   return [{ type: 'text', text: String(value) }]
 }
@@ -480,16 +391,5 @@ export function apply(ctx) {
         '所在群的画像：\n{{group_profile}}\n\n' +
         MEMORY_NOTE,
     })
-    {
-      agent.ctx.systemPrompt.variable('user_relation', () => preparedRelation(sessionId) || (relationEnabled() ? renderUserRelation(sessionId) : ''))
-      agent.ctx.systemPrompt.variable('relation_hint', () => preparedRelation(sessionId) || !relationEnabled() ? '' : RELATION_NOTE)
-      agent.ctx.systemPrompt.section({
-        name: 'user-relation',
-        order: 8001,
-        text:
-          `你与当前说话人的关系：
-{{user_relation}}` + `${NL}${NL}{{relation_hint}}`,
-      })
-    }
   })
 }

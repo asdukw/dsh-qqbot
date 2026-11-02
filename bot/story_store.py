@@ -8,13 +8,11 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from relationship_rules import ChatProposal, Relationship, chat_effect
-from story_models import RunState, StoryDefinition, StorySettings, digest
+from relationship_rules import Relationship
+from story_models import RunState, StoryDefinition, StorySettings
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS story_schema (version INTEGER NOT NULL);
@@ -417,43 +415,6 @@ class StoryStore:
                     db.execute('UPDATE story_relations SET data=?,archived=1 WHERE id=?', (Relationship().model_dump_json(), relation_id))
             db.execute('INSERT INTO story_audit(actor,kind,target,created) VALUES(?,?,?,?)',
                        (relation['user'], operation, relation['conversation'] + ':' + relation['character'], int(time.time())))
-
-    def chat(self, relation: dict, proposal: ChatProposal, action: str, settings: StorySettings,
-             now: int | None = None) -> Relationship:
-        now = int(time.time()) if now is None else now
-        day = datetime.fromtimestamp(now, ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
-        with self.transaction() as db:
-            row = db.execute('SELECT * FROM story_relations WHERE id=? AND archived=0', (relation['id'],)).fetchone()
-            if row is None:
-                raise ValueError('relationship archived')
-            result = Relationship.model_validate_json(row['data'])
-            before = result.model_copy(deep=True)
-            if db.execute('SELECT 1 FROM story_events WHERE action=?', (action,)).fetchone():
-                return result
-            # Duplicate evidence cannot farm rewards, even using a fresh message id.
-            evidence_hash = digest({'kind': proposal.kind, 'evidence': proposal.evidence.strip()})
-            duplicate = db.execute("SELECT 1 FROM story_events WHERE relation_id=? AND kind='chat' AND json_extract(data,'$.evidence_hash')=? AND created>=?",
-                                   (relation['id'], evidence_hash, now - 86400)).fetchone()
-            da, dt = chat_effect(proposal)
-            gain = row['gain'] if row['day'] == day else 0
-            positive = max(0, da) + max(0, dt)
-            if duplicate or (positive and (gain + positive > settings.daily_chat_gain
-                                           or now - row['last_positive'] < settings.chat_cooldown)):
-                da, dt = 0, 0
-                positive = 0
-            result.affinity = max(0, min(100, result.affinity + da))
-            result.trust = max(0, min(100, result.trust + dt))
-            if proposal.impression:
-                result.impression = proposal.impression
-            db.execute('UPDATE story_relations SET data=?,revision=revision+1,day=?,gain=?,last_positive=? WHERE id=?',
-                       (result.model_dump_json(), day, gain + positive, now if positive else row['last_positive'], relation['id']))
-            db.execute('INSERT INTO story_events(relation_id,action,kind,summary,data,created) VALUES(?,?,?,?,?,?)',
-                       (relation['id'], action, 'chat',
-                        f'好感 {result.affinity - before.affinity:+d} / 信任 {result.trust - before.trust:+d}；{proposal.reason}',
-                        dump({'evidence_hash': evidence_hash, 'relation': result.model_dump(),
-                              'affinity_delta': result.affinity - before.affinity,
-                              'trust_delta': result.trust - before.trust}), now))
-            return result
 
     def queue(self, kind: str, payload: dict) -> str:
         if kind not in ('settings', 'retry', 'restart', 'link', 'import_legacy', 'regenerate'):

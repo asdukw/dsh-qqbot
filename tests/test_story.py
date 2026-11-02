@@ -18,7 +18,7 @@ from content_policy import ContentPermission, adult_allowed, require_safe  # noq
 from llm import ChatResult  # noqa: E402
 from onebot import MessageEvent, OneBotError  # noqa: E402
 from personas import PersonaStore  # noqa: E402
-from relationship_rules import ChatProposal, Relationship, parse_chat_proposal  # noqa: E402
+from relationship_rules import Relationship  # noqa: E402
 from story_generation import StoryGenerator  # noqa: E402
 from story_models import (  # noqa: E402
     Choice,
@@ -117,11 +117,6 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(relation.trust, 13)
         self.assertEqual(state.pending, [])
         self.assertIn('约定已记录', feedback)
-
-    def test_proposal_failure_removes_only_metadata(self):
-        text, proposal = parse_chat_proposal('你好\n```relation\n{"version":9}')
-        self.assertEqual(text, '你好')
-        self.assertIsNone(proposal)
 
     def test_no_explicit_generation_or_age_guessing(self):
         for scope in ('group', 'private'):
@@ -369,17 +364,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                                        self.story.choose(self.event(message=101), menu['id'], 2), return_exceptions=True)
         self.assertEqual(sum(isinstance(item, ValueError) for item in results), 1)
         self.assertEqual(self.snapshot()['revision'], 1)
-
-    async def test_chat_limits_do_not_swallow_conflict_or_impression(self):
-        relation = self.store.relation('group:42', self.a.character_id, '10')
-        settings = StorySettings(daily_chat_gain=1, chat_cooldown=60)
-        kind = ChatProposal(kind='kindness', evidence='帮忙', reason='友善')
-        self.store.chat(relation, kind, 'a', settings, 1000)
-        self.store.chat(relation, kind, 'b', settings, 1001)
-        result = self.store.chat(relation, ChatProposal(kind='conflict', evidence='明确争执', reason='分歧', impression='需要空间'), 'c', settings, 1002)
-        self.assertEqual(result.affinity, 20)
-        self.assertEqual(result.impression, '需要空间')
-        self.assertEqual(self.store.chat(relation, kind, 'a', settings, 1003).affinity, 20)
 
     async def test_policy_change_cancels_inflight_commit(self):
         await self.story.enter(self.event())

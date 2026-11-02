@@ -85,12 +85,6 @@ from persona_runtime import PersonaRuntime
 from personas import PersonaStore
 from proactive import DEFAULT_PROMPT, ProactivePolicy, ProactiveSettings
 from prompt import build_messages, build_system_prompt
-from relations import (
-    MARKER_HINT,
-    RelationStore,
-    extract_relation_markers,
-)
-from relationship_rules import parse_chat_proposal
 from schedule import extract_schedule, render_schedule
 from sessions import SessionStore
 from stickers import (
@@ -332,16 +326,6 @@ class MemorySection:
 
 
 @dataclass
-class RelationSection:
-    # Per-user affinity/impression, updated by main-model hidden markers.
-    enabled: bool = True
-    start_affinity: int = 20
-    max_delta: int = 3
-    cooldown_seconds: int = 60
-    max_changes_per_day: int = 20
-
-
-@dataclass
 class TasksSection:
     # Admin-created scheduled messages; semantic parsing uses the thin client.
     database: str = "/var/lib/qqbot/tasks.db"
@@ -391,7 +375,6 @@ class AppConfig:
     voice: VoiceSection = field(default_factory=VoiceSection)
     meme: MemeSection = field(default_factory=MemeSection)
     feeds: FeedsSection = field(default_factory=FeedsSection)
-    relation: RelationSection = field(default_factory=RelationSection)
     memory: MemorySection = field(default_factory=MemorySection)
     story: StorySettings = field(default_factory=StorySettings)
     video: VideoSettings = field(default_factory=VideoSettings)
@@ -643,15 +626,6 @@ def load_config(path: str | Path) -> AppConfig:
         patch=os.environ.get("MODEL_PATCH", "").strip() or str(models_raw.get("patch", "/var/lib/qqbot/dsh-state/models.patch.json")),
     )
 
-    relation_raw = _section(table, "relation")
-    relation = RelationSection(
-        enabled=bool(relation_raw.get("enabled", True)),
-        start_affinity=max(0, min(100, int(relation_raw.get("start_affinity", 20)))),
-        max_delta=max(0, min(10, int(relation_raw.get("max_delta", 3)))),
-        cooldown_seconds=max(0, int(relation_raw.get("cooldown_seconds", 60))),
-        max_changes_per_day=max(0, int(relation_raw.get("max_changes_per_day", 20))),
-    )
-
     video_raw = _section(table, 'video')
     video = VideoSettings(
         enabled=bool(video_raw.get('enabled', True)),
@@ -699,7 +673,6 @@ def load_config(path: str | Path) -> AppConfig:
         voice=voice,
         meme=meme,
         feeds=feeds,
-        relation=relation,
         memory=memory,
         story=StorySettings.model_validate(_section(table, "story")),
         video=video,
@@ -883,7 +856,6 @@ class Bot(PersonaRuntime):
         tasks: TaskStore | None = None,
         feeds: FeedStore | None = None,
         usage: UsageStore | None = None,
-        relations: RelationStore | None = None,
         daily: DailyStore | None = None,
         approvals: ApprovalStore | None = None,
         story_store: StoryStore | None = None,
@@ -895,7 +867,6 @@ class Bot(PersonaRuntime):
         self.stickers = stickers
         self.tasks = tasks
         self.feeds = feeds
-        self.relations = relations
         self.approvals = approvals
         self.memory = memory
         self.client = client
@@ -1074,8 +1045,6 @@ class Bot(PersonaRuntime):
             self.story.store.close()
         if self.stickers is not None:
             self.stickers.close()
-        if self.relations is not None:
-            self.relations.close()
         if self.tasks is not None:
             self.tasks.close()
         if self.feeds is not None:
@@ -1096,14 +1065,6 @@ class Bot(PersonaRuntime):
 
         await self._maybe_react_video_link(event, text)
         self._log_chat_event(event, text)
-        story = getattr(self, "story", None)
-        if self.relations is not None and (story is None or not story.enabled):
-            try:
-                await asyncio.to_thread(
-                    self.relations.touch, event.user_id, event.sender_name
-                )
-            except sqlite3.Error as exc:
-                log.warning("relation touch failed: %s", exc)
         command_text = strip_leading_mention(strip_message_markers(text))
         if self.commands.is_command(command_text):
             await self.commands.handle(event, command_text)
@@ -1621,7 +1582,6 @@ class Bot(PersonaRuntime):
         text = task.message
         if getattr(task, "mode", "fixed") == "generate":
             text = await self._compose_task_message(task)
-        text, _ = extract_relation_markers(text)
         if not text.strip():
             log.warning(
                 "scheduled task #%s produced no visible text", getattr(task, "id", "?")
@@ -2142,31 +2102,7 @@ class Bot(PersonaRuntime):
     ) -> list[dict]:
         """Send visible text; deferred card switches require acknowledged text."""
         receipts: list[dict] = []
-        story = getattr(self, 'story', None)
         reply = require_safe(reply)
-        reply, proposal = parse_chat_proposal(reply)
-        reply, relation_markers = extract_relation_markers(reply)
-        if story is not None and story.enabled and not proactive and proposal is not None:
-            persona = self._persona(conversation_id)
-            relation = story.store.relation(conversation_id, persona.record.character_id, str(event.user_id))
-            action = f'{conversation_id}:{event.user_id}:chat:{event.message_id}'
-            story.store.chat(relation, proposal, action, story.settings)
-        if (story is None or not story.enabled) and relation_markers.has_update and self.relations is not None:
-            try:
-                updated = await asyncio.to_thread(
-                    self.relations.apply,
-                    event.user_id,
-                    relation_markers,
-                    scope="group" if event.message_type == "group" else "private",
-                )
-            except sqlite3.Error as exc:
-                log.warning("relation update failed: %s", exc)
-            else:
-                if updated is not None:
-                    log.info(
-                        "relation updated: user=%s affinity=%d delta=%d",
-                        event.user_id, updated.affinity, relation_markers.delta,
-                    )
         outer, schedule = extract_schedule(reply)
         if schedule is not None:
             rendered = render_schedule(schedule)
@@ -2183,7 +2119,7 @@ class Bot(PersonaRuntime):
         spoken = spoken_text(visible)
         if not visible.strip() and meme_text is None and hint is None and not allow_silent:
             # A model can emit only hidden markers; do not leave the user with
-            # silence after the relation update.
+            # silence after stripping hidden markers.
             visible = "……"
             spoken = spoken_text(visible)
         if wants_voice:
@@ -2266,8 +2202,7 @@ class Bot(PersonaRuntime):
 
     @staticmethod
     def _visible_reply(reply: str) -> str:
-        visible, _ = parse_chat_proposal(reply)
-        visible, _ = extract_relation_markers(visible)
+        visible = reply
         outer, schedule = extract_schedule(visible)
         visible = (outer + '\n' + render_schedule(schedule)).strip() if schedule else outer
         for extract in (extract_task_marker, extract_task_management, extract_meme_marker,
@@ -3275,19 +3210,6 @@ class Bot(PersonaRuntime):
         )
         if messages:
             messages[0]['content'] += chr(10) * 2 + SAFE_PROMPT
-        story = getattr(self, 'story', None)
-        if story is not None and story.enabled:
-            messages[0]['content'] += '\n\n' + story.context(conversation_id, persona, str(event.user_id))
-        elif self.relations is not None:
-            relation_text = self.relations.prompt_context(
-                event.user_id,
-                scope="group" if event.message_type == "group" else "private",
-            )
-            if relation_text:
-                messages[0]["content"] = (
-                    f"{messages[0]['content']}\n\n[关系状态]\n"
-                    f"{relation_text}{MARKER_HINT}"
-                )
 
         log.info(
             "replying: conv=%s user=%s chars=%d history=%d lore=%d",
@@ -3499,24 +3421,6 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
     client = make_llm_client(config, record)
     dsh_client = make_dsh_client(config, record) if config.dsh.enabled else None
     conversations = ConversationStore(config.paths.profile_db) if dsh_client is not None else None
-    relations: RelationStore | None
-    try:
-        relations = (
-            RelationStore(
-                config.paths.profile_db,
-                start=config.relation.start_affinity,
-                max_delta=config.relation.max_delta,
-                cooldown_seconds=config.relation.cooldown_seconds,
-                max_changes_per_day=config.relation.max_changes_per_day,
-            )
-            if config.relation.enabled
-            else None
-        )
-        if relations is not None:
-            log.info("relation store loaded: %d record(s)", relations.count())
-    except (OSError, sqlite3.Error) as exc:
-        log.error("cannot open the relation store: %s", exc)
-        relations = None
     stickers: StickerStore | None
     try:
         stickers = StickerStore(
@@ -3585,7 +3489,7 @@ def build_bot(config: AppConfig) -> tuple[Bot, ModelRecord] | None:
 
     bot = Bot(
         config, cards, memory, client, dsh_client, conversations, stickers, tasks,
-        feeds, usage, relations, daily, approvals, StoryStore(config.paths.profile_db),
+        feeds, usage, daily, approvals, StoryStore(config.paths.profile_db),
     )
     if not bot.refresh_card(force=True):
         log.error("cannot load the active character card")
@@ -3792,7 +3696,6 @@ def main() -> int:
         print(f"error: cannot load config {args.config}: {exc}", file=sys.stderr)
         return 2
     warn_legacy_model_env()
-    os.environ["QQBOT_RELATION_ENABLED"] = "1" if config.relation.enabled else "0"
     os.environ["QQBOT_MEMORY_ENABLED"] = "1" if config.memory.enabled else "0"
 
     if args.show_card:

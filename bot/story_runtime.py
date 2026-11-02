@@ -10,7 +10,7 @@ from typing import Any
 from content_policy import require_safe
 from onebot import OneBotError, OneBotRejected
 from personas import target_of
-from relationship_rules import Relationship, relation_context
+from relationship_rules import Relationship
 from story_generation import StoryGenerator
 from story_models import Choice, RunState, StoryDefinition, StorySettings, advance, available
 from story_store import StoryStore, uid
@@ -163,14 +163,9 @@ class StoryRuntime:
         return ''
 
     def context(self, conversation: str, persona: Any, user: str) -> str:
+        """标记该卡已进入剧情模式；聊天不再注入关系文本。"""
         self.bot.cards.mark_story(persona.record.id)
-        row = self.store.relation(conversation, persona.record.character_id, user)
-        relation = Relationship.model_validate_json(row['data'])
-        world = self.store.world(conversation, persona.record.character_id, persona.record.fingerprint)
-        behavior = ''
-        if world:
-            behavior = StoryDefinition.model_validate_json(world['definition']).behavior.get(relation.stage, '')
-        return relation_context(relation, behavior=behavior)
+        return ''
 
     def _menu(self, definition: StoryDefinition, state: RunState, relation: Relationship) -> list[Choice]:
         choices = available(definition.node(state.node), state, relation)
