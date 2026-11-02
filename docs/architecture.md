@@ -290,6 +290,17 @@ CardService 在随机 `127.0.0.1` 端口提供有凭证、有限请求体/并发
 - `user_relations` 旧表和 `/relation` 命令的数据不再读写，也不 DROP，历史留在库里。
 - `user_facts` 的 `group_id` 作用域与画像工具（`profile`）不受影响。
 
+## 长期记忆提取的校验
+
+`memory_archive.py` 的提取器要求模型对每条事实同时给出 `value`（可改写）和 `evidence`（必须逐字复制聊天记录里的一句）。落库前 `_traceable()` 只校验 evidence：
+
+- evidence 必须能在本次 transcript 里逐字找到（允许被截断，用前 12 字探针兜底）；
+- 用户事实的 evidence 还必须出现在以 `QQ<user_id> ` 开头的那一行，防止把别人的话记到某人名下；
+- `user_id` 先经 `normalise_user_id()` 归一：模型常把记录里的 `QQ` 前缀抄回来，不剥掉会 100% 落库失败；
+- 没有 evidence 的旧格式事实回退到"value 逐字出现在 transcript"的旧规则。
+
+历史教训：早先直接用 `_supported(value, 该用户最后 2000 字)` 校验，等于要求"改写后的事实与原文逐字相同"，跑了一周 `memory_items` 始终为 0。提取请求另用 `[memory] timeout`（默认 120s），不复用聊天超时。
+
 ## Token 审计与群聊统计
 
 - `usage.db` 的 `usage_events` 统一记录非缓存输入、缓存输入和输出。DSH 侧由 `DSHClient.run_with_events()` 返回本轮 events，`UsageStore.record_dsh()` 解析 `assistant/message` 和 `compaction/summary` 的 usage；thin client 侧由 `LLMClient.usage_sink` 上报图片描述、表情打标、任务解析/文案等调用。

@@ -126,6 +126,7 @@ retention_days = 365
 sample_messages = 200
 max_input_chars = 12000
 max_output_tokens = 1600
+timeout = 120           # 提取请求专用超时（prompt 很长）
 
 [usage]
 # Token ledger and per-message analytics for the admin UI.

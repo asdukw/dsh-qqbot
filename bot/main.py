@@ -323,6 +323,8 @@ class MemorySection:
     sample_messages: int = 200
     max_input_chars: int = 12000
     max_output_tokens: int = 1600
+    # 提取请求的 prompt 很长，聊天用的超时对它太紧。
+    timeout: float = 120.0
 
 
 @dataclass
@@ -563,6 +565,7 @@ def load_config(path: str | Path) -> AppConfig:
         sample_messages=max(20, min(1000, int(memory_raw.get("sample_messages", 200)))),
         max_input_chars=max(2000, min(40000, int(memory_raw.get("max_input_chars", 12000)))),
         max_output_tokens=max(256, min(4000, int(memory_raw.get("max_output_tokens", 1600)))),
+        timeout=max(10.0, min(600.0, float(memory_raw.get("timeout", 120)))),
     )
 
     tasks_raw = _section(table, "tasks")
@@ -901,6 +904,7 @@ class Bot(PersonaRuntime):
                     sample_messages=config.memory.sample_messages,
                     max_input_chars=config.memory.max_input_chars,
                     max_output_tokens=config.memory.max_output_tokens,
+                    timeout=config.memory.timeout,
                 ),
                 generate=self._memory_generate,
             )
@@ -1411,6 +1415,7 @@ class Bot(PersonaRuntime):
                 json_mode=True,
                 max_tokens=self.config.memory.max_output_tokens,
                 attempts=1,
+                timeout=self.config.memory.timeout,
             )
         except LLMError:
             # Some OpenAI-compatible proxies reject response_format; the prompt
@@ -1421,6 +1426,7 @@ class Bot(PersonaRuntime):
                 conversation_id=conversation_id,
                 max_tokens=self.config.memory.max_output_tokens,
                 attempts=1,
+                timeout=self.config.memory.timeout,
             )
         return result.content
 

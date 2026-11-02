@@ -105,6 +105,7 @@ class MemoryArchiveSettings:
     sample_messages: int = 200
     max_input_chars: int = MAX_INPUT_CHARS
     max_output_tokens: int = 1600
+    timeout: float = 120.0
 
 
 def day_of(stamp: int | float) -> str:
@@ -145,6 +146,54 @@ def _supported(value: str, text: str) -> bool:
         return True
     probe = needle[:8]
     return len(probe) >= 4 and probe in haystack
+
+
+_QQ_PREFIXES = ("qq", "ｑｑ")
+
+
+def normalise_user_id(raw: Any) -> str:
+    """QQ numbers are digits; models sometimes copy the transcript's ``QQ`` prefix."""
+    text = str(raw or "").strip()
+    lowered = text.lower()
+    for prefix in _QQ_PREFIXES:
+        if lowered.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    text = text.strip().strip("[]()<>{}#:：,，、 ")
+    if text.isdigit():
+        return text
+    match = re.search(r"\d{5,}", text)
+    return match.group(0) if match else ""
+
+
+def _evidence_lines(evidence: str, transcript: str) -> list[str]:
+    """Lines of the transcript that literally contain the quoted evidence."""
+    needle = " ".join(str(evidence or "").split())
+    if len(needle) < 4:
+        return []
+    lines = [" ".join(line.split()) for line in str(transcript or "").splitlines()]
+    exact = [line for line in lines if needle in line]
+    if exact:
+        return exact
+    # A quote truncated by the model is still traceable through its prefix;
+    # an invented one has no such prefix anywhere in the record.
+    probe = needle[:12]
+    return [line for line in lines if probe in line]
+
+
+def _traceable(value: str, evidence: str, transcript: str, user_id: str = "") -> bool:
+    """Evidence must be quoted verbatim; the paraphrased value itself need not be.
+
+    ``user_id`` (when given) binds the quote to that speaker's lines so a fact
+    cannot be attributed to whoever else mentioned it.
+    """
+    lines = _evidence_lines(evidence, transcript)
+    if not lines:
+        # Older extractors send no evidence: fall back to matching the value.
+        return _supported(value, transcript)
+    if not user_id:
+        return True
+    return any(f"QQ{user_id} " in line for line in lines)
 
 
 def _clean_summary(value: Any, limit: int = MAX_DAY_SUMMARY) -> str:
@@ -196,9 +245,15 @@ class MemoryArchive:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        self._migrate()
         self._db.commit()
         self._generate = generate
         self._closed = False
+
+    def _migrate(self) -> None:
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(memory_items)")}
+        if "evidence" not in columns:
+            self._db.execute("ALTER TABLE memory_items ADD COLUMN evidence TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         with self._lock:
@@ -280,6 +335,7 @@ class MemoryArchive:
         day: str,
         result: dict[str, Any],
         *,
+        transcript: str = "",
         known_users: dict[str, str],
         message_count: int,
         session_id: str,
@@ -342,9 +398,10 @@ class MemoryArchive:
             for item in (result.get("user_facts") or [])[:20]:
                 if not isinstance(item, dict):
                     continue
-                user_id = str(item.get("user_id") or "").strip()
+                user_id = normalise_user_id(item.get("user_id"))
                 key = _clean_summary(item.get("key"), 60)
                 value = _clean_summary(item.get("value"), 400)
+                evidence = _clean_summary(item.get("evidence"), 300)
                 if not user_id or not key or not value:
                     continue
                 if not is_group and conversation_id.startswith("private:"):
@@ -353,7 +410,7 @@ class MemoryArchive:
                     not is_group and conversation_id.startswith("private:")
                 ):
                     continue
-                if not _supported(value, known_users.get(user_id, "")):
+                if not _traceable(value, evidence, transcript, user_id):
                     continue
                 visibility = "public" if is_group else "private"
                 self._write_item(
@@ -368,6 +425,7 @@ class MemoryArchive:
                     visibility=visibility,
                     occurred_at=now,
                     source_session=session_id,
+                    evidence=evidence,
                 )
             if is_group:
                 for item in (result.get("group_facts") or [])[:8]:
@@ -375,7 +433,8 @@ class MemoryArchive:
                         continue
                     key = _clean_summary(item.get("key"), 60)
                     value = _clean_summary(item.get("value"), 400)
-                    if key and value and _supported(value, " ".join(known_users.values())):
+                    evidence = _clean_summary(item.get("evidence"), 300)
+                    if key and value and _traceable(value, evidence, transcript):
                         self._write_item(
                             scope="group",
                             conversation_id=conversation_id,
@@ -388,6 +447,7 @@ class MemoryArchive:
                             visibility="public",
                             occurred_at=now,
                             source_session=session_id,
+                            evidence=evidence,
                         )
         return True
 
@@ -410,6 +470,7 @@ class MemoryArchive:
         visibility: str,
         occurred_at: int,
         source_session: str,
+        evidence: str = "",
     ) -> None:
         now = int(time.time())
         row = self._db.execute(
@@ -420,8 +481,8 @@ class MemoryArchive:
         if row is not None and str(row["value"]) == value:
             self._db.execute(
                 "UPDATE memory_items SET importance=?, occurred_at=?, "
-                "source_session=?, updated_at=? WHERE id=?",
-                (importance, occurred_at, source_session, now, row["id"]),
+                "source_session=?, evidence=?, updated_at=? WHERE id=?",
+                (importance, occurred_at, source_session, evidence, now, row["id"]),
             )
             self._fts_set(f"item:{row['id']}", f"{key}: {value}")
             return
@@ -436,12 +497,12 @@ class MemoryArchive:
             "INSERT INTO memory_items "
             "(id,scope,conversation_id,group_id,user_id,kind,key,value,importance,"
             "confidence,visibility,occurred_at,source_session,source_message_ids,"
-            "supersedes_id,invalid_at,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,1.0,?,?,?, '', ?,NULL,?,?)",
+            "evidence,supersedes_id,invalid_at,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,1.0,?,?,?, '', ?,?,NULL,?,?)",
             (
                 item_id, scope, conversation_id, group_id, user_id, kind, key,
                 value, importance, visibility, occurred_at, source_session,
-                row["id"] if row is not None else "", now, now,
+                evidence, row["id"] if row is not None else "", now, now,
             ),
         )
         self._fts_set(f"item:{item_id}", f"{key}: {value}")
@@ -494,7 +555,7 @@ class MemoryArchive:
             return False
         try:
             return self._store_extraction(
-                conversation_id, day, result,
+                conversation_id, day, result, transcript=transcript,
                 known_users=users,
                 message_count=count,
                 session_id=session_id,

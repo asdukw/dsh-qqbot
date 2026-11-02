@@ -86,6 +86,104 @@ class MemoryArchiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[1][1], '7')
         self.assertEqual(items[1][4], 'public')  # group facts are always public
 
+    async def _store(self, result: dict) -> None:
+        async def generate(_conversation: str, _prompt: str) -> str:
+            return json.dumps(result, ensure_ascii=False)
+
+        self.archive._generate = generate
+        now = int(time.time())
+        await self.archive.archive_window('group:1', now - 3600, now, session_id='facts')
+
+    def _facts(self) -> list[tuple[str, str, str, str]]:
+        with closing(sqlite3.connect(self.path)) as db:
+            return db.execute(
+                'SELECT user_id,key,value,evidence FROM memory_items ORDER BY key'
+            ).fetchall()
+
+    async def test_qq_prefixed_user_id_is_normalised(self) -> None:
+        """模型常把记录里的 ``QQ`` 前缀一起抄回来，落库前必须剥掉。"""
+        await self._store({
+            'summary': '聊了咖啡。',
+            'topics': ['咖啡'],
+            'user_facts': [{
+                'user_id': 'QQ7', 'key': '喜好', 'value': '喜欢手冲',
+                'evidence': '我最近喜欢手冲咖啡',
+            }],
+        })
+        self.assertEqual([(row[0], row[1]) for row in self._facts()], [('7', '喜好')])
+
+    async def test_paraphrased_value_kept_when_evidence_is_verbatim(self) -> None:
+        """事实允许改写，证据必须逐字——两者分开校验。"""
+        await self._store({
+            'summary': '聊了咖啡。',
+            'topics': ['咖啡'],
+            'user_facts': [{
+                'user_id': '7', 'key': '咖啡偏好', 'value': '偏爱手冲做法',
+                'evidence': '我最近喜欢手冲咖啡',
+            }],
+        })
+        rows = self._facts()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][2], '偏爱手冲做法')
+        self.assertEqual(rows[0][3], '我最近喜欢手冲咖啡')
+
+    async def test_evidence_from_another_speaker_is_rejected(self) -> None:
+        await self._store({
+            'summary': '聊了咖啡。',
+            'topics': ['咖啡'],
+            'user_facts': [{
+                'user_id': '7', 'key': '周末安排', 'value': '约了咖啡店',
+                'evidence': '周末去咖啡店吗',
+            }],
+        })
+        self.assertEqual(self._facts(), [])
+
+    async def test_missing_evidence_falls_back_to_the_value(self) -> None:
+        await self._store({
+            'summary': '聊了咖啡。',
+            'topics': ['咖啡'],
+            'user_facts': [
+                {'user_id': '7', 'key': '原话', 'value': '我最近喜欢手冲咖啡'},
+                {'user_id': '7', 'key': '编的', 'value': '喜欢冷萃咖啡'},
+            ],
+        })
+        self.assertEqual([row[1] for row in self._facts()], ['原话'])
+
+    async def test_group_fact_needs_verbatim_evidence(self) -> None:
+        await self._store({
+            'summary': '聊了咖啡。',
+            'topics': ['咖啡'],
+            'group_facts': [
+                {'key': '群主题', 'value': '咖啡', 'evidence': '周末去咖啡店吗'},
+                {'key': '编的', 'value': '咖啡因研究', 'evidence': '从没出现过的句子'},
+            ],
+        })
+        self.assertEqual([row[1] for row in self._facts()], ['群主题'])
+
+    def test_evidence_column_is_added_to_old_databases(self) -> None:
+        path = Path(self.tmp.name) / 'legacy.db'
+        legacy = """CREATE TABLE memory_items (
+            id TEXT PRIMARY KEY, scope TEXT NOT NULL,
+            conversation_id TEXT NOT NULL DEFAULT "", group_id TEXT NOT NULL DEFAULT "",
+            user_id TEXT NOT NULL DEFAULT "", kind TEXT NOT NULL DEFAULT "fact",
+            key TEXT NOT NULL, value TEXT NOT NULL, importance INTEGER NOT NULL DEFAULT 3,
+            confidence REAL NOT NULL DEFAULT 1.0, visibility TEXT NOT NULL DEFAULT "private",
+            occurred_at INTEGER NOT NULL, source_session TEXT NOT NULL DEFAULT "",
+            source_message_ids TEXT NOT NULL DEFAULT "[]", supersedes_id TEXT NOT NULL DEFAULT "",
+            invalid_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"""
+        with closing(sqlite3.connect(path)) as db:
+            db.execute(legacy.replace('""', "''").replace('"fact"', "'fact'")
+                       .replace('"private"', "'private'").replace('"[]"', "'[]'"))
+            db.commit()
+        archive = MemoryArchive(path, MemoryArchiveSettings())
+        try:
+            with closing(sqlite3.connect(path)) as db:
+                columns = {row[1] for row in db.execute('PRAGMA table_info(memory_items)')}
+        finally:
+            archive.close()
+        self.assertIn('evidence', columns)
+
+
     async def test_search_and_person_scope(self) -> None:
         now = int(time.time())
         await self.archive.archive_window('group:1', now - 3600, now, session_id='s1')
